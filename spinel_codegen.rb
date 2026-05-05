@@ -28706,25 +28706,41 @@ class Compiler
         k = k + 1
       end
     else
-      # RHS is a function call returning int_array
-      @needs_int_array = 1
+      # RHS is a function call returning a typed array. Dispatch by
+      # the RHS's static type — IntArray default, but PolyArray when
+      # the inner is heterogeneous (optcarrots `@io_addr,
+      # @bg_pattern_lut_fetched, _ = @attr_lut[i]` where attr_lut
+      # elements are 3-tuples of mixed types).
+      val_t_local = infer_type(val_id)
       @needs_gc = 1
       tmp = new_temp
-      emit("  sp_IntArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      if val_t_local == "poly_array"
+        @needs_rb_value = 1
+        emit("  sp_PolyArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      else
+        @needs_int_array = 1
+        emit("  sp_IntArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      end
       emit("  SP_GC_ROOT(" + tmp + ");")
       k = 0
       while k < targets.length
         tid = targets[k]
-        rhs = "sp_IntArray_get(" + tmp + ", " + k.to_s + ")"
+        if val_t_local == "poly_array"
+          rhs = "sp_PolyArray_get(" + tmp + ", " + k.to_s + ")"
+          val_t_for_target = "poly"
+        else
+          rhs = "sp_IntArray_get(" + tmp + ", " + k.to_s + ")"
+          val_t_for_target = "int"
+        end
         # Route ivar / local writes through emit_multi_write_target so
         # the box-when-slot-is-poly logic fires. Without boxing, an int
         # RHS into a sp_RbVal slot fails C compile (`@x, @y = arr` where
         # @y is poly because other writers store other types).
         if @nd_type[tid] == "LocalVariableTargetNode"
-          emit_multi_write_target(tid, rhs, "int")
+          emit_multi_write_target(tid, rhs, val_t_for_target)
         end
         if @nd_type[tid] == "InstanceVariableTargetNode"
-          emit_multi_write_target(tid, rhs, "int")
+          emit_multi_write_target(tid, rhs, val_t_for_target)
         end
         if @nd_type[tid] == "ConstantTargetNode"
           if find_const_idx(@nd_name[tid]) >= 0
@@ -31963,10 +31979,16 @@ class Compiler
       # the underlying pointer points at. Optcarrot's `@fetch[a] =
       # method(:peek_X)` lands here when @fetch was widened to poly
       # (rather than poly_array) by the heterogeneous IntArray + Method
-      # writes. Dispatch by cls_id, mirroring sp_PolyArray_set's
-      # interface for the POLY_ARRAY case and using element-typed
-      # setters for the homogeneous storage variants. Extract the
-      # appropriate payload from the boxed value via .v.p / .v.i.
+      # writes. Dispatch by cls_id at runtime.
+      #
+      # When the slot's runtime storage is IntArray but the value
+      # being stored is non-int (a pointer / poly with cls_id != 0),
+      # we'd lose the cls_id by storing as int. Widen the storage at
+      # runtime: allocate a fresh PolyArray, copy the existing int
+      # elements as boxed-int, then store the new value boxed. Update
+      # the slot to hold the new PolyArray. Requires knowing where
+      # the slot is — only fires when recv is an ivar / local / cvar
+      # / gvar that we can reassign in C.
       vbox = val
       vt = "int"
       if arg_ids.length >= 2
@@ -31977,9 +31999,45 @@ class Compiler
       end
       vbox_tmp = new_temp
       emit("  sp_RbVal " + vbox_tmp + " = " + vbox + ";")
-      emit("  if (" + rc + ".cls_id == SP_BUILTIN_POLY_ARRAY) sp_PolyArray_set((sp_PolyArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ");")
-      emit("  else if (" + rc + ".cls_id == SP_BUILTIN_PTR_ARRAY) sp_PtrArray_set((sp_PtrArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ".v.p);")
-      emit("  else if (" + rc + ".cls_id == SP_BUILTIN_INT_ARRAY) sp_IntArray_set((sp_IntArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ".v.i);")
+      # Determine the slot expression — what we'd assign to in order
+      # to replace the storage. Only ivar / local / cvar / gvar are
+      # supported; anything else falls back to no-widen (still
+      # correct for the homogeneous cases, just not heterogeneous).
+      slot_lhs = ""
+      if @nd_type[recv] == "InstanceVariableReadNode"
+        slot_lhs = self_arrow + sanitize_ivar(@nd_name[recv])
+      elsif @nd_type[recv] == "LocalVariableReadNode"
+        slot_lhs = fiber_var_ref(@nd_name[recv])
+      end
+      if slot_lhs != ""
+        @needs_gc = 1
+        @needs_rb_value = 1
+        cur = new_temp
+        new_arr = new_temp
+        old_int = new_temp
+        ii = new_temp
+        emit("  sp_RbVal " + cur + " = " + rc + ";")
+        # Widen path: if storage is IntArray but value can't fit int
+        # (i.e. value carries cls_id != 0 or tag != INT, meaning it's
+        # a typed pointer/box that loses info if cast to int).
+        emit("  if (" + cur + ".cls_id == SP_BUILTIN_INT_ARRAY && (" + vbox_tmp + ".tag != SP_TAG_INT || " + vbox_tmp + ".cls_id != 0)) {")
+        emit("    sp_IntArray *" + old_int + " = (sp_IntArray *)" + cur + ".v.p;")
+        emit("    sp_PolyArray *" + new_arr + " = sp_PolyArray_new();")
+        emit("    for (mrb_int " + ii + " = 0; " + ii + " < sp_IntArray_length(" + old_int + "); " + ii + "++) sp_PolyArray_push(" + new_arr + ", sp_box_int(sp_IntArray_get(" + old_int + ", " + ii + ")));")
+        emit("    sp_PolyArray_set(" + new_arr + ", " + idx + ", " + vbox_tmp + ");")
+        emit("    " + slot_lhs + " = sp_box_poly_array(" + new_arr + ");")
+        emit("  } else if (" + cur + ".cls_id == SP_BUILTIN_POLY_ARRAY) {")
+        emit("    sp_PolyArray_set((sp_PolyArray *)" + cur + ".v.p, " + idx + ", " + vbox_tmp + ");")
+        emit("  } else if (" + cur + ".cls_id == SP_BUILTIN_PTR_ARRAY) {")
+        emit("    sp_PtrArray_set((sp_PtrArray *)" + cur + ".v.p, " + idx + ", " + vbox_tmp + ".v.p);")
+        emit("  } else if (" + cur + ".cls_id == SP_BUILTIN_INT_ARRAY) {")
+        emit("    sp_IntArray_set((sp_IntArray *)" + cur + ".v.p, " + idx + ", " + vbox_tmp + ".v.i);")
+        emit("  }")
+      else
+        emit("  if (" + rc + ".cls_id == SP_BUILTIN_POLY_ARRAY) sp_PolyArray_set((sp_PolyArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ");")
+        emit("  else if (" + rc + ".cls_id == SP_BUILTIN_PTR_ARRAY) sp_PtrArray_set((sp_PtrArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ".v.p);")
+        emit("  else if (" + rc + ".cls_id == SP_BUILTIN_INT_ARRAY) sp_IntArray_set((sp_IntArray *)" + rc + ".v.p, " + idx + ", " + vbox_tmp + ".v.i);")
+      end
       return
     end
     if rt == "str_int_hash"
