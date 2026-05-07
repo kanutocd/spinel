@@ -252,6 +252,14 @@ class Compiler
     @current_lexical_scope = ""
     @current_method_return = ""
     @current_method_block_param = ""
+    # 1 when the wrapping C function being emitted has a `self`
+    # binding (instance method, constructor synthesis). 0 for
+    # class methods, module class methods, and top-level free
+    # functions. Drives the bare-return-with-obj_<C>-return shape
+    # in compile_return_stmt; without it a class method whose
+    # inferred return is obj_<C> emits `return self;` and gcc
+    # complains about an undeclared identifier.
+    @current_method_has_self = 0
     @in_main = 0
     @in_loop = 0
     @hoisted_strlen_var = ""
@@ -5284,6 +5292,13 @@ class Compiler
 
   def c_default_val(t)
     if is_nullable_type(t) == 1
+      # Value-type classes (`obj_<C>?` where C is a value type) lower
+      # to a struct, not a pointer — `NULL` is an invalid initializer.
+      # Fall through to the value-type branch below by stripping `?`.
+      bt_n = base_type(t)
+      if is_value_type_obj(bt_n) == 1
+        return "{0}"
+      end
       return "NULL"
     end
     # NOTE: nullable returns above, so rest handles base types only
@@ -5343,8 +5358,9 @@ class Compiler
 
   def c_return_default(t)
     # Like c_default_val but for return statements (compound literal for value types)
-    if is_value_type_obj(t) == 1
-      return "(" + c_type(t) + "){0}"
+    bt = base_type(t)
+    if is_value_type_obj(bt) == 1
+      return "(" + c_type(bt) + "){0}"
     end
     c_default_val(t)
   end
@@ -17478,6 +17494,8 @@ class Compiler
         # Value-type constructors return a struct, leave at "" so the
         # bare-return path falls through to its existing 0 default.
         saved_method_return = @current_method_return
+        saved_has_self = @current_method_has_self
+        @current_method_has_self = 1
         if @cls_is_value_type[ci] == 1
           @current_method_return = ""
         else
@@ -17702,6 +17720,7 @@ class Compiler
         pop_scope
         @current_class_idx = -1
         @current_method_return = saved_method_return
+        @current_method_has_self = saved_has_self
       end
     else
       # No own initialize - call parent's if it exists
@@ -17755,6 +17774,8 @@ class Compiler
         # lowers to the void shape (`return;`) instead of leaking
         # whatever was set during the prior _new emission.
         saved_method_return = @current_method_return
+        saved_has_self2 = @current_method_has_self
+        @current_method_has_self = 1
         @current_method_return = "void"
         @current_class_idx = ci
         all_params = @cls_meth_params[ci].split("|")
@@ -17794,6 +17815,7 @@ class Compiler
         pop_scope
         @current_class_idx = -1
         @current_method_return = saved_method_return
+        @current_method_has_self = saved_has_self2
       end
       emit_raw("}")
       emit_raw("")
@@ -17807,6 +17829,7 @@ class Compiler
     @current_method_name = mname
     @current_method_return = rt
     @current_method_block_param = find_block_param_name(pnames, ptypes)
+    @current_method_has_self = 1
     @indent = 1
     @in_gc_scope = 0
 
@@ -17900,6 +17923,7 @@ class Compiler
     @current_method_name = mname
     @current_method_return = rt
     @current_method_block_param = find_block_param_name(pnames, ptypes)
+    @current_method_has_self = 0
     @indent = 1
     @in_gc_scope = 0
 
@@ -18016,6 +18040,7 @@ class Compiler
     mfullname = @meth_names[mi]
     @current_method_name = mfullname
     @current_method_return = @meth_return_types[mi]
+    @current_method_has_self = 0
     @indent = 1
     @in_main = 0
     @in_gc_scope = 0
@@ -30079,7 +30104,21 @@ class Compiler
     if @current_method_return == "void"
       emit("  return;")
     elsif is_obj_type(@current_method_return) == 1
-      emit("  return self;")
+      # `self` is in C scope only when the wrapping function has a
+      # self binding — instance methods and constructor synthesis.
+      # Class methods, module class methods, and top-level free
+      # functions don't have self. Issue #314 follow-up: a class
+      # method whose return type was inferred as `obj_<C>` (because
+      # every explicit return path returned that type) lowered a
+      # bare `return` to `return self;` — undeclared identifier C
+      # error. Companion to b9d6303's bare-return-in-initialize fix.
+      # c_return_default handles value-type classes (returns
+      # `(sp_<C>){0}` for struct returns, NULL for pointer returns).
+      if @current_method_has_self == 1
+        emit("  return self;")
+      else
+        emit("  return " + c_return_default(@current_method_return) + ";")
+      end
     elsif is_nullable_pointer_type(@current_method_return) == 1
       emit("  return NULL;")
     else
