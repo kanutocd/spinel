@@ -26764,7 +26764,21 @@ class Compiler
         pk = 0
         while pk < arm_ptypes.length
           if pk < arg_compiled.length
-            arm_arg_strs = arm_arg_strs + ", " + arg_compiled[pk]
+            # Issue #351: when this arm's param widened to `poly`
+            # (matz/spinel#341 cross-call-site union) but the call
+            # site supplied a concrete value (string / mrb_int /
+            # symbol / ...), box it via the appropriate sp_box_*
+            # helper. Without this, gcc errors `incompatible type
+            # for argument` — `const char *` / `mrb_int` into a
+            # `sp_RbVal` slot. Inverse direction (poly arg into a
+            # concrete-typed param) was already covered downstream;
+            # this only handles the boxing direction.
+            arg_v = arg_compiled[pk]
+            arm_pt_base = base_type(arm_ptypes[pk])
+            if arm_pt_base == "poly" && pk < arg_types.length && arg_types[pk] != "poly" && arg_types[pk] != ""
+              arg_v = box_value_to_poly(arg_types[pk], arg_v)
+            end
+            arm_arg_strs = arm_arg_strs + ", " + arg_v
           else
             pad = "0"
             pt_base = base_type(arm_ptypes[pk])
