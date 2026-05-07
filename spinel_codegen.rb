@@ -1824,6 +1824,30 @@ class Compiler
     -1
   end
 
+  # Walk @cls_parents starting from `child_idx` and return 1 if we
+  # ever land on `ancestor_idx`. Used by `is_a?(<Klass>)` on poly
+  # receivers to enumerate descendant cls_ids — `recv.is_a?(C)` is
+  # true when recv's class is C or any subclass of C, so we OR
+  # together every cls_id whose parent chain reaches C.
+  def cls_is_descendant(child_idx, ancestor_idx)
+    ck = child_idx
+    while ck >= 0
+      pname = @cls_parents[ck]
+      if pname == ""
+        return 0
+      end
+      pi = find_class_idx(pname)
+      if pi < 0
+        return 0
+      end
+      if pi == ancestor_idx
+        return 1
+      end
+      ck = pi
+    end
+    0
+  end
+
   def find_method_idx(name)
     i = 0
     while i < @meth_names.length
@@ -26531,6 +26555,66 @@ class Compiler
     common == "" ? "int" : common
   end
 
+  # Runtime tag-check for `<poly>.is_a?(<klass>)` / `kind_of?` /
+  # `instance_of?`. Returns a C boolean expression for the named
+  # built-in class (Integer, String, Float, etc.), including
+  # mixin-style names that match every value (Object, Kernel,
+  # BasicObject, Comparable). Returns "" when the name has no
+  # SP_TAG_* mapping (caller falls back to user-class dispatch).
+  def poly_is_a_tag_check(klass, recv_tmp, is_instance_of)
+    if klass == "Integer"
+      return "(" + recv_tmp + ".tag == SP_TAG_INT)"
+    end
+    if klass == "String"
+      return "(" + recv_tmp + ".tag == SP_TAG_STR)"
+    end
+    if klass == "Float"
+      return "(" + recv_tmp + ".tag == SP_TAG_FLT)"
+    end
+    if klass == "Symbol"
+      return "(" + recv_tmp + ".tag == SP_TAG_SYM)"
+    end
+    if klass == "NilClass"
+      return "(" + recv_tmp + ".tag == SP_TAG_NIL)"
+    end
+    if klass == "TrueClass"
+      return "(" + recv_tmp + ".tag == SP_TAG_BOOL && " + recv_tmp + ".v.b)"
+    end
+    if klass == "FalseClass"
+      return "(" + recv_tmp + ".tag == SP_TAG_BOOL && !" + recv_tmp + ".v.b)"
+    end
+    if klass == "Numeric"
+      return "(" + recv_tmp + ".tag == SP_TAG_INT || " + recv_tmp + ".tag == SP_TAG_FLT)"
+    end
+    if klass == "Comparable"
+      if is_instance_of == 1
+        return "0"
+      end
+      return "(" + recv_tmp + ".tag == SP_TAG_INT || " + recv_tmp + ".tag == SP_TAG_FLT || " + recv_tmp + ".tag == SP_TAG_STR || " + recv_tmp + ".tag == SP_TAG_SYM)"
+    end
+    if klass == "Object" || klass == "Kernel" || klass == "BasicObject"
+      # Every value is_a? Object in Ruby. instance_of?(Object) is FALSE
+      # for primitives (their class is Integer/String/etc., not Object).
+      if is_instance_of == 1
+        return "0"
+      end
+      return "1"
+    end
+    if klass == "Array"
+      return "(" + recv_tmp + ".tag == SP_TAG_OBJ && (" + recv_tmp + ".cls_id == SP_BUILTIN_INT_ARRAY || " + recv_tmp + ".cls_id == SP_BUILTIN_STR_ARRAY || " + recv_tmp + ".cls_id == SP_BUILTIN_FLT_ARRAY || " + recv_tmp + ".cls_id == SP_BUILTIN_SYM_ARRAY || " + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY || " + recv_tmp + ".cls_id == SP_BUILTIN_POLY_ARRAY))"
+    end
+    if klass == "Hash"
+      return "(" + recv_tmp + ".tag == SP_TAG_OBJ && (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_INT_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_STR_STR_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_INT_STR_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_SYM_INT_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_SYM_STR_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_STR_POLY_HASH || " + recv_tmp + ".cls_id == SP_BUILTIN_SYM_POLY_HASH))"
+    end
+    if klass == "Range"
+      return "(" + recv_tmp + ".tag == SP_TAG_OBJ && " + recv_tmp + ".cls_id == SP_BUILTIN_RANGE)"
+    end
+    if klass == "Proc"
+      return "(" + recv_tmp + ".tag == SP_TAG_OBJ && " + recv_tmp + ".cls_id == SP_BUILTIN_PROC)"
+    end
+    ""
+  end
+
   def compile_poly_method_call(nid, rc, mname)
     @needs_rb_value = 1
     if mname == "nil?"
@@ -26553,6 +26637,51 @@ class Compiler
       emit("  sp_RbVal " + recv_tmp + " = " + rc + ";")
       emit("  mrb_int " + tmp + " = (" + recv_tmp + ".tag == SP_TAG_INT) ? " + recv_tmp + ".v.i : 0;")
       return tmp
+    end
+    # `<poly>.is_a?(<Class>)` / `kind_of?` / `instance_of?` — decide
+    # at runtime by inspecting the SP_TAG_* tag (and cls_id for
+    # SP_TAG_OBJ). Without this branch the call falls through to the
+    # SP_TAG_OBJ dispatch below, which has no `is_a?` method on any
+    # user class — every primitive arm returns the default and
+    # `is_a?(Integer)` on a poly slot is always falsy. Common in
+    # dispatch helpers like `(addr.is_a?(Integer) ? [addr] : addr).each`.
+    if mname == "is_a?" || mname == "kind_of?" || mname == "instance_of?"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        a = get_args(args_id)
+        if a.length > 0
+          arg_name = @nd_name[a[0]]
+          recv_tmp = new_temp
+          emit("  sp_RbVal " + recv_tmp + " = " + rc + ";")
+          io = mname == "instance_of?" ? 1 : 0
+          tag_check = poly_is_a_tag_check(arg_name, recv_tmp, io)
+          if tag_check != ""
+            return tag_check
+          end
+          # User-defined class: match by cls_id. instance_of? requires
+          # exact class; is_a?/kind_of? include subclasses, so
+          # enumerate user classes whose ancestor chain reaches
+          # arg_name (cls_is_descendant) and OR them in.
+          ci = find_class_idx(arg_name)
+          if ci >= 0
+            if mname == "instance_of?"
+              return "(" + recv_tmp + ".tag == SP_TAG_OBJ && " + recv_tmp + ".cls_id == " + ci.to_s + ")"
+            end
+            check = "(" + recv_tmp + ".tag == SP_TAG_OBJ && (" + recv_tmp + ".cls_id == " + ci.to_s
+            cn = 0
+            while cn < @cls_names.length
+              if cn != ci && cls_is_descendant(cn, ci) == 1
+                check = check + " || " + recv_tmp + ".cls_id == " + cn.to_s
+              end
+              cn = cn + 1
+            end
+            check = check + "))"
+            return check
+          end
+          return "0"
+        end
+      end
+      return "0"
     end
     # For object method calls, dispatch based on cls_id. Two namespaces
     # of cls_id share SP_TAG_OBJ:
