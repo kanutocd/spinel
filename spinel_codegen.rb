@@ -30938,10 +30938,15 @@ class Compiler
       end
     else
       # RHS is a function call returning a typed array. Dispatch by
-      # the RHS's static type — IntArray default, but PolyArray when
-      # the inner is heterogeneous (optcarrots `@io_addr,
+      # the RHS's static type — IntArray default, PolyArray when the
+      # inner is heterogeneous (optcarrots `@io_addr,
       # @bg_pattern_lut_fetched, _ = @attr_lut[i]` where attr_lut
-      # elements are 3-tuples of mixed types).
+      # elements are 3-tuples of mixed types), and the matching typed-
+      # array variants otherwise. Without per-type dispatch a method
+      # returning e.g. `[Mat.new, Mat.new]` (typed obj_Mat_ptr_array)
+      # destructured via `a, b = self.two_mats` got compiled as
+      # `sp_IntArray *_t = sp_N_two_mats(...); sp_IntArray_get(_t, i)`,
+      # mismatching the actual sp_PtrArray * return.
       val_t_local = infer_type(val_id)
       @needs_gc = 1
       tmp = new_temp
@@ -30958,6 +30963,16 @@ class Compiler
         rb_tmp_mw = new_temp
         emit("  sp_RbVal " + rb_tmp_mw + " = " + compile_expr(val_id) + ";")
         emit("  sp_PolyArray *" + tmp + " = (" + rb_tmp_mw + ".cls_id == SP_BUILTIN_POLY_ARRAY) ? (sp_PolyArray *)" + rb_tmp_mw + ".v.p : NULL;")
+      elsif val_t_local == "str_array"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      elsif val_t_local == "float_array"
+        @needs_float_array = 1
+        emit("  sp_FloatArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      elsif val_t_local == "sym_array"
+        emit("  sp_IntArray *" + tmp + " = " + compile_expr(val_id) + ";")
+      elsif is_ptr_array_type(val_t_local) == 1
+        emit("  sp_PtrArray *" + tmp + " = " + compile_expr(val_id) + ";")
       else
         @needs_int_array = 1
         emit("  sp_IntArray *" + tmp + " = " + compile_expr(val_id) + ";")
@@ -30969,6 +30984,19 @@ class Compiler
         if val_t_local == "poly_array" || val_t_local == "poly"
           rhs = "sp_PolyArray_get(" + tmp + ", " + k.to_s + ")"
           val_t_for_target = "poly"
+        elsif val_t_local == "str_array"
+          rhs = "sp_StrArray_get(" + tmp + ", " + k.to_s + ")"
+          val_t_for_target = "string"
+        elsif val_t_local == "float_array"
+          rhs = "sp_FloatArray_get(" + tmp + ", " + k.to_s + ")"
+          val_t_for_target = "float"
+        elsif val_t_local == "sym_array"
+          rhs = "((sp_sym)sp_IntArray_get(" + tmp + ", " + k.to_s + "))"
+          val_t_for_target = "symbol"
+        elsif is_ptr_array_type(val_t_local) == 1
+          elem_t = ptr_array_elem_type(val_t_local)
+          rhs = "((" + c_type(elem_t) + ")sp_PtrArray_get(" + tmp + ", " + k.to_s + "))"
+          val_t_for_target = elem_t
         else
           rhs = "sp_IntArray_get(" + tmp + ", " + k.to_s + ")"
           val_t_for_target = "int"
