@@ -22696,7 +22696,7 @@ class Compiler
         end
       end
       if lt == "int"
-        return "((mrb_int)pow((double)" + compile_expr(recv) + ", (double)" + compile_arg0(nid) + "))"
+        return "((mrb_int)pow((double)" + compile_expr(recv) + ", (double)" + compile_arg0_as_int(nid) + "))"
       end
       return "pow(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
     end
@@ -22767,7 +22767,7 @@ class Compiler
         emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + arg + ", " + itmp + "));")
         return tmp
       end
-      return "(" + compile_expr(recv) + " + " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " + " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "-"
       lt = infer_type(recv)
@@ -22796,7 +22796,7 @@ class Compiler
       if r != ""
         return r
       end
-      return "(" + compile_expr(recv) + " - " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " - " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "*"
       lt = infer_type(recv)
@@ -22823,7 +22823,7 @@ class Compiler
         emit("  { mrb_int _mi; mrb_int _sl = sp_" + pfx + "_length(" + src + "); for (_mi = 0; _mi < " + cnt + "; _mi++) { mrb_int _mj; for (_mj = 0; _mj < _sl; _mj++) sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + src + ", _mj)); } }")
         return tmp
       end
-      return "(" + compile_expr(recv) + " * " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " * " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "/"
       lt = infer_type(recv)
@@ -22845,7 +22845,7 @@ class Compiler
           end
         end
       end
-      return "sp_idiv(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+      return "sp_idiv(" + compile_expr(recv) + ", " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "%"
       lt = infer_type(recv)
@@ -22925,7 +22925,7 @@ class Compiler
           return "sp_sprintf(" + fmt_c + ", (long long)" + compile_expr(arg0) + ")"
         end
       end
-      return "sp_imod(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+      return "sp_imod(" + compile_expr(recv) + ", " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "<"
       lt = infer_type(recv)
@@ -23103,14 +23103,14 @@ class Compiler
         @needs_rb_value = 1
         return "sp_poly_shl(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
       end
-      return "(" + compile_expr(recv) + " << " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " << " + compile_arg0_as_int(nid) + ")"
     end
     if mname == ">>"
       if infer_type(recv) == "poly"
         @needs_rb_value = 1
         return "sp_poly_shr(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
       end
-      return "(" + compile_expr(recv) + " >> " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " >> " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "&"
       lt = infer_type(recv)
@@ -23122,7 +23122,7 @@ class Compiler
       if r != ""
         return r
       end
-      return "(" + compile_expr(recv) + " & " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " & " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "|"
       lt = infer_type(recv)
@@ -23134,14 +23134,14 @@ class Compiler
       if r != ""
         return r
       end
-      return "(" + compile_expr(recv) + " | " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " | " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "^"
       if infer_type(recv) == "poly"
         @needs_rb_value = 1
         return "sp_poly_bxor(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
       end
-      return "(" + compile_expr(recv) + " ^ " + compile_arg0(nid) + ")"
+      return "(" + compile_expr(recv) + " ^ " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "~"
       return "(~" + compile_expr(recv) + ")"
@@ -29019,9 +29019,11 @@ class Compiler
         # (matches `to_i` semantics for poly).
         if rhs_t == "poly" && (vt == "int" || vt == "bool")
           val = "(" + val + ").v.i"
+          rhs_t = vt
         end
         if rhs_t == "poly" && vt == "float"
           val = "(" + val + ").v.f"
+          rhs_t = vt
         end
         emit("  " + vref + " = " + val + ";")
       end
