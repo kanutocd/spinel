@@ -302,6 +302,19 @@ class Compiler
     @needs_sym_str_hash = 0
     @needs_sym_intern = 0
     @needs_setjmp = 0
+    # Stack of (class_var, msg_var) pairs naming the snapshot locals
+    # emitted at the top of each rescue body. A bare `raise` inside a
+    # rescue body re-raises with the snapshotted class+message rather
+    # than fabricating a fresh RuntimeError. Empty outside any rescue.
+    @rescue_cls_stack = "".split(",")
+    @rescue_msg_stack = "".split(",")
+    @rescue_depth = 0
+    # Exception variable bindings: parallel stacks of (var_name, cls_var).
+    # A `rescue => e` binds `e` to the message string and registers it
+    # here so that `e.message`, `e.class`, `e.to_s`, and `e.inspect`
+    # dispatch correctly. Pushed at rescue body entry, popped at exit.
+    @exc_var_names = "".split(",")
+    @exc_var_cls_vars = "".split(",")
     @needs_mutable_str = 0
     @needs_rb_value = 0
     @needs_regexp = 0
@@ -1268,6 +1281,33 @@ class Compiler
     @scope_names.push(name)
     @scope_types.push(vtype)
     0
+  end
+
+  # Returns the snapshot class-name C variable for an exception
+  # variable currently bound by an enclosing `rescue => name`, or
+  # empty string if `name` is not an active exception binding.
+  def find_exc_var_cls(name)
+    i = @exc_var_names.length - 1
+    while i >= 0
+      if @exc_var_names[i] == name
+        return @exc_var_cls_vars[i]
+      end
+      i = i - 1
+    end
+    ""
+  end
+
+  # Emit a bare `raise` (no message arg). Inside a rescue body the
+  # snapshotted class+message is re-raised; outside any rescue it
+  # falls back to a fresh RuntimeError, matching CRuby.
+  def emit_bare_raise
+    if @rescue_cls_stack.length > 0
+      rcls = @rescue_cls_stack.last
+      rmsg = @rescue_msg_stack.last
+      emit("  sp_raise_cls(" + rcls + ", " + rmsg + ");")
+    else
+      emit("  sp_raise(\"RuntimeError\");")
+    end
   end
 
   def find_var_type(name)
@@ -2705,6 +2745,20 @@ class Compiler
   def infer_call_type(nid)
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
+
+    # Methods on a `rescue => e` bound exception variable. The variable
+    # itself is string-typed but .class / .message / .to_s / .inspect /
+    # .full_message return strings; .backtrace returns nil for now.
+    if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+      if find_exc_var_cls(@nd_name[recv]) != ""
+        if mname == "message" || mname == "to_s" || mname == "class" || mname == "inspect" || mname == "full_message"
+          return "string"
+        end
+        if mname == "backtrace"
+          return "nil"
+        end
+      end
+    end
 
     # `recv.__sp_ieval_<N>(...)`: the rewritten form of an
     # `recv.instance_eval { ... }` call. v1 only fired on top-level call
@@ -21278,6 +21332,35 @@ class Compiler
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
+    # Exception variable bound by `rescue => e`: spinel binds `e` to
+    # the message string but tracks it as an exception in
+    # @exc_var_names so .class / .message / .to_s / .inspect dispatch
+    # correctly. The variable's static type is still "string", so any
+    # other method call falls through to string method dispatch — this
+    # preserves backward compatibility for the common `puts e` shape.
+    if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+      exc_cls = find_exc_var_cls(@nd_name[recv])
+      if exc_cls != ""
+        recv_name = @nd_name[recv]
+        if mname == "message" || mname == "to_s"
+          return "lv_" + recv_name
+        end
+        if mname == "class"
+          return exc_cls
+        end
+        if mname == "inspect"
+          return "sp_sprintf(\"#<%s: %s>\", " + exc_cls + ", lv_" + recv_name + ")"
+        end
+        if mname == "backtrace"
+          # Spinel doesn't track per-exception backtraces; return nil.
+          return "0"
+        end
+        if mname == "full_message"
+          return "sp_sprintf(\"%s: %s\", " + exc_cls + ", lv_" + recv_name + ")"
+        end
+      end
+    end
+
     # Issue #126: `Module.accessor.<method>` where the slot was
     # resolved by `resolve_module_singleton_accessors`. With a single
     # constant in the resolved set, inline the call directly. With
@@ -22121,7 +22204,7 @@ class Compiler
           emit("  sp_raise(" + compile_expr(arg_ids[0]) + ");")
         end
       else
-        emit("  sp_raise(\"RuntimeError\");")
+        emit_bare_raise
       end
       return "0"
     end
@@ -31397,11 +31480,11 @@ class Compiler
                 emit("  sp_raise(" + compile_expr(arg_ids[0]) + ");")
               end
             else
-              emit("  sp_raise(\"RuntimeError\");")
+              emit_bare_raise
             end
           end
         else
-          emit("  sp_raise(\"RuntimeError\");")
+          emit_bare_raise
         end
         return 1
       end
@@ -35867,6 +35950,19 @@ class Compiler
     # Check for exception type matching
     exc_types = parse_id_list(@nd_exceptions[rc])
     ref = @nd_reference[rc]
+    # Snapshot the in-flight exception BEFORE the type-check `if` so
+    # that the else-branch (re-raise / propagation) can also reference
+    # the snapshot. Bare `raise` inside this body re-raises with the
+    # original class+message even if the body itself triggers (and
+    # catches) a nested raise that would otherwise clobber
+    # sp_last_exc_cls / sp_exc_msg[sp_exc_top].
+    @rescue_depth = @rescue_depth + 1
+    saved_cls = "_rescue_cls_" + @rescue_depth.to_s
+    saved_msg = "_rescue_msg_" + @rescue_depth.to_s
+    emit("  const char *" + saved_cls + " = (const char *)sp_last_exc_cls;")
+    emit("  const char *" + saved_msg + " = sp_exc_msg[sp_exc_top];")
+    @rescue_cls_stack.push(saved_cls)
+    @rescue_msg_stack.push(saved_msg)
     has_type_check = 0
     if exc_types.length > 0
       has_type_check = 1
@@ -35883,11 +35979,21 @@ class Compiler
       emit("  if (" + cond + ") {")
       @indent = @indent + 1
     end
+    bound_rname = ""
     if ref >= 0
-      rname = @nd_name[ref]
-      emit("  lv_" + rname + " = sp_exc_msg[sp_exc_top];")
+      bound_rname = @nd_name[ref]
+      emit("  lv_" + bound_rname + " = " + saved_msg + ";")
+      @exc_var_names.push(bound_rname)
+      @exc_var_cls_vars.push(saved_cls)
     end
     compile_rescue_body(@nd_body[rc], has_retry)
+    if bound_rname != ""
+      @exc_var_names.pop
+      @exc_var_cls_vars.pop
+    end
+    @rescue_cls_stack.pop
+    @rescue_msg_stack.pop
+    @rescue_depth = @rescue_depth - 1
     if has_type_check == 1
       @indent = @indent - 1
       # Check for subsequent rescue
@@ -35897,6 +36003,13 @@ class Compiler
         @indent = @indent + 1
         compile_rescue_chain(sub, has_retry)
         @indent = @indent - 1
+      else
+        # No subsequent clause and the type check missed: re-raise
+        # using the snapshotted class+message so an enclosing handler
+        # can match it (or the program terminates with the original
+        # diagnostic). Without this the exception was silently dropped.
+        emit("  } else {")
+        emit("    sp_raise_cls(" + saved_cls + ", " + saved_msg + ");")
       end
       emit("  }")
     end
