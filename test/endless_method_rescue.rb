@@ -13,11 +13,11 @@ puts parse_int("-7")
 
 # Explicit-raise rescue trigger. Pre-fix the test was `half(n) = n / 2`,
 # which never raises (0/2 == 0) and so never exercised the rescue path.
-# Using raise() rather than `a / b` because Spinel's int-div on b==0 is
-# C undefined behaviour (SIGFPE on x86) — outside the longjmp net the
-# rescue keyword unwinds. The raise lives inside a helper so the endless
-# body is a single call expression — keeps codegen happy and exercises
-# the cross-frame rescue path.
+# Uses an explicit raise() so the rescue trigger is independent of the
+# integer-division-by-zero machinery (covered separately in
+# test/integer_div_by_zero.rb). The raise lives inside a helper so the
+# endless body is a single call expression — keeps codegen happy and
+# exercises the cross-frame rescue path.
 def assert_pos(n)
   n < 0 ? raise("negative") : n
 end

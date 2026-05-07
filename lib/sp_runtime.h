@@ -64,12 +64,21 @@ static const char *sp_sym_to_s(sp_sym id);
 #define FALSE false
 #endif
 
+/* sp_raise_cls forward decl — defined later in this header (line ~1017).
+   Used by the integer-division helpers below to match CRuby semantics:
+   `a / 0`, `a % 0`, `a.divmod(0)`, `a.ceildiv(0)`, and `a.pow(e, 0)` all
+   raise ZeroDivisionError instead of triggering C undefined behaviour
+   (SIGFPE on x86) or silently returning 0. */
+static void sp_raise_cls(const char *cls, const char *msg);
+
 static inline mrb_int sp_idiv(mrb_int a, mrb_int b) {
+  if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   mrb_int q = a / b; mrb_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) q--;
   return q;
 }
 static inline mrb_int sp_imod(mrb_int a, mrb_int b) {
+  if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   mrb_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) r += b;
   return r;
@@ -77,9 +86,8 @@ static inline mrb_int sp_imod(mrb_int a, mrb_int b) {
 
 static mrb_int sp_gcd(mrb_int a,mrb_int b){if(a<0)a=-a;if(b<0)b=-b;while(b){mrb_int t=b;b=a%b;a=t;}return a;}
 static mrb_int sp_lcm(mrb_int a,mrb_int b){if(a==0||b==0)return 0;mrb_int g=sp_gcd(a,b);if(a<0)a=-a;if(b<0)b=-b;return (a/g)*b;}
-/* CRuby raises ZeroDivisionError on mod==0; we return 0 to avoid SIGFPE rather than crashing. */
-static mrb_int sp_powmod(mrb_int base,mrb_int exp,mrb_int mod){if(mod==0)return 0;mrb_int r=1;mrb_int m=mod<0?-mod:mod;if(m==1){r=0;}else{base=base%m;if(base<0)base+=m;while(exp>0){if(exp%2==1)r=r*base%m;exp=exp/2;base=base*base%m;}}if(mod<0&&r>0)r-=m;return r;}
-static mrb_int sp_ceildiv(mrb_int a,mrb_int b){if(b==0)return 0;if(b==-1)return -a;mrb_int q=a/b;if(a%b!=0&&((a^b)>=0))q++;return q;}
+static mrb_int sp_powmod(mrb_int base,mrb_int exp,mrb_int mod){if(mod==0)sp_raise_cls("ZeroDivisionError","divided by 0");mrb_int r=1;mrb_int m=mod<0?-mod:mod;if(m==1){r=0;}else{base=base%m;if(base<0)base+=m;while(exp>0){if(exp%2==1)r=r*base%m;exp=exp/2;base=base*base%m;}}if(mod<0&&r>0)r-=m;return r;}
+static mrb_int sp_ceildiv(mrb_int a,mrb_int b){if(b==0)sp_raise_cls("ZeroDivisionError","divided by 0");if(b==-1)return -a;mrb_int q=a/b;if(a%b!=0&&((a^b)>=0))q++;return q;}
 static mrb_int sp_int_clamp(mrb_int v,mrb_int lo,mrb_int hi){return v<lo?lo:v>hi?hi:v;}
 /* Integer square root via Newton's method — exact for the full mrb_int
    range (no double-precision rounding loss for n > 2^53). CRuby raises
@@ -1016,6 +1024,12 @@ static const char *sp_exc_cls[SP_EXC_STACK_MAX];
 static volatile const char *sp_last_exc_cls = "";
 static void sp_raise_cls(const char *cls, const char *msg) { if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
+
+/* Cross-TU bridge for sp_bigint.c (compiled as a separate translation
+   unit; can't see static helpers in this header). Defined non-static
+   so sp_bigint.c's mrb_raise macro can dispatch into spinel's
+   longjmp-based rescue net rather than fprintf+exit. */
+void sp_bigint_raise_zerodiv(const char *msg) { sp_raise_cls("ZeroDivisionError", msg); }
 static mrb_bool sp_exc_is_a(const char *cls, const char *target) { return strcmp(cls, target) == 0; }
 
 #define SP_CATCH_STACK_MAX 64

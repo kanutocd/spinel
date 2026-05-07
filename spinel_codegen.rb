@@ -22573,7 +22573,11 @@ class Compiler
         at = infer_type(arg_ids[0])
         val = compile_expr(arg_ids[0])
         if at == "bigint"
-          return val
+          # Cast away volatile (locals in setjmp-bearing functions are
+          # emitted volatile) so passing to bigint runtime functions —
+          # which take plain `sp_Bigint *` — doesn't warn. Pre-existing
+          # latent issue triggered by bigint inside begin/rescue.
+          return "(sp_Bigint *)" + val
         end
         return "sp_bigint_new_int(" + val + ")"
       end
@@ -22635,7 +22639,8 @@ class Compiler
     end
     if lt == "bigint"
       rc_raw = compile_expr(recv)
-      rc = infer_type(recv) == "bigint" ? rc_raw : "sp_bigint_new_int(" + rc_raw + ")"
+      # Cast away volatile from bigint locals (see compile_bigint_arg).
+      rc = infer_type(recv) == "bigint" ? "(sp_Bigint *)" + rc_raw : "sp_bigint_new_int(" + rc_raw + ")"
       arg = compile_bigint_arg(nid)
       if mname == "+"
         return "sp_bigint_add(" + rc + ", " + arg + ")"
@@ -24171,7 +24176,7 @@ class Compiler
       arg = compile_arg0(nid)
       tmp = new_temp
       emit("  " + name + " *" + tmp + " = (" + name + " *)sp_gc_alloc(sizeof(" + name + "), NULL, " + tuple_scan_name(tt) + ");")
-      emit("  " + tmp + "->_0 = " + rc + " / " + arg + ";")
+      emit("  " + tmp + "->_0 = sp_idiv(" + rc + ", " + arg + ");")
       emit("  " + tmp + "->_1 = sp_imod(" + rc + ", " + arg + ");")
       return tmp
     end
@@ -28727,7 +28732,7 @@ class Compiler
         emit("  " + cname + " *= " + val + ";")
       end
       if op == "/"
-        emit("  " + cname + " /= " + val + ";")
+        emit("  " + cname + " = sp_idiv(" + cname + ", " + val + ");")
       end
       if op == "%"
         emit("  " + cname + " = sp_imod(" + cname + ", " + val + ");")
@@ -29026,18 +29031,20 @@ class Compiler
       end
       if vt == "bigint"
         at = infer_type(@nd_expression[nid])
-        barg = at == "bigint" ? val : "sp_bigint_new_int(" + val + ")"
+        # Cast away volatile from bigint locals (see compile_bigint_arg).
+        barg = at == "bigint" ? "(sp_Bigint *)" + val : "sp_bigint_new_int(" + val + ")"
+        vref_b = "(sp_Bigint *)" + vref
         if op == "+"
-          emit("  " + vref + " = sp_bigint_add(" + vref + ", " + barg + ");")
+          emit("  " + vref + " = sp_bigint_add(" + vref_b + ", " + barg + ");")
         end
         if op == "-"
-          emit("  " + vref + " = sp_bigint_sub(" + vref + ", " + barg + ");")
+          emit("  " + vref + " = sp_bigint_sub(" + vref_b + ", " + barg + ");")
         end
         if op == "*"
-          emit("  " + vref + " = sp_bigint_mul(" + vref + ", " + barg + ");")
+          emit("  " + vref + " = sp_bigint_mul(" + vref_b + ", " + barg + ");")
         end
         if op == "/"
-          emit("  " + vref + " = sp_bigint_div(" + vref + ", " + barg + ");")
+          emit("  " + vref + " = sp_bigint_div(" + vref_b + ", " + barg + ");")
         end
         emit("  if(sp_gc_bytes>sp_gc_threshold){size_t _b=sp_gc_bytes;sp_gc_collect();size_t _f=_b-sp_gc_bytes;if(_f<_b/4)sp_gc_threshold=_b*2;else if(sp_gc_bytes>0){sp_gc_threshold=sp_gc_bytes*4;if(sp_gc_threshold<sp_gc_threshold_init)sp_gc_threshold=sp_gc_threshold_init;}else sp_gc_threshold=sp_gc_threshold_init;}")
         return
@@ -29056,7 +29063,7 @@ class Compiler
         emit("  " + vref + " *= " + val + ";")
       end
       if op == "/"
-        emit("  " + vref + " /= " + val + ";")
+        emit("  " + vref + " = sp_idiv(" + vref + ", " + val + ");")
       end
       if op == "%"
         emit("  " + vref + " = sp_imod(" + vref + ", " + val + ");")
@@ -36520,7 +36527,7 @@ class Compiler
           return "(" + compile_expr_remap(recv, map_from, map_to) + " * " + compile_expr_remap_arg0(nid, map_from, map_to) + ")"
         end
         if mname == "/"
-          return "(" + compile_expr_remap(recv, map_from, map_to) + " / " + compile_expr_remap_arg0(nid, map_from, map_to) + ")"
+          return "sp_idiv(" + compile_expr_remap(recv, map_from, map_to) + ", " + compile_expr_remap_arg0(nid, map_from, map_to) + ")"
         end
         if mname == "%"
           return "sp_imod(" + compile_expr_remap(recv, map_from, map_to) + ", " + compile_expr_remap_arg0(nid, map_from, map_to) + ")"

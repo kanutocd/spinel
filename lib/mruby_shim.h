@@ -41,13 +41,26 @@ typedef struct mrb_state {
 #define mrb_free(mrb, p) free(p)
 #define mrb_malloc_simple(mrb, sz) malloc(sz)
 
-/* Error handling */
-#define mrb_raise(mrb, cls, msg) do { fprintf(stderr, "%s\n", msg); exit(1); } while(0)
-#define mrb_int_zerodiv(mrb) do { fprintf(stderr, "divided by 0\n"); exit(1); } while(0)
-#define E_RANGE_ERROR 0
-#define E_RUNTIME_ERROR 0
-#define E_ARGUMENT_ERROR 0
-#define E_TYPE_ERROR 0
+/* Error handling — sp_bigint.c is compiled as a separate TU and
+   would otherwise hard-exit on internal errors (mini-gmp's zero-
+   divisor check, allocation overflow, etc.). The mrb_raise macro
+   now dispatches on the symbolic class enum: ZeroDivisionError is
+   routed through sp_bigint_raise_zerodiv (defined non-static in
+   sp_runtime.h, linked from gen.c) so it reaches spinel's longjmp
+   rescue net and is catchable by `rescue ZeroDivisionError`.
+   Other classes still hard-exit — they're internal invariants
+   (allocation overflow) where graceful handling buys little. */
+extern void sp_bigint_raise_zerodiv(const char *msg);
+#define E_RANGE_ERROR 1
+#define E_RUNTIME_ERROR 2
+#define E_ARGUMENT_ERROR 3
+#define E_TYPE_ERROR 4
+#define E_ZERODIV_ERROR 5
+#define mrb_raise(mrb, cls, msg) do { \
+  if ((cls) == E_ZERODIV_ERROR) { sp_bigint_raise_zerodiv(msg); } \
+  else { fprintf(stderr, "%s\n", msg); exit(1); } \
+} while(0)
+#define mrb_int_zerodiv(mrb) sp_bigint_raise_zerodiv("divided by 0")
 
 /* mrb_value stub - tagged union */
 typedef struct mrb_value {

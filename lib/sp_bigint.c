@@ -5332,6 +5332,11 @@ sp_Bigint *sp_bigint_mul(sp_Bigint *a, sp_Bigint *b) {
 }
 
 sp_Bigint *sp_bigint_div(sp_Bigint *a, sp_Bigint *b) {
+  /* Defensive zero check before mini-gmp: udiv()'s assertion at
+     line 2856 fires for zero divisors that aren't single-limb,
+     bypassing div_limb's mrb_raise path. Routing through
+     sp_bigint_raise_zerodiv reaches spinel's longjmp rescue net. */
+  if (zero_p(&b->mpz)) sp_bigint_raise_zerodiv("divided by 0");
   sp_Bigint *r = sp_bigint_alloc();
   mpz_init(sp_mpz_ctx, &r->mpz);
   mpz_mdiv(sp_mpz_ctx, &r->mpz, &a->mpz, &b->mpz);
@@ -5339,6 +5344,7 @@ sp_Bigint *sp_bigint_div(sp_Bigint *a, sp_Bigint *b) {
 }
 
 sp_Bigint *sp_bigint_mod(sp_Bigint *a, sp_Bigint *b) {
+  if (zero_p(&b->mpz)) sp_bigint_raise_zerodiv("divided by 0");
   sp_Bigint *r = sp_bigint_alloc();
   mpz_init(sp_mpz_ctx, &r->mpz);
   mpz_mmod(sp_mpz_ctx, &r->mpz, &a->mpz, &b->mpz);
