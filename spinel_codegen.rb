@@ -3135,7 +3135,7 @@ class Compiler
     if mname == "chr"
       return "string"
     end
-    if mname == "gcd" || mname == "lcm" || mname == "ceildiv"
+    if mname == "gcd" || mname == "lcm" || mname == "ceildiv" || mname == "div"
       return "int"
     end
     if mname == "clamp"
@@ -23566,6 +23566,9 @@ class Compiler
     end
     if mname == "ceildiv"
       return "sp_ceildiv(" + rc + ", " + compile_arg0(nid) + ")"
+    end
+    if mname == "div"
+      return "sp_idiv(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "clamp"
       args_id = @nd_arguments[nid]
