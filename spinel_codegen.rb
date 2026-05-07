@@ -2119,7 +2119,6 @@ class Compiler
 
     cmnames = @cls_cmeth_names[ci].split(";")
     cm_returns = @cls_cmeth_returns[ci].split(";")
-    cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
     j = 0
     while j < cmnames.length
       if cmnames[j] == mname
@@ -2131,10 +2130,7 @@ class Compiler
     if j < cm_returns.length
       rt = cm_returns[j]
     end
-    pt_list = "".split(",")
-    if j < cm_ptypes.length
-      pt_list = cm_ptypes[j].split(",")
-    end
+    pt_list = cls_cmeth_ptypes_get(ci, j)
     base_name = "sp_" + cname + "_cls_" + sanitize_name(mname)
     adapter_name = "sp_" + cname + "_" + sanitize_name(mname) + "_cls_method_adapter"
     sig = c_type(rt) + " " + adapter_name + "(void *_unused"
@@ -10845,8 +10841,6 @@ class Compiler
     while ci < @cls_names.length
       cmnames = @cls_cmeth_names[ci].split(";")
       cm_bodies = @cls_cmeth_bodies[ci].split(";")
-      cm_params = @cls_cmeth_params[ci].split("|")
-      cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
       j = 0
       while j < cmnames.length
         bid = -1
@@ -10856,15 +10850,9 @@ class Compiler
             bid = bs.to_i
           end
         end
-        pnames = "".split(",")
-        if j < cm_params.length
-          pnames = cm_params[j].split(",")
-        end
-        ptypes = "".split(",")
-        if j < cm_ptypes.length
-          ptypes = cm_ptypes[j].split(",")
-        end
         if bid > 0
+          pnames = cls_cmeth_pnames_get(ci, j)
+          ptypes = cls_cmeth_ptypes_get(ci, j)
           saved_ci = @current_class_idx
           @current_class_idx = ci
           walk_bare_new_in_cmeth_body(bid, ci, pnames, ptypes)
@@ -12069,8 +12057,6 @@ class Compiler
       # `def self.from_raw(...)` factory widens the ivar's type.
       cm_bodies = @cls_cmeth_bodies[ci].split(";")
       cm_names = @cls_cmeth_names[ci].split(";")
-      cm_params = @cls_cmeth_params[ci].split("|")
-      cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
       saved_meth = @current_method_name
       cbj = 0
       while cbj < cm_bodies.length
@@ -12083,14 +12069,8 @@ class Compiler
             @current_method_name = @cls_names[ci] + "_cls_" + cm_names[cbj]
           end
           push_scope
-          cpnames = "".split(",")
-          cptypes = "".split(",")
-          if cbj < cm_params.length
-            cpnames = cm_params[cbj].split(",")
-          end
-          if cbj < cm_ptypes.length
-            cptypes = cm_ptypes[cbj].split(",")
-          end
+          cpnames = cls_cmeth_pnames_get(ci, cbj)
+          cptypes = cls_cmeth_ptypes_get(ci, cbj)
           cpk = 0
           while cpk < cpnames.length
             cpt = "int"
@@ -14761,8 +14741,6 @@ class Compiler
       ci = 0
       while ci < @cls_names.length
         mnames = @cls_meth_names[ci].split(";")
-        all_params = @cls_meth_params[ci].split("|")
-        all_ptypes = @cls_meth_ptypes[ci].split("|")
         bodies = @cls_meth_bodies[ci].split(";")
         mi = 0
         while mi < mnames.length
@@ -14774,14 +14752,8 @@ class Compiler
             @current_class_idx = ci
             push_scope
             # Declare params in scope with current types
-            pnames_arr = "".split(",")
-            if mi < all_params.length
-              pnames_arr = all_params[mi].split(",")
-            end
-            ptypes_arr = "".split(",")
-            if mi < all_ptypes.length
-              ptypes_arr = all_ptypes[mi].split(",")
-            end
+            pnames_arr = cls_meth_pnames_get(ci, mi)
+            ptypes_arr = cls_meth_ptypes_get(ci, mi)
             pk = 0
             while pk < pnames_arr.length
               pt = "int"
@@ -14925,26 +14897,17 @@ class Compiler
           args_id = @nd_arguments[nid]
           if args_id >= 0
             arg_ids = get_args(args_id)
-            all_ptypes = @cls_meth_ptypes[ci].split("|")
-            if midx < all_ptypes.length
-              ptypes = all_ptypes[midx].split(",")
-              kk = 0
-              while kk < arg_ids.length
-                at = infer_type(arg_ids[kk])
-                if kk < ptypes.length
-                  # Same unify-instead-of-only-widen-from-int change as
-                  # the obj-recv path in scan_new_calls. A no-recv self
-                  # call inside the same class is the path that, e.g.,
-                  # `def boot; add_mappings(0x..0x, ...); end` inside
-                  # CPU#boot lands on, and disagreeing arg types from
-                  # different self-calls need to widen to poly rather
-                  # than freezing on the first non-int call site.
-                  ptypes[kk] = unify_call_types(ptypes[kk], at, arg_ids[kk])
-                end
-                kk = kk + 1
-              end
-              all_ptypes[midx] = ptypes.join(",")
-              @cls_meth_ptypes[ci] = all_ptypes.join("|")
+            # Unify rather than only-widen-from-int. A no-recv
+            # self-call inside the same class is the path that
+            # e.g. `def boot; add_mappings(0x..0x, ...); end`
+            # inside CPU#boot lands on; disagreeing arg types
+            # from different self-calls need to widen to poly
+            # rather than freezing on the first non-int call site.
+            ptypes = cls_meth_ptypes_get(ci, midx)
+            if ptypes.length > 0
+              pnames = cls_meth_pnames_get(ci, midx)
+              widen_ptypes_from_args(arg_ids, pnames, ptypes)
+              cls_meth_ptypes_put(ci, midx, ptypes)
             end
           end
         end
@@ -17316,8 +17279,7 @@ class Compiler
       # Instance methods
       mnames = @cls_meth_names[i].split(";")
       returns = @cls_meth_returns[i].split(";")
-      all_params = @cls_meth_params[i].split("|")
-      all_ptypes = @cls_meth_ptypes[i].split("|")
+      bids = @cls_meth_bodies[i].split(";")
       j = 0
       while j < mnames.length
         if mnames[j] != "initialize"
@@ -17333,17 +17295,14 @@ class Compiler
           if @cls_is_value_type[i] == 1
             sp = " self"
           end
-          bids = @cls_meth_bodies[i].split(";")
           bid_j = j < bids.length ? bids[j].to_i : -1
-          emit_raw(method_linkage_named(bid_j, cls_method_has_yield(i, j), mnames[j]) + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mnames[j]) + "(sp_" + cname + sp + method_with_self_params(j, all_params, all_ptypes) + yp + ");")
+          emit_raw(method_linkage_named(bid_j, cls_method_has_yield(i, j), mnames[j]) + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mnames[j]) + "(sp_" + cname + sp + method_with_self_params(i, j) + yp + ");")
         end
         j = j + 1
       end
       # Class methods
       cmnames = @cls_cmeth_names[i].split(";")
       cm_returns = @cls_cmeth_returns[i].split(";")
-      cm_params = @cls_cmeth_params[i].split("|")
-      cm_ptypes = @cls_cmeth_ptypes[i].split("|")
       j = 0
       while j < cmnames.length
         # Skip forward decls for dead cls methods so the linker
@@ -17357,7 +17316,7 @@ class Compiler
           if j < cm_returns.length
             rt = cm_returns[j]
           end
-          emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(j, cm_params, cm_ptypes) + ");")
+          emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(i, j) + ");")
           j = j + 1
         end
       end
@@ -17796,16 +17755,9 @@ class Compiler
     result
   end
 
-  def method_with_self_params(midx, all_params, all_ptypes)
-    pnames = "".split(",")
-    ptypes = "".split(",")
-
-    if midx < all_params.length
-      pnames = all_params[midx].split(",")
-    end
-    if midx < all_ptypes.length
-      ptypes = all_ptypes[midx].split(",")
-    end
+  def method_with_self_params(ci, midx)
+    pnames = cls_meth_pnames_get(ci, midx)
+    ptypes = cls_meth_ptypes_get(ci, midx)
     result = ""
     j = 0
     while j < pnames.length
@@ -17819,16 +17771,9 @@ class Compiler
     result
   end
 
-  def cls_method_params_decl(midx, all_params, all_ptypes)
-    pnames = "".split(",")
-    ptypes = "".split(",")
-
-    if midx < all_params.length
-      pnames = all_params[midx].split(",")
-    end
-    if midx < all_ptypes.length
-      ptypes = all_ptypes[midx].split(",")
-    end
+  def cls_method_params_decl(ci, midx)
+    pnames = cls_cmeth_pnames_get(ci, midx)
+    ptypes = cls_cmeth_ptypes_get(ci, midx)
     if pnames.length == 0
       return "void"
     end
