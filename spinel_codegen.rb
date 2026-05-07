@@ -4461,6 +4461,42 @@ class Compiler
         rn = constructor_class_name(recv)
         if rn != ""
           if rn == "Array"
+            # Block form `Array.new(n) { ... }` — infer the container
+            # from the block's tail expression, same shape as the
+            # compile_constructor_expr emit. Without this branch
+            # ivar widening saw `int_array` and the actual emit's
+            # PtrArray / PolyArray clashed.
+            blk_an = @nd_block[nid]
+            if blk_an >= 0
+              body_an = @nd_body[blk_an]
+              if body_an >= 0
+                stmts_an = get_stmts(body_an)
+                if stmts_an.length > 0
+                  bret = infer_type(stmts_an.last)
+                  if bret == "string"
+                    return "str_array"
+                  end
+                  if bret == "float"
+                    return "float_array"
+                  end
+                  if bret == "symbol"
+                    return "sym_array"
+                  end
+                  if bret == "poly"
+                    @needs_rb_value = 1
+                    return "poly_array"
+                  end
+                  if is_ptr_array_type(bret) == 1 || bret == "poly_array"
+                    @needs_rb_value = 1
+                    return "poly_array"
+                  end
+                  if bret == "int_array" || bret == "float_array" || bret == "str_array" || bret == "sym_array"
+                    @needs_gc = 1
+                    return bret + "_ptr_array"
+                  end
+                end
+              end
+            end
             # Check fill value type. Pointer-type fills must produce a typed
             # PtrArray; falling through to int_array would leave the
             # elements unscanned by GC.
@@ -8227,6 +8263,51 @@ class Compiler
           rname = constructor_class_name(r)
           if rname != ""
             if rname == "Array"
+              # Block form `Array.new(n) { ... }` — infer container
+              # from the block tail (matches compile_constructor_expr).
+              # When the block tail's type can't be resolved at this
+              # pre-compile pass (a LocalVariableReadNode whose write
+              # is in the same block, e.g. `_a = [0]; _a.clear; _a`,
+              # hasn't been declare_var'd yet — find_var_type returns
+              # ""), fall through to the placeholder "int" path so
+              # the later compile pass's update_ivar_type can widen
+              # int → concrete-container without going through the
+              # array+array → poly_array widening.
+              blk_an2 = @nd_block[nid]
+              if blk_an2 >= 0
+                body_an2 = @nd_body[blk_an2]
+                if body_an2 >= 0
+                  stmts_an2 = get_stmts(body_an2)
+                  if stmts_an2.length > 0
+                    bret2 = infer_type(stmts_an2.last)
+                    if bret2 == "string"
+                      return "str_array"
+                    end
+                    if bret2 == "float"
+                      return "float_array"
+                    end
+                    if bret2 == "symbol"
+                      return "sym_array"
+                    end
+                    if bret2 == "poly"
+                      @needs_rb_value = 1
+                      return "poly_array"
+                    end
+                    if is_ptr_array_type(bret2) == 1 || bret2 == "poly_array"
+                      @needs_rb_value = 1
+                      return "poly_array"
+                    end
+                    if bret2 == "int_array" || bret2 == "float_array" || bret2 == "str_array" || bret2 == "sym_array"
+                      @needs_gc = 1
+                      return bret2 + "_ptr_array"
+                    end
+                    # bret2 == "int" or "" — leave the slot untyped so
+                    # the later compile pass can refine without
+                    # triggering update_ivar_type's array-widening.
+                    return "int"
+                  end
+                end
+              end
               # Check fill value type for Array.new(n, val).
               # Pointer-type fills must produce a typed PtrArray; falling
               # through to int_array would leave the elements unscanned by GC.
@@ -23442,11 +23523,16 @@ class Compiler
       if cname == "Array"
         @needs_gc = 1
         args_id = @nd_arguments[nid]
-        # Array.new(n) { |i| ... } -- IntArray-only fast path. We don't
-        # try to introspect the block body to pick a typed container
-        # (calling infer_type from this dispatch perturbs the bootstrap;
-        # see bug-11 commit). Float/String collectors must be built via
-        # explicit `[]` + `N.times { ... << }` instead.
+        # Array.new(n) { |i| ... } — pick the accumulator container
+        # from the block's last-statement type, mirroring
+        # compile_map_expr's range/typed-container branch. Without the
+        # introspection, every block return collapsed into IntArray
+        # (`Array.new(N) { [].dup }` ended up as an int_array of stale
+        # pointers, freed by GC). The infer_type call here is on the
+        # block body's tail expression — that recursion is bounded by
+        # the AST and doesn't perturb the bootstrap (the original
+        # comment about bug-11 came from a now-removed call site that
+        # re-entered constructor inference).
         if args_id >= 0 && @nd_block[nid] >= 0
           arrnew_aargs = get_args(args_id)
           if arrnew_aargs.length >= 1
@@ -23454,10 +23540,36 @@ class Compiler
             arrnew_body = @nd_body[arrnew_blk]
             arrnew_count = compile_expr(arrnew_aargs.first)
             arrnew_bp = get_block_param(nid, 0)
+            block_ret_an = "int"
+            if arrnew_body >= 0
+              arrnew_pre_stmts = get_stmts(arrnew_body)
+              if arrnew_pre_stmts.length > 0
+                block_ret_an = infer_type(arrnew_pre_stmts.last)
+              end
+            end
+            an_ret_is_arr = (block_ret_an == "int_array" || block_ret_an == "float_array" || block_ret_an == "str_array" || block_ret_an == "sym_array")
+            an_ret_is_deep_arr = (is_ptr_array_type(block_ret_an) == 1 || block_ret_an == "poly_array")
             arrnew_tmp = new_temp
             arrnew_iv = new_temp
-            @needs_int_array = 1
-            emit("  sp_IntArray *" + arrnew_tmp + " = sp_IntArray_new();")
+            if block_ret_an == "string"
+              @needs_str_array = 1
+              emit("  sp_StrArray *" + arrnew_tmp + " = sp_StrArray_new();")
+            elsif block_ret_an == "float"
+              @needs_float_array = 1
+              emit("  sp_FloatArray *" + arrnew_tmp + " = sp_FloatArray_new();")
+            elsif block_ret_an == "poly"
+              @needs_rb_value = 1
+              emit("  sp_PolyArray *" + arrnew_tmp + " = sp_PolyArray_new();")
+            elsif an_ret_is_deep_arr
+              @needs_rb_value = 1
+              emit("  sp_PolyArray *" + arrnew_tmp + " = sp_PolyArray_new();")
+            elsif an_ret_is_arr
+              @needs_ptr_array = 1
+              emit("  sp_PtrArray *" + arrnew_tmp + " = sp_PtrArray_new();")
+            else
+              @needs_int_array = 1
+              emit("  sp_IntArray *" + arrnew_tmp + " = sp_IntArray_new();")
+            end
             # Root the new array before running the block body — pushing
             # poly/string values inside the loop can trigger a GC cycle
             # that would otherwise sweep the local pointer.
@@ -23476,7 +23588,19 @@ class Compiler
                   arrnew_k = arrnew_k + 1
                 end
                 arrnew_lastv = compile_expr(arrnew_stmts2.last)
-                emit("  sp_IntArray_push(" + arrnew_tmp + ", " + arrnew_lastv + ");")
+                if block_ret_an == "string"
+                  emit("  sp_StrArray_push(" + arrnew_tmp + ", " + arrnew_lastv + ");")
+                elsif block_ret_an == "float"
+                  emit("  sp_FloatArray_push(" + arrnew_tmp + ", " + arrnew_lastv + ");")
+                elsif block_ret_an == "poly"
+                  emit("  sp_PolyArray_push(" + arrnew_tmp + ", " + arrnew_lastv + ");")
+                elsif an_ret_is_deep_arr
+                  emit("  sp_PolyArray_push(" + arrnew_tmp + ", " + box_value_to_poly(block_ret_an, arrnew_lastv) + ");")
+                elsif an_ret_is_arr
+                  emit("  sp_PtrArray_push(" + arrnew_tmp + ", (void *)(" + arrnew_lastv + "));")
+                else
+                  emit("  sp_IntArray_push(" + arrnew_tmp + ", " + arrnew_lastv + ");")
+                end
               end
             end
             @indent = @indent - 1
