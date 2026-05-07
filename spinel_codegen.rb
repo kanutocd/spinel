@@ -17778,6 +17778,17 @@ class Compiler
         @current_method_has_self = 1
         @current_method_return = "void"
         @current_class_idx = ci
+        # Issue #314 follow-up: if the body contains an early `return`,
+        # compile_return_stmt emits `SP_GC_RESTORE()` (which references
+        # `_gc_saved`). The matching `SP_GC_SAVE()` at the top of the
+        # function must therefore exist. emit_constructor restored
+        # `@in_gc_scope` to its pre-constructor value just above; if
+        # that was 1 from a stale prior emit, declare_method_locals'
+        # `@in_gc_scope == 0` guard skips the SAVE emit and `_gc_saved`
+        # ends up undeclared. Reset to 0 here so declare_method_locals
+        # can decide cleanly.
+        saved_in_gc_scope2 = @in_gc_scope
+        @in_gc_scope = 0
         all_params = @cls_meth_params[ci].split("|")
         all_ptypes = @cls_meth_ptypes[ci].split("|")
         pnames = "".split(",")
@@ -17816,6 +17827,7 @@ class Compiler
         @current_class_idx = -1
         @current_method_return = saved_method_return
         @current_method_has_self = saved_has_self2
+        @in_gc_scope = saved_in_gc_scope2
       end
       emit_raw("}")
       emit_raw("")
