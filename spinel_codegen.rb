@@ -9858,6 +9858,16 @@ class Compiler
     if (old_pt == "float" && at == "int") || (old_pt == "int" && at == "float")
       return "float"
     end
+    # `def f(conf = ARGV)`: the default's type lands as `argv`
+    # (spinel's specialised `**argv`-like scalar), but bootstrapping
+    # callers in real programs almost always invoke `f("path.nes")`
+    # — a single string. Without this narrow, unification falls to
+    # poly and the body's `Config.new(conf)` (string-expecting) gets
+    # a poly arg. Bias toward the call-site shape so single-string
+    # entry points don't drag the whole signature into poly.
+    if (old_pt == "argv" && at == "string") || (old_pt == "string" && at == "argv")
+      return "string"
+    end
     # Genuinely incompatible types: fall back to polymorphic value.
     @needs_rb_value = 1
     "poly"
