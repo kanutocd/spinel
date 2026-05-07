@@ -153,6 +153,10 @@ class Compiler
     # distinct types per ivar; the outer dimension is semicolon-
     # separated and parallel to `@cls_ivar_names[ci]`.
     @cls_ivar_observed_types = "".split(",")
+    # Memoization for `find_lv_ivar_alias_in_ast`. Keyed by
+    # `"<class_idx>:<lv_name>"`, value is the resolved ivar name (or
+    # `""` when the LV has multiple sources / non-ivar writes).
+    @lv_alias_cache = {}
     # Top-level (script-scope) ivars. Lowered to `static` file-scope
     # globals because `main()` / top-level `def` bodies have no `self`.
     @toplevel_ivar_names = "".split(",")
@@ -237,6 +241,13 @@ class Compiler
     # ---- Scope stack for local variables ----
     @scope_names = "".split(",")
     @scope_types = "".split(",")
+    # Parallel to `@scope_names`: when a local was assigned directly
+    # from an ivar read (`lv = @ivar`), record the ivar name here so
+    # later sites that need ivar-side metadata (notably the
+    # `<poly>[k]` narrowing in `compile_poly_method_call`) can
+    # resolve through the alias. Empty string when the local has no
+    # such alias (or had a non-ivar write since).
+    @scope_ivar_alias = "".split(",")
 
     # Issue #207: type narrowing introduced by `is_a?`/`kind_of?`
     # guards. While walking the then-arm of `if v.is_a?(Hash)` or
@@ -1278,6 +1289,7 @@ class Compiler
   def push_scope
     @scope_names.push("---")
     @scope_types.push("---")
+    @scope_ivar_alias.push("---")
     0
   end
 
@@ -1287,16 +1299,19 @@ class Compiler
       if top_name == "---"
         @scope_names.pop
         @scope_types.pop
+        @scope_ivar_alias.pop
         return
       end
       @scope_names.pop
       @scope_types.pop
+      @scope_ivar_alias.pop
     end
   end
 
   def declare_var(name, vtype)
     @scope_names.push(name)
     @scope_types.push(vtype)
+    @scope_ivar_alias.push("")
     0
   end
 
@@ -1325,6 +1340,31 @@ class Compiler
     else
       emit("  sp_raise(\"RuntimeError\");")
     end
+  end
+
+  # Record / clear an ivar alias for a local variable. Walks the
+  # `@scope_*` parallel stacks like `set_var_type` does. `iname` is
+  # the source ivar name (e.g. `@fetch`); pass `""` to clear.
+  def set_var_ivar_alias(name, iname)
+    i = @scope_names.length - 1
+    while i >= 0
+      if @scope_names[i] == name
+        @scope_ivar_alias[i] = iname
+        return
+      end
+      i = i - 1
+    end
+  end
+
+  def find_var_ivar_alias(name)
+    i = @scope_names.length - 1
+    while i >= 0
+      if @scope_names[i] == name
+        return @scope_ivar_alias[i]
+      end
+      i = i - 1
+    end
+    ""
   end
 
   def find_var_type(name)
@@ -4303,6 +4343,13 @@ class Compiler
           return "string"
         end
         if rt == "poly"
+          # Approach 2: narrow `<poly>[k]` to int when the receiver
+          # came from a poly_array whose observed element kinds all
+          # imply int-returning `[]`. Mirrors the codegen-side
+          # narrowing in `compile_poly_method_call`.
+          if poly_index_narrow_int(nid) == 1
+            return "int"
+          end
           return "poly"
         end
         if rt == "int_array"
@@ -4763,6 +4810,15 @@ class Compiler
           return "bool"
         end
         if mname == "[]"
+          # Narrow `<poly>[k]` to int when the receiver came from a
+          # poly_array whose observed slot-type history all imply
+          # int-returning element kinds (IntArray, Method). Keep this
+          # in sync with `compile_poly_method_call`'s codegen-side
+          # narrowing — divergence widens the consuming slot to poly
+          # while emit produces int.
+          if poly_index_narrow_int(nid) == 1
+            return "int"
+          end
           return "poly"
         end
         # Scan every user class that defines this method. If they all
@@ -27165,6 +27221,186 @@ class Compiler
     0
   end
 
+  # Decide whether a `<poly>[k]` call site (the outer `[]` in
+  # `arr[i][k]` chains) can return int instead of poly. The poly
+  # value came from `arr[i]` where `arr` is a poly_array; if every
+  # element kind observed for `arr`'s slot has an int-returning
+  # `[]` (IntArray + Method, the optcarrot `__fetch__` shape), the
+  # outer dispatch is guaranteed to land on a poly carrying an int
+  # tag, and we can read it as `mrb_int` directly. Returns 0
+  # whenever the chain doesn't fit the pattern, so the default
+  # poly-typed temp is preserved for everything else.
+  def poly_index_narrow_int(nid)
+    recv_id = @nd_receiver[nid]
+    if recv_id < 0
+      return 0
+    end
+    # The receiver must itself be a `[]` call (`arr[i]`).
+    if @nd_type[recv_id] != "CallNode" || @nd_name[recv_id] != "[]"
+      return 0
+    end
+    inner_recv = @nd_receiver[recv_id]
+    if inner_recv < 0
+      return 0
+    end
+    # Resolve the inner receiver to an ivar (directly, or via a
+    # one-step LV alias from `lv = @ivar`).
+    iname = ""
+    if @nd_type[inner_recv] == "InstanceVariableReadNode"
+      iname = @nd_name[inner_recv]
+    elsif @nd_type[inner_recv] == "LocalVariableReadNode"
+      lv_name = @nd_name[inner_recv]
+      # Codegen-time scope alias takes priority (set by the LV-write
+      # handler when `lv = @ivar` is emitted in this scope).
+      iname = find_var_ivar_alias(lv_name)
+      # Fallback for inference-time (`infer_type` before codegen,
+      # when the scope stack hasn't been populated yet): walk the
+      # enclosing method bodies for a single, unambiguous
+      # `lv_name = @ivar` write. If the LV is reassigned from a
+      # non-ivar elsewhere, leave iname empty and let the caller
+      # bail out — the alias is no longer load-bearing.
+      if iname == ""
+        iname = find_lv_ivar_alias_in_ast(lv_name)
+      end
+    end
+    if iname == "" || @current_class_idx < 0
+      return 0
+    end
+    # The slot must currently be a poly_array — the only shape that
+    # produces a poly via `[i]`.
+    slot_t = cls_ivar_type(@current_class_idx, iname)
+    if slot_t != "poly_array"
+      return 0
+    end
+    # Derive the heterogeneous element kinds from
+    # `cls_ivar_observed_types`. Each entry there is a slot type
+    # the ivar held at some scan iteration: `int_array` means int
+    # elements were stored, `obj_Method_ptr_array` means Method
+    # elements, etc. The final `poly_array` entry just records the
+    # widened state and adds no info. A bare `poly` observation
+    # (whole-ivar `@x = something_poly`) is unknown — bail out.
+    obs = cls_ivar_observed_types_for(@current_class_idx, iname)
+    if obs == ""
+      return 0
+    end
+    distinct = obs.split(",")
+    saw_any = 0
+    di = 0
+    while di < distinct.length
+      t = distinct[di]
+      if t == "" || t == "poly_array"
+        # ignore — uninformative
+      elsif t == "int_array" || t == "obj_Method_ptr_array"
+        # int-returning element kind
+        saw_any = 1
+      else
+        # any other observed slot type (str_array, float_array,
+        # other ptr_array variants, "poly" whole-ivar writes…) is
+        # not safely narrowable.
+        return 0
+      end
+      di = di + 1
+    end
+    saw_any
+  end
+
+  # Inference-time fallback for resolving `lv_name -> @ivar` when the
+  # codegen scope alias isn't available yet. Walks every method body
+  # in the current class for `lv_name = @ivar` writes. Returns the
+  # ivar name only if the LV is unambiguously aliased (one ivar
+  # source, no non-ivar reassignment); empty string otherwise. Cached
+  # in `@lv_alias_cache_<class>:<lv>` to keep the per-narrow cost
+  # down — this is called during type inference, which runs many
+  # iterations.
+  def find_lv_ivar_alias_in_ast(lv_name)
+    if @current_class_idx < 0
+      return ""
+    end
+    cache_key = @current_class_idx.to_s + ":" + lv_name
+    if @lv_alias_cache.key?(cache_key)
+      return @lv_alias_cache[cache_key]
+    end
+    found = ""
+    bodies = @cls_meth_bodies[@current_class_idx].split(";")
+    bi = 0
+    while bi < bodies.length
+      bid = bodies[bi].to_i
+      if bid >= 0
+        r = scan_lv_alias_for(bid, lv_name)
+        if r == "?"
+          # Ambiguous: at least one non-ivar write to this LV. The
+          # alias is unstable and unsafe to use for narrowing.
+          found = ""
+          break
+        end
+        if r != ""
+          if found != "" && found != r
+            found = ""
+            break
+          end
+          found = r
+        end
+      end
+      bi = bi + 1
+    end
+    @lv_alias_cache[cache_key] = found
+    found
+  end
+
+  # Recursive AST walk under `nid`. Returns:
+  #   ""  — no `lv_name = ...` write seen
+  #   "?" — `lv_name = <non-ivar>` write seen (alias is unstable)
+  #   "@x" — exactly one ivar source `lv_name = @x` seen
+  def scan_lv_alias_for(nid, lv_name)
+    if nid < 0
+      return ""
+    end
+    found = ""
+    if @nd_type[nid] == "LocalVariableWriteNode" && @nd_name[nid] == lv_name
+      ex_id = @nd_expression[nid]
+      if ex_id >= 0 && @nd_type[ex_id] == "InstanceVariableReadNode"
+        found = @nd_name[ex_id]
+      else
+        return "?"
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      r = scan_lv_alias_for(cs[k], lv_name)
+      if r == "?"
+        return "?"
+      end
+      if r != ""
+        if found != "" && found != r
+          return "?"
+        end
+        found = r
+      end
+      k = k + 1
+    end
+    found
+  end
+
+  # Read the comma-separated whole-ivar observation list for a given
+  # ivar by name. Used by `poly_index_narrow_int`.
+  def cls_ivar_observed_types_for(ci, iname)
+    if ci < 0 || ci >= @cls_ivar_observed_types.length
+      return ""
+    end
+    names = @cls_ivar_names[ci].split(";")
+    parts = @cls_ivar_observed_types[ci].split(";", -1)
+    k = 0
+    while k < names.length
+      if names[k] == iname && k < parts.length
+        return parts[k]
+      end
+      k = k + 1
+    end
+    ""
+  end
+
   def poly_dispatch_return_type(mname)
     if mname == "[]"
       @needs_rb_value = 1
@@ -27328,6 +27564,21 @@ class Compiler
     # classes disagree on that type, the result is sp_RbVal and each
     # branch boxes its concrete return value.
     ret_type = poly_dispatch_return_type(mname)
+    # Approach 2 narrowing: `<poly>[k]` defaults to poly because the
+    # static `[]` dispatch can't pin the return; check whether the
+    # poly receiver here came from `<poly_array>[i]` whose every
+    # observed element kind has an int-returning `[]` (IntArray,
+    # Method-with-int-return). If so, narrow to int so the slot
+    # @_pc / @_addr / etc. on the caller side stays mrb_int instead
+    # of widening to sp_RbVal and breaking downstream `iv += 1`,
+    # `~poly`, and friends.
+    narrowed_int_idx = 0
+    if ret_type == "poly" && mname == "[]"
+      narrowed_int_idx = poly_index_narrow_int(nid)
+      if narrowed_int_idx == 1
+        ret_type = "int"
+      end
+    end
     is_poly_ret = ret_type == "poly" ? 1 : 0
     ret_ct = c_type(ret_type)
     ret_def = c_default_val(ret_type)
@@ -27427,7 +27678,16 @@ class Compiler
           this_rt = cls_method_return(i, mname)
           rhs = box_val_to_poly(call_expr, this_rt)
         end
-        emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+        # Narrowed `[]` arms (Approach 2): suppress user-class arms
+        # whose `[]` doesn't return int — the dead-code emit would
+        # otherwise assign e.g. a string to the now-mrb_int result
+        # temp and fail the C compile. The runtime can't reach these
+        # arms anyway because the observation set narrowed past them.
+        if narrowed_int_idx == 1 && cls_method_return(i, mname) != "int"
+          # skip
+        else
+          emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+        end
       elsif cls_has_attr_reader(i, mname) == 1
         # An auto-registered attr_reader doesn't appear in
         # @cls_meth_names, so the explicit-method walk above misses it.
@@ -27438,12 +27698,16 @@ class Compiler
           this_rt = cls_ivar_type(i, "@" + mname)
           rhs = box_val_to_poly(ivar_expr, this_rt)
         end
-        emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+        if narrowed_int_idx == 1 && cls_ivar_type(i, "@" + mname) != "int"
+          # skip non-int attr_reader arms on a narrowed `[]`
+        else
+          emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+        end
       end
       i = i + 1
     end
     # Built-in type dispatch (cls_id < 0).
-    emit_poly_builtin_dispatch(recv_tmp, mname, arg_compiled, arg_types, tmp, is_poly_ret)
+    emit_poly_builtin_dispatch(recv_tmp, mname, arg_compiled, arg_types, tmp, is_poly_ret, narrowed_int_idx)
     emit("  }")
     tmp
   end
@@ -27451,7 +27715,7 @@ class Compiler
   # Emit branches for the built-in (negative cls_id) entries. Each
   # entry maps a (SP_BUILTIN_*, method) pair to a C expression.
   # Adding a new built-in type means one more `if` branch here.
-  def emit_poly_builtin_dispatch(recv_tmp, mname, arg_compiled, arg_types, result_tmp, is_poly_ret)
+  def emit_poly_builtin_dispatch(recv_tmp, mname, arg_compiled, arg_types, result_tmp, is_poly_ret, narrowed_int = 0)
     a0 = ""
     if arg_compiled.length > 0
       a0 = arg_compiled[0]
@@ -27499,16 +27763,26 @@ class Compiler
       # implicitly convertible to any pointer for the non-poly path
       # (result_tmp may be `sp_Foo *`) and accepted directly by
       # sp_box_obj for the poly path. Casting through mrb_int would
-      # fail to compile when result_tmp is a pointer type.
-      pc = "sp_PtrArray_get((sp_PtrArray *)" + recv_tmp + ".v.p, " + a0 + ")"
-      prhs = is_poly_ret == 1 ? "sp_box_obj(" + pc + ", 0)" : pc
-      emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) " + result_tmp + " = " + prhs + ";")
+      # fail to compile when result_tmp is a pointer type — and the
+      # narrowed-`[]` path (Approach 2) types result_tmp as mrb_int,
+      # so PtrArray cls_ids are unobserved by construction. Skip the
+      # arm in that case.
+      if narrowed_int == 0
+        pc = "sp_PtrArray_get((sp_PtrArray *)" + recv_tmp + ".v.p, " + a0 + ")"
+        prhs = is_poly_ret == 1 ? "sp_box_obj(" + pc + ", 0)" : pc
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) " + result_tmp + " = " + prhs + ";")
+      end
       # PolyArray dispatch — sp_PolyArray_get returns sp_RbVal directly.
       # When the result temp is poly, just assign; otherwise unbox via .v.i
       # (the typed temp's static type drives caller-side conversion).
-      polyc = "sp_PolyArray_get((sp_PolyArray *)" + recv_tmp + ".v.p, " + a0 + ")"
-      polyrhs = is_poly_ret == 1 ? polyc : "(" + polyc + ").v.i"
-      emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_POLY_ARRAY) " + result_tmp + " = " + polyrhs + ";")
+      # Narrowed-`[]` likewise excludes PolyArray from the observed
+      # set: the arm is unreachable, and emitting `.v.i` against a
+      # cls_id that won't match at runtime is harmless but noisy.
+      if narrowed_int == 0
+        polyc = "sp_PolyArray_get((sp_PolyArray *)" + recv_tmp + ".v.p, " + a0 + ")"
+        polyrhs = is_poly_ret == 1 ? polyc : "(" + polyc + ").v.i"
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_POLY_ARRAY) " + result_tmp + " = " + polyrhs + ";")
+      end
       # Method dispatch — `bm[arg]` / `bm[a1, a2]` on a Method instance
       # is `bm.call(...)`. When bm came through a heterogeneous
       # poly_array (e.g. optcarrots `@fetch[i] = method(:peek_X)` mixed
@@ -29749,6 +30023,16 @@ class Compiler
           set_var_type(lname, rhs_t)
         end
       end
+      # Track `lv = @ivar` as a one-step alias so the `<poly>[k]`
+      # narrowing can resolve through the local back to the ivar's
+      # element-observation list. Any non-ivar RHS (or a subsequent
+      # write of a non-ivar) clears the alias.
+      ivar_alias = ""
+      ex_id = @nd_expression[nid]
+      if ex_id >= 0 && @nd_type[ex_id] == "InstanceVariableReadNode"
+        ivar_alias = @nd_name[ex_id]
+      end
+      set_var_ivar_alias(lname, ivar_alias)
       return
     end
     if t == "LocalVariableOperatorWriteNode"
