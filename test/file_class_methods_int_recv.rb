@@ -10,8 +10,12 @@
 # `binwrite` reuses `sp_file_write` — fputs-based, so embedded
 # NULs truncate; acceptable for the NUL-free use sites that
 # exist in practice.
+#
+# cwd-relative path so MSYS2 / native-Windows-built spinel binary
+# resolves the same place as the CRuby reference. `/tmp/...` lands
+# in different directories on the two sides (see bundle_io_sys.rb).
 
-path = "/tmp/spinel_file_class_test"
+path = "spinel_file_class_test"
 
 File.binwrite(path, [72, 105, 33].pack("C*"))   # "Hi!"
 puts File.readable?(path)
