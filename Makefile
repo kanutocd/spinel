@@ -122,7 +122,7 @@ PRISM_LIB    = build/libprism.a
 CODEGEN_STAMP := build/stamps/spinel_codegen.rb.stamp
 PARSE_STAMP   := build/stamps/spinel_parse.c.stamp
 
-.PHONY: all parse bootstrap codegen test retest clean-test-results regen-expected bench clean install uninstall deps
+.PHONY: all parse bootstrap codegen test retest clean-test-results regen-expected bench optcarrot clean install uninstall deps
 
 all: parse regexp spinel_codegen$(EXE)
 
@@ -377,6 +377,34 @@ bench: spinel_parse$(EXE) $(SP_RT_LIB) spinel_codegen$(EXE)
 	rm -f /tmp/_sp_b.ast /tmp/_sp_b.c /tmp/_sp_b.c.o /tmp/_sp_b_bin$(EXE) /tmp/_sp_b_exp /tmp/_sp_b_act /tmp/_sp_b_exp.n /tmp/_sp_b_act.n; \
 	echo "Benchmarks: $$pass pass, $$fail fail, $$err error, $$skip skip"; \
 	if [ $$fail -ne 0 ] || [ $$err -ne 0 ]; then exit 1; fi
+
+# ---- Optcarrot integration test ----
+#
+# End-to-end pipeline: clone optcarrot's `experiment/spinel` branch,
+# pack `lib/optcarrot/*.rb` into a single Ruby file via the upstream
+# `tools/pack-for-spinel.rb`, compile through spinel, run the
+# resulting binary against `examples/Lan_Master.nes`, and verify the
+# output contains `fps: <num>` and `checksum: 59662` (the canonical
+# 180-frame checksum for `--benchmark`).
+
+OPTCARROT_DIR  := build/optcarrot
+OPTCARROT_REPO := https://github.com/mame/optcarrot.git
+OPTCARROT_BRANCH := experiment/spinel
+
+optcarrot: spinel_parse$(EXE) $(SP_RT_LIB) spinel_codegen$(EXE)
+	@if [ ! -d $(OPTCARROT_DIR) ]; then \
+	  git clone --depth=1 --branch=$(OPTCARROT_BRANCH) $(OPTCARROT_REPO) $(OPTCARROT_DIR); \
+	fi
+	@ruby $(OPTCARROT_DIR)/tools/pack-for-spinel.rb > build/optcarrot-single.rb
+	@./spinel build/optcarrot-single.rb -o build/optcarrot-single
+	@out=$$($(TIMEOUT60) ./build/optcarrot-single 2>&1); \
+	echo "$$out"; \
+	if echo "$$out" | grep -qE "^fps: [0-9.]+$$" && echo "$$out" | grep -q "^checksum: 59662$$"; then \
+	  echo "Optcarrot: OK"; \
+	else \
+	  echo "Optcarrot: FAIL — expected 'fps: <num>' and 'checksum: 59662'"; \
+	  exit 1; \
+	fi
 
 # ---- Install ----
 
