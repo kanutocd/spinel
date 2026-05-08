@@ -18207,17 +18207,8 @@ class Compiler
         else
           @current_method_return = "obj_" + cname
         end
-        all_params = @cls_meth_params[ci].split("|")
-        all_ptypes = @cls_meth_ptypes[ci].split("|")
-        pnames = "".split(",")
-        ptypes = "".split(",")
-
-        if init_idx < all_params.length
-          pnames = all_params[init_idx].split(",")
-        end
-        if init_idx < all_ptypes.length
-          ptypes = all_ptypes[init_idx].split(",")
-        end
+        pnames = cls_meth_pnames_get(ci, init_idx)
+        ptypes = cls_meth_ptypes_get(ci, init_idx)
         push_scope
         k = 0
         while k < pnames.length
@@ -18541,17 +18532,8 @@ class Compiler
         # otherwise leave `_gc_saved` undeclared.
         saved_in_gc_scope2 = @in_gc_scope
         @in_gc_scope = 0
-        all_params = @cls_meth_params[ci].split("|")
-        all_ptypes = @cls_meth_ptypes[ci].split("|")
-        pnames = "".split(",")
-        ptypes = "".split(",")
-
-        if init_idx < all_params.length
-          pnames = all_params[init_idx].split(",")
-        end
-        if init_idx < all_ptypes.length
-          ptypes = all_ptypes[init_idx].split(",")
-        end
+        pnames = cls_meth_pnames_get(ci, init_idx)
+        ptypes = cls_meth_ptypes_get(ci, init_idx)
         push_scope
         k = 0
         while k < pnames.length
