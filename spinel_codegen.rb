@@ -1192,7 +1192,7 @@ class Compiler
     if name == "ARGV" || name == "ENV" || name == "STDIN" || name == "STDOUT" || name == "STDERR"
       return 1
     end
-    if name == "Math" || name == "File" || name == "Dir" || name == "Time" || name == "IO" || name == "Process" || name == "Kernel" || name == "Comparable" || name == "Enumerable"
+    if name == "Math" || name == "File" || name == "Dir" || name == "Time" || name == "IO" || name == "Process" || name == "Kernel" || name == "Comparable" || name == "Enumerable" || name == "Complex"
       return 1
     end
     if name == "Object" || name == "Integer" || name == "String" || name == "Float" || name == "Symbol" || name == "Array" || name == "Hash" || name == "Range" || name == "Numeric" || name == "TrueClass" || name == "FalseClass" || name == "NilClass" || name == "Proc" || name == "Lambda" || name == "Regexp" || name == "MatchData" || name == "StringIO" || name == "Fiber"
@@ -3376,6 +3376,9 @@ class Compiler
         if lt == "float"
           return "float"
         end
+        if lt == "complex"
+          return "complex"
+        end
         # Check RHS for float promotion
         args_id = @nd_arguments[nid]
         if args_id >= 0
@@ -3429,6 +3432,9 @@ class Compiler
         if is_array_type(lt) == 1
           # Array#* (repeat) yields another array of the same element type.
           return lt
+        end
+        if lt == "complex"
+          return "complex"
         end
         # Check RHS for float promotion
         args_id = @nd_arguments[nid]
@@ -4773,6 +4779,11 @@ class Compiler
             return "time"
           end
         end
+        if rcname == "Complex"
+          if mname == "polar"
+            return "complex"
+          end
+        end
         if rcname == "File"
           if mname == "read" || mname == "binread"
             return "string"
@@ -4958,6 +4969,15 @@ class Compiler
     # Method call on poly
     if recv >= 0
       rt = infer_type(recv)
+      # Complex value-type methods.
+      if rt == "complex"
+        if mname == "real" || mname == "imaginary" || mname == "imag"
+          return "float"
+        end
+        if mname == "conjugate" || mname == "conj"
+          return "complex"
+        end
+      end
       if rt == "poly"
         if mname == "nil?"
           return "bool"
@@ -5665,6 +5685,9 @@ class Compiler
     if t == "time"
       return "sp_Time"
     end
+    if t == "complex"
+      return "sp_Complex"
+    end
     if t == "int"
       return "mrb_int"
     end
@@ -5787,6 +5810,9 @@ class Compiler
     end
     if t == "time"
       return "((sp_Time){0,0})"
+    end
+    if t == "complex"
+      return "((sp_Complex){0,0})"
     end
     if t == "int"
       return "0"
@@ -23459,6 +23485,19 @@ class Compiler
       end
     end
 
+    # Complex (value-type sp_Complex)
+    if recv_type == "complex"
+      if mname == "real"
+        return "(" + rc + ").re"
+      end
+      if mname == "imaginary" || mname == "imag"
+        return "(" + rc + ").im"
+      end
+      if mname == "conjugate" || mname == "conj"
+        return "sp_complex_conjugate(" + rc + ")"
+      end
+    end
+
     # Integer methods
     if recv_type == "int"
       r = compile_int_method_expr(nid, mname, rc)
@@ -24315,6 +24354,12 @@ class Compiler
         emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + arg + ", " + itmp + "));")
         return tmp
       end
+      if lt == "complex"
+        rhs_id_c = @nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1
+        if rhs_id_c >= 0 && infer_type(rhs_id_c) == "complex"
+          return "sp_complex_add(" + compile_expr(recv) + ", " + compile_expr(rhs_id_c) + ")"
+        end
+      end
       return "(" + compile_expr(recv) + " + " + compile_arg0_as_int(nid) + ")"
     end
     if mname == "-"
@@ -24370,6 +24415,12 @@ class Compiler
         emit("  sp_" + pfx + " *" + tmp + " = sp_" + pfx + "_new();")
         emit("  { mrb_int _mi; mrb_int _sl = sp_" + pfx + "_length(" + src + "); for (_mi = 0; _mi < " + cnt + "; _mi++) { mrb_int _mj; for (_mj = 0; _mj < _sl; _mj++) sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + src + ", _mj)); } }")
         return tmp
+      end
+      if lt == "complex"
+        rhs_id_cm = @nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1
+        if rhs_id_cm >= 0 && infer_type(rhs_id_cm) == "complex"
+          return "sp_complex_mul(" + compile_expr(recv) + ", " + compile_expr(rhs_id_cm) + ")"
+        end
       end
       return "(" + compile_expr(recv) + " * " + compile_arg0_as_int(nid) + ")"
     end
@@ -27823,6 +27874,36 @@ class Compiler
           return "sp_time_at_int(" + arg_id + ")"
         end
       end
+      # Complex.polar(magnitude, angle) — value-type Cartesian
+      # Complex (sp_Complex). Used in optcarrot's nestopia palette
+      # generator; see lib/sp_runtime.h for the runtime helpers.
+      # Args may arrive boxed (poly) when the surrounding code
+      # destructured them out of a poly_array; unbox via
+      # sp_poly_to_f rather than a plain `(mrb_float)` cast (the
+      # cast would mis-reinterpret the sp_RbVal struct).
+      if rcname == "Complex"
+        if mname == "polar"
+          args_id_cp = @nd_arguments[nid]
+          if args_id_cp >= 0
+            aargs_cp = get_args(args_id_cp)
+            if aargs_cp.length >= 2
+              a0_e = compile_expr(aargs_cp[0])
+              a1_e = compile_expr(aargs_cp[1])
+              if infer_type(aargs_cp[0]) == "poly"
+                a0_e = "sp_poly_to_f(" + a0_e + ")"
+              else
+                a0_e = "(mrb_float)(" + a0_e + ")"
+              end
+              if infer_type(aargs_cp[1]) == "poly"
+                a1_e = "sp_poly_to_f(" + a1_e + ")"
+              else
+                a1_e = "(mrb_float)(" + a1_e + ")"
+              end
+              return "sp_complex_polar(" + a0_e + ", " + a1_e + ")"
+            end
+          end
+        end
+      end
       # Process.clock_gettime — assume CLOCK_MONOTONIC; the clock_id
       # arg is not modeled. Returns seconds as a float.
       if rcname == "Process"
@@ -31228,6 +31309,10 @@ class Compiler
       if op == "+"
         if vt == "string" && infer_type(@nd_expression[nid]) == "string"
           emit("  " + vref + " = sp_str_concat(" + vref + ", " + val + ");")
+        elsif vt == "complex" && infer_type(@nd_expression[nid]) == "complex"
+          # `+=` on a struct doesn't compile in C; desugar to
+          # `vref = sp_complex_add(vref, val)`.
+          emit("  " + vref + " = sp_complex_add(" + vref + ", " + val + ");")
         else
           emit("  " + vref + " += " + val + ";")
         end
@@ -31236,7 +31321,11 @@ class Compiler
         emit("  " + vref + " -= " + val + ";")
       end
       if op == "*"
-        emit("  " + vref + " *= " + val + ";")
+        if vt == "complex" && infer_type(@nd_expression[nid]) == "complex"
+          emit("  " + vref + " = sp_complex_mul(" + vref + ", " + val + ");")
+        else
+          emit("  " + vref + " *= " + val + ";")
+        end
       end
       if op == "/"
         emit("  " + vref + " = sp_idiv(" + vref + ", " + val + ");")

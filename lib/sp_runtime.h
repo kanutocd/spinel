@@ -99,6 +99,17 @@ static const char*sp_int_chr(mrb_int n){char*s=sp_str_alloc_raw(2);s[0]=(char)n;
 typedef struct{mrb_int first;mrb_int last;}sp_Range;
 static sp_Range sp_range_new(mrb_int f,mrb_int l){sp_Range r;r.first=f;r.last=l;return r;}
 
+/* ---- Complex runtime ---- */
+/* Value-type Cartesian Complex: 16 bytes, passed by value. Used by
+   optcarrot's nestopia palette generator; the palette is precomputed
+   in the default code path so this is exercised only with
+   `--nestopia-palette`. */
+typedef struct{mrb_float re;mrb_float im;}sp_Complex;
+static inline sp_Complex sp_complex_polar(mrb_float m,mrb_float a){sp_Complex c;c.re=m*cos(a);c.im=m*sin(a);return c;}
+static inline sp_Complex sp_complex_add(sp_Complex a,sp_Complex b){sp_Complex c;c.re=a.re+b.re;c.im=a.im+b.im;return c;}
+static inline sp_Complex sp_complex_mul(sp_Complex a,sp_Complex b){sp_Complex c;c.re=a.re*b.re-a.im*b.im;c.im=a.re*b.im+a.im*b.re;return c;}
+static inline sp_Complex sp_complex_conjugate(sp_Complex a){sp_Complex c;c.re=a.re;c.im=-a.im;return c;}
+
 /* ---- Time runtime ---- */
 /* sp_Time keeps Time.now / Time.at as value-typed structs. d78149b's
    sub-second precision is preserved by inlining tv_sec + tv_nsec/1e9
