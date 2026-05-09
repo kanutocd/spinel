@@ -470,6 +470,10 @@ class Compiler
     @proc_captures = "".split(",")
     @proc_capture_types = "".split(",")
 
+    # Inline-rename map for compile_yield_method_call_stmt / _expr.
+    @inline_rename_map_from = nil
+    @inline_rename_map_to = nil
+
     # Symbol type Phase 2 Step 1: intern table (infrastructure only; unused yet).
     @sym_names = "".split(",")
 
@@ -23020,6 +23024,20 @@ class Compiler
       # cells from outer functions are not visible here.
       return "lv_" + name
     end
+    # Issue #392 / #395: when inside an inlined yield-method body,
+    # local references go through this hot path. The inliner stashes
+    # its rename suffix in @inline_rename_map_from / _to so a CallNode
+    # whose recv falls through to compile_expr (instead of
+    # compile_expr_remap) still picks up the renamed local.
+    if @inline_rename_map_from != nil
+      ki = 0
+      while ki < @inline_rename_map_from.length
+        if @inline_rename_map_from[ki] == name
+          return "lv_" + @inline_rename_map_to[ki]
+        end
+        ki = ki + 1
+      end
+    end
     cell = heap_promoted_cell(name)
     if cell != "" && find_var_type(name) != ""
       return "(*" + cell + ")"
@@ -39974,7 +39992,12 @@ class Compiler
     end
 
     # Compile function body, replacing yield with block body
-    # and renaming function locals to temp names
+    # and renaming function locals to temp names. Stash the rename
+    # map for fiber_var_ref (Issue #392 / #395).
+    saved_in_rmf = @inline_rename_map_from
+    saved_in_rmt = @inline_rename_map_to
+    @inline_rename_map_from = param_map_from
+    @inline_rename_map_to = param_map_to
     if bid >= 0
       stmts = get_stmts(bid)
       k = 0
@@ -39983,6 +40006,8 @@ class Compiler
         k = k + 1
       end
     end
+    @inline_rename_map_from = saved_in_rmf
+    @inline_rename_map_to = saved_in_rmt
   end
 
   # Issue #396: expression-context counterpart of compile_yield_call_stmt.
@@ -40056,6 +40081,10 @@ class Compiler
     rt_yc = @meth_return_types[mi]
     result_tmp = new_temp
     emit("  " + c_type(rt_yc) + " " + result_tmp + " = " + c_return_default(rt_yc) + ";")
+    saved_in_rmf = @inline_rename_map_from
+    saved_in_rmt = @inline_rename_map_to
+    @inline_rename_map_from = param_map_from
+    @inline_rename_map_to = param_map_to
     if bid >= 0
       stmts = get_stmts(bid)
       n = stmts.length
@@ -40080,6 +40109,8 @@ class Compiler
         end
       end
     end
+    @inline_rename_map_from = saved_in_rmf
+    @inline_rename_map_to = saved_in_rmt
     result_tmp
   end
 
@@ -40235,6 +40266,39 @@ class Compiler
       # but for simplicity, just skip
       return
     end
+    if t == "UnlessNode"
+      # Issue #392: `raise X unless Y` previously fell through to
+      # compile_expr_remap's default, which emitted the cond as a
+      # no-op ternary AND the raise unconditionally as a separate
+      # statement. Inline as `if (!cond) { body } [else { else }]`.
+      cond = compile_expr_remap(@nd_predicate[nid], map_from, map_to)
+      emit("  if (!(" + cond + ")) {")
+      @indent = @indent + 1
+      body = @nd_body[nid]
+      if body >= 0
+        bs = get_stmts(body)
+        bk = 0
+        while bk < bs.length
+          compile_stmt_with_block(bs[bk], blk, bp_names, map_from, map_to)
+          bk = bk + 1
+        end
+      end
+      @indent = @indent - 1
+      ec = @nd_else_clause[nid]
+      if ec >= 0
+        emit("  } else {")
+        @indent = @indent + 1
+        es = get_stmts(@nd_body[ec])
+        ek = 0
+        while ek < es.length
+          compile_stmt_with_block(es[ek], blk, bp_names, map_from, map_to)
+          ek = ek + 1
+        end
+        @indent = @indent - 1
+      end
+      emit("  }")
+      return
+    end
     # Default: for expression statements, use remap
     val = compile_expr_remap(nid, map_from, map_to)
     if val != "0"
@@ -40316,6 +40380,38 @@ class Compiler
         end
         if mname == "!="
           return "(" + compile_expr_remap(recv, map_from, map_to) + " != " + compile_expr_remap_arg0(nid, map_from, map_to) + ")"
+        end
+        # `[]` / `[]=` / `length` / `size` on a remapped local: compute
+        # the receiver's type so the dispatch picks the right runtime
+        # accessor, then emit with the remapped receiver expression.
+        # Issue #395: without this `arr[i]` inside the inlined body
+        # falls through to compile_expr below, which doesn't see the
+        # remap and emits `lv_i` instead of `lv_i_y1`.
+        if mname == "[]" || mname == "length" || mname == "size"
+          rt_r = infer_type(recv)
+          rc_r = compile_expr_remap(recv, map_from, map_to)
+          if rt_r == "str_array" && mname == "[]"
+            arg_r = compile_expr_remap_arg0(nid, map_from, map_to)
+            return "sp_StrArray_get(" + rc_r + ", " + arg_r + ")"
+          end
+          if rt_r == "int_array" && mname == "[]"
+            arg_r = compile_expr_remap_arg0(nid, map_from, map_to)
+            return "sp_IntArray_get(" + rc_r + ", " + arg_r + ")"
+          end
+          if rt_r == "float_array" && mname == "[]"
+            arg_r = compile_expr_remap_arg0(nid, map_from, map_to)
+            return "sp_FloatArray_get(" + rc_r + ", " + arg_r + ")"
+          end
+          if (rt_r == "str_array" || rt_r == "int_array" || rt_r == "sym_array") && (mname == "length" || mname == "size")
+            pfx_r = "IntArray"
+            if rt_r == "str_array"
+              pfx_r = "StrArray"
+            end
+            return "sp_" + pfx_r + "_length(" + rc_r + ")"
+          end
+          if rt_r == "float_array" && (mname == "length" || mname == "size")
+            return "sp_FloatArray_length(" + rc_r + ")"
+          end
         end
       end
     end
@@ -40446,6 +40542,16 @@ class Compiler
     saved_ci = @current_class_idx
     @current_class_idx = cci
 
+    # Issue #395: route ivar reads / writes that fall through to
+    # compile_expr (rather than through compile_expr_remap's remap
+    # table) to the receiver instead of the literal `self`. Without
+    # this, a `@keys` reference inside the inlined body would emit
+    # `self->iv_keys` -- but the inlining happens at a call site
+    # whose enclosing function may not have `self` declared (e.g.
+    # main()).
+    saved_self_override = @self_override
+    @self_override = rc
+
     @block_counter = @block_counter + 1
     suffix = "_y" + @block_counter.to_s
 
@@ -40500,7 +40606,14 @@ class Compiler
       end
     end
 
-    # Compile the method body inline with yield -> block body
+    # Compile the method body inline with yield -> block body.
+    # Stash the rename map in @inline_rename_map_* so fiber_var_ref
+    # picks up the renamed locals when a CallNode falls through to
+    # compile_expr (Issue #392 / #395).
+    saved_in_rmf = @inline_rename_map_from
+    saved_in_rmt = @inline_rename_map_to
+    @inline_rename_map_from = map_from
+    @inline_rename_map_to = map_to
     if bid >= 0
       stmts = get_stmts(bid)
       k = 0
@@ -40509,7 +40622,10 @@ class Compiler
         k = k + 1
       end
     end
+    @inline_rename_map_from = saved_in_rmf
+    @inline_rename_map_to = saved_in_rmt
 
+    @self_override = saved_self_override
     @current_class_idx = saved_ci
   end
 
