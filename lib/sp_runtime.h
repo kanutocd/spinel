@@ -99,6 +99,16 @@ static const char*sp_int_chr(mrb_int n){char*s=sp_str_alloc_raw(2);s[0]=(char)n;
 typedef struct{mrb_int first;mrb_int last;}sp_Range;
 static sp_Range sp_range_new(mrb_int f,mrb_int l){sp_Range r;r.first=f;r.last=l;return r;}
 
+/* ---- Class object (issue #404 Phase 1) ----
+   Value-type Class reference: a single class id that indexes into
+   the per-program sp_class_names[] table emitted by codegen. Lets
+   `c = Foo` produce a runtime value (`(sp_Class){<id>}`) instead of
+   a bare C identifier, and `c.to_s` lower to a names-table lookup.
+   Other Class methods (`.name`, `.inspect`, `.==`, `.!=`,
+   `.superclass`, `.ancestors`, dynamic `is_a?(c)` against a
+   variable, etc.) are out of scope for Phase 1. */
+typedef struct{mrb_int cls_id;}sp_Class;
+
 /* ---- Complex runtime ---- */
 /* Value-type Cartesian Complex: 16 bytes, passed by value. Used by
    optcarrot's nestopia palette generator; the palette is precomputed

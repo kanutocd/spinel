@@ -130,6 +130,13 @@ class Compiler
     # ---- Classes (parallel arrays) ----
     @cls_names = "".split(",")
     @cls_parents = "".split(",")
+    # Issue #404 Phase 1: emit-time toggle for the per-program
+    # sp_class_names[] table + sp_class_to_s helper. compile_expr's
+    # ConstantReadNode arm and any class.to_s lowering set this to 1
+    # before generate_code finalizes -- when no Class-as-value site
+    # ever fires, we elide the table to keep the small-program emit
+    # tight.
+    @needs_class_table = 0
     @cls_ivar_names = "".split(",")
     @cls_ivar_types = "".split(",")
     # Per-ivar flag: was the ivar's first scanned write a definite
@@ -2594,7 +2601,13 @@ class Compiler
       end
       cx = find_class_idx(rname)
       if cx >= 0
-        return "class_" + rname
+        # Issue #404 Phase 1: a class constant in value position is
+        # a sp_Class value carrying its cls_id. Other call sites that
+        # still want the "this name is a class, not a value" signal
+        # (constructor lookups, class-method dispatch) consult
+        # find_class_idx directly via constructor_class_name and
+        # never call infer_type on the receiver.
+        return "class"
       end
       return "int"
     end
@@ -2607,7 +2620,8 @@ class Compiler
         end
         cx = find_class_idx(cpname)
         if cx >= 0
-          return "class_" + cpname
+          # Issue #404 Phase 1: class constant in value position.
+          return "class"
         end
       end
       parent = @nd_receiver[nid]
@@ -5887,6 +5901,12 @@ class Compiler
     if t == "poly"
       return "sp_RbVal"
     end
+    if t == "class"
+      # Issue #404 Phase 1: class object as value. Carries the class
+      # id so `c.to_s` can index sp_class_names[].
+      @needs_class_table = 1
+      return "sp_Class"
+    end
     if t == "proc"
       return "sp_Proc *"
     end
@@ -5963,6 +5983,12 @@ class Compiler
     end
     if t == "poly"
       return "sp_box_nil()"
+    end
+    if t == "class"
+      # Issue #404 Phase 1: -1 is the "no class" sentinel; sp_class_to_s
+      # returns "" for it. Locals declared `sp_Class lv_x = ((sp_Class){-1})`
+      # are equivalent to nil for to_s purposes.
+      return "((sp_Class){-1LL})"
     end
     if t == "stringio"
       return "NULL"
@@ -16439,6 +16465,11 @@ class Compiler
       emit_regexp_runtime
       emit_dyn_regex_helpers
     end
+    # Issue #404 Phase 1: emit the sp_class_names[] table + the
+    # sp_class_to_s helper before emit_class_structs so user-class
+    # forward decls can reference sp_Class without an additional
+    # forward declaration.
+    emit_class_runtime
     emit_class_structs
     emit_raw("/*TUPLE_INSERT_POINT*/")
     emit_gc_scan_functions
@@ -17001,6 +17032,44 @@ class Compiler
 
   # Symbol type Phase 2, Step 2: emit the intern table and helpers.
   # SymbolNode now compiles to sp_sym values that index into sp_sym_names.
+  # Issue #404 Phase 1: emit the per-program sp_class_names[]
+  # table + sp_class_to_s helper. Class ids match the index
+  # ordering of @cls_names. Indexed lookups (`sp_class_to_s`)
+  # bound-check + return "" for the -1 sentinel that
+  # c_default_val("class") emits.
+  #
+  # The original attempt at this cluster gated emission on
+  # @needs_class_table (set by compile_expr's class-const arm),
+  # but that flag toggles only after generate_code has already
+  # called this function -- so the gate was always 0 at emit
+  # time. The simple fix: emit whenever any user class exists.
+  # For programs that never reach for a Class value the dead
+  # `sp_class_to_s` is `__attribute__((unused))` and
+  # link-eliminated, so the only residual cost is the names
+  # array (~one cache line for typical small programs, ~1KB at
+  # spinel_codegen scale).
+  def emit_class_runtime
+    if @cls_names.length == 0
+      return
+    end
+    emit_raw("/* sp_Class names table (issue #404) */")
+    emit_raw("#define SP_CLASS_COUNT " + @cls_names.length.to_s)
+    line = "static const char *const sp_class_names[" + @cls_names.length.to_s + "] = {"
+    i = 0
+    while i < @cls_names.length
+      if i > 0
+        line = line + ","
+      end
+      line = line + c_string_literal(@cls_names[i])
+      i = i + 1
+    end
+    line = line + "};"
+    emit_raw(line)
+    emit_raw("static const char *sp_class_to_s(sp_Class c) __attribute__((unused));")
+    emit_raw("static const char *sp_class_to_s(sp_Class c){if(c.cls_id>=0&&c.cls_id<SP_CLASS_COUNT)return sp_class_names[c.cls_id];return \"\";}")
+    emit_raw("")
+  end
+
   def emit_sym_runtime
     if @sym_names.length > 0
       emit_raw("/* sp_sym intern table */")
@@ -22623,6 +22692,20 @@ class Compiler
           return lv
         end
         return "cst_" + rname
+      end
+      # Issue #404 Phase 1: a class constant in value position
+      # (`c = Foo`, `f(Foo)`, hash value, etc.) lowers to a
+      # sp_Class compound literal carrying the class id. The
+      # cls_id is just the class's index in @cls_names; the
+      # generated sp_class_names[] table indexes by that. Class
+      # constants used as method-call receivers are handled by
+      # constructor_class_name / cls_cmethod_owner without ever
+      # going through compile_expr on the receiver, so this
+      # branch only ever fires in a true value-position site.
+      cls_idx_404 = find_class_idx(rname)
+      if cls_idx_404 >= 0
+        @needs_class_table = 1
+        return "((sp_Class){" + cls_idx_404.to_s + "LL})"
       end
       # Built-in module-like constants (Math, File, ENV, …) and
       # registered classes / modules legitimately reach here as a
@@ -29268,6 +29351,19 @@ class Compiler
   end
 
   def compile_object_method_expr(nid, mname, rc, recv_type)
+    # Issue #404 Phase 1: methods on a sp_Class value. Only `.to_s`
+    # is wired up; the broader Class API (`.name`, `.inspect`,
+    # `.==`, `.!=`, `.superclass`, `.ancestors`, dynamic
+    # `is_a?(c)` against a variable) is out of scope and left for
+    # Phase 2. The stash from the earlier broader attempt
+    # documented in memory had bootstrap issues; this narrower
+    # surface keeps the change small enough to verify locally.
+    if recv_type == "class"
+      if mname == "to_s"
+        @needs_class_table = 1
+        return "sp_class_to_s(" + rc + ")"
+      end
+    end
     # Object method calls
     if is_obj_type(recv_type) == 1
       bt = base_type(recv_type)
