@@ -546,8 +546,10 @@ static mrb_int sp_str_index(const char*s,const char*sub){const char*f=strstr(s,s
    Negative start counts back from the end of the string. Returns the
    absolute codepoint offset of the match (not relative to start), or
    -1 when no match exists at or after start. Out-of-range starts
-   (start > length) return -1, matching CRuby. */
-static mrb_int sp_str_index_from(const char*s,const char*sub,mrb_int start){mrb_int cl=sp_str_length(s);if(start<0)start+=cl;if(start<0)start=0;if(start>cl)return -1;size_t boff=sp_utf8_byte_offset(s,start);const char*f=strstr(s+boff,sub);if(!f)return -1;mrb_int n=0;const char*p=s;while(p<f){p+=sp_utf8_advance(p);n++;}return n;}
+   (start > length) return -1, matching CRuby. The codepoint counter
+   begins at `start` and walks from `s + boff`, so the "walk all
+   matches" loop is O(N) total rather than O(N^2). */
+static mrb_int sp_str_index_from(const char*s,const char*sub,mrb_int start){mrb_int cl=sp_str_length(s);if(start<0)start+=cl;if(start<0)start=0;if(start>cl)return -1;size_t boff=sp_utf8_byte_offset(s,start);const char*f=strstr(s+boff,sub);if(!f)return -1;mrb_int n=start;const char*p=s+boff;while(p<f){p+=sp_utf8_advance(p);n++;}return n;}
 static mrb_int sp_str_rindex(const char*s,const char*sub){size_t sl=strlen(sub);if(sl==0)return sp_str_length(s);const char*last=NULL;const char*p=s;while((p=strstr(p,sub))){last=p;p++;}if(!last)return -1;mrb_int n=0;const char*q=s;while(q<last){q+=sp_utf8_advance(q);n++;}return n;}
 static char sp_char_cache[256][3];
 static int sp_char_cache_init = 0;
