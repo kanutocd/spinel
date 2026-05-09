@@ -5085,6 +5085,11 @@ class Compiler
     val_types = "".split(",")
     key_types = "".split(",")
     collect_param_hash_writes(nid, pname, val_types, key_types)
+    # Issue #408: also harvest signals from `pname.each do |k, v|`
+    # block bodies. Programs that read-only-iterate the hash never
+    # hit the `[]=` collector above, leaving the param widened to
+    # whatever poly-ish variant an upstream call site picked.
+    collect_param_each_block_signals(nid, pname, val_types, key_types)
     if val_types.length == 0
       return ""
     end
@@ -5127,6 +5132,119 @@ class Compiler
       collect_param_hash_writes(cs[k], pname, val_types, key_types)
       k = k + 1
     end
+  end
+
+  # Issue #408 (followup to #397). Walk `nid` for `pname.each do |k, v|`
+  # block expressions and harvest type signals from how `k` and `v` are
+  # used inside the block. The existing `[]=` collector above only fires
+  # for write-back patterns (`pname[k] = v`); a method that *reads* the
+  # hash via `each` -- the dominant Tep::Json shape -- contributes
+  # nothing through that path, so the param's hash variant stays at
+  # whichever poly-ish form an earlier widening pinned it to.
+  #
+  # Heuristic: a `+`-chain whose transitive leaves include both a
+  # string literal and a reference to k_pname / v_pname is treated as
+  # evidence that the corresponding side is string-typed. This catches
+  # the canonical `out + k + "=" + v` formatter without needing to
+  # interpret arbitrary callee signatures (which would themselves be
+  # mid-inference and unreliable).
+  def collect_param_each_block_signals(nid, pname, val_types, key_types)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode" && @nd_name[nid] == "each"
+      r_408 = @nd_receiver[nid]
+      if r_408 >= 0 && @nd_type[r_408] == "LocalVariableReadNode" && @nd_name[r_408] == pname
+        blk_408 = @nd_block[nid]
+        if blk_408 >= 0
+          k_pname_408 = get_block_param(nid, 0)
+          v_pname_408 = get_block_param(nid, 1)
+          body_408 = @nd_body[blk_408]
+          if body_408 >= 0
+            collect_each_block_concat_signals(body_408, k_pname_408, v_pname_408, val_types, key_types)
+          end
+        end
+      end
+    end
+    cs_408 = []
+    push_child_ids(nid, cs_408)
+    k_408 = 0
+    while k_408 < cs_408.length
+      collect_param_each_block_signals(cs_408[k_408], pname, val_types, key_types)
+      k_408 = k_408 + 1
+    end
+  end
+
+  def collect_each_block_concat_signals(nid, k_pname, v_pname, val_types, key_types)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode" && @nd_name[nid] == "+"
+      leaves_408 = []
+      collect_concat_chain_leaves(nid, leaves_408)
+      has_str_lit_408 = 0
+      has_k_408 = 0
+      has_v_408 = 0
+      li_408 = 0
+      while li_408 < leaves_408.length
+        lt_408 = @nd_type[leaves_408[li_408]]
+        if lt_408 == "StringNode" || lt_408 == "InterpolatedStringNode"
+          has_str_lit_408 = 1
+        end
+        if lt_408 == "LocalVariableReadNode"
+          ln_408 = @nd_name[leaves_408[li_408]]
+          if ln_408 == k_pname && k_pname != ""
+            has_k_408 = 1
+          end
+          if ln_408 == v_pname && v_pname != ""
+            has_v_408 = 1
+          end
+        end
+        li_408 = li_408 + 1
+      end
+      if has_str_lit_408 == 1
+        if has_k_408 == 1 && not_in("string", key_types) == 1
+          key_types.push("string")
+        end
+        if has_v_408 == 1 && not_in("string", val_types) == 1
+          val_types.push("string")
+        end
+      end
+    end
+    cs_408b = []
+    push_child_ids(nid, cs_408b)
+    k_408b = 0
+    while k_408b < cs_408b.length
+      collect_each_block_concat_signals(cs_408b[k_408b], k_pname, v_pname, val_types, key_types)
+      k_408b = k_408b + 1
+    end
+  end
+
+  # Flatten a left-associative `+` chain into its leaves. `out + k + "="
+  # + v` parses as `((out + k) + "=") + v`; this returns
+  # `[out, k, "=", v]` regardless of nesting depth so the caller can
+  # check membership without recursing through CallNode shells.
+  def collect_concat_chain_leaves(nid, leaves)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode" && @nd_name[nid] == "+"
+      r_chain = @nd_receiver[nid]
+      if r_chain >= 0
+        collect_concat_chain_leaves(r_chain, leaves)
+      end
+      args_id_chain = @nd_arguments[nid]
+      if args_id_chain >= 0
+        args_chain = get_args(args_id_chain)
+        ai_chain = 0
+        while ai_chain < args_chain.length
+          collect_concat_chain_leaves(args_chain[ai_chain], leaves)
+          ai_chain = ai_chain + 1
+        end
+      end
+      return
+    end
+    leaves.push(nid)
   end
 
   def hash_key_part(t)
