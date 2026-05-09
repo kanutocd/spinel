@@ -1550,12 +1550,21 @@ class Compiler
     # underlying pattern, so `RX = /pat/; RX.match?(s)` and
     # `s =~ RX` dispatch to the engine instead of falling through
     # to the literal-`(-1)` / `sp_str_include` fallbacks.
+    # Also unwrap `.freeze` (`PATTERN = /pat/.freeze`) — Prism wraps
+    # the literal in a `freeze` CallNode whose receiver is the
+    # RegularExpressionNode. Issue #394.
     if @nd_type[nid] == "ConstantReadNode"
       cname = resolve_const_ref_name(nid)
       if cname != ""
         ci = find_const_idx(cname)
         if ci >= 0 && ci < @const_expr_ids.length
           eid = @const_expr_ids[ci]
+          if eid >= 0 && @nd_type[eid] == "CallNode" && @nd_name[eid] == "freeze"
+            recv_freeze = @nd_receiver[eid]
+            if recv_freeze >= 0
+              eid = recv_freeze
+            end
+          end
           if eid >= 0 && @nd_type[eid] == "RegularExpressionNode"
             return find_regexp_index(eid)
           end
