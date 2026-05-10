@@ -3535,6 +3535,14 @@ class Compiler
         if rt == "float_array"
           return "float"
         end
+        # User-class ptr_array: `arr.delete_at(i)` returns the
+        # popped instance pointer, typed to the array's element
+        # class. Without this branch the assignment target
+        # (`v = arr.delete_at(i)`) defaults to int and the C
+        # compile fails on the implicit ptr-to-int cast.
+        if is_ptr_array_type(rt) == 1
+          return ptr_array_elem_type(rt)
+        end
       end
       return "int"
     end
