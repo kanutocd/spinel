@@ -14280,6 +14280,12 @@ class Compiler
     # Update called method param types from argument types at call sites.
     # Run multiple passes for propagation.
     pass = 0
+    # Stop this local propagation loop once the class-body call type tables
+    # stop changing; later passes would rescan the same bodies without
+    # teaching any callee a new argument type. Keep the previous pass's
+    # signature instead of recomputing it at the top of every pass, because
+    # the prior `cur_sig` is exactly the next pass's `prev_sig`.
+    prev_sig = class_body_call_type_signature
     while pass < 5
       ci = 0
       while ci < @cls_names.length
@@ -14392,6 +14398,11 @@ class Compiler
         @current_method_name = saved_meth_cb
         ci = ci + 1
       end
+      cur_sig = class_body_call_type_signature
+      if cur_sig == prev_sig
+        break
+      end
+      prev_sig = cur_sig
       pass = pass + 1
     end
   end
@@ -14553,6 +14564,15 @@ class Compiler
   # fixed point has been reached and further iterations are wasted work.
   def inference_signature
     @meth_return_types.join("|") + "/" + @cls_ivar_types.join("|") + "/" + @meth_param_types.join("|") + "/" + @cls_meth_ptypes.join("/")
+  end
+
+  # `inference_signature` covers the wider analyze-phase fixpoint, including
+  # return and ivar types that `infer_class_body_call_types` does not refine
+  # directly. This narrower fingerprint tracks only the param-type tables that
+  # can affect the next class-body call pass, so an unrelated wider signature
+  # change does not force this local loop to spend all five passes.
+  def class_body_call_type_signature
+    @meth_param_types.join("|") + "/" + @cls_meth_ptypes.join("/") + "/" + @cls_cmeth_ptypes.join("/")
   end
 
 
