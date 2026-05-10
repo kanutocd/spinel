@@ -16905,6 +16905,24 @@ class Compiler
     rhs_obj = is_obj_type(at)
     if lhs_obj != rhs_obj
       other_t = lhs_obj == 1 ? at : lt
+      # Issue #423: `obj == nil` / `obj != nil` on a nullable obj
+      # type can't constant-fold -- the runtime pointer is allowed
+      # to be NULL (the type is obj_<C>?), and the body's behavior
+      # depends on the actual value. Fall through to the pointer
+      # comparison emit below. Non-nullable obj types still fold
+      # because the pointer is never NULL by design (locals are
+      # only typed `obj_<C>` after the type-tracker proved every
+      # assigned write is non-nil).
+      if other_t == "nil"
+        obj_side_t = lhs_obj == 1 ? lt : at
+        if is_nullable_type(obj_side_t) == 1
+          obj_expr_nilcmp = lhs_obj == 1 ? compile_expr(recv) : compile_expr(arg_id)
+          if op == "=="
+            return "(" + obj_expr_nilcmp + " == NULL)"
+          end
+          return "(" + obj_expr_nilcmp + " != NULL)"
+        end
+      end
       if lhs_obj == 0 && (other_t == "int" || other_t == "float")
         cname = at[4, at.length - 4]
         ci = find_class_idx(cname)
