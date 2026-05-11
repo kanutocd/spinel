@@ -12073,6 +12073,40 @@ class Compiler
     end
   end
 
+  # Issue #430: when `mname` is an instance method on class `ci`
+  # whose body returns a bare `@<iname>` as its last expression,
+  # return that ivar name. Lets scan_writer_calls treat
+  # `<getter>.push(v)` and `<getter> << v` as if the push were
+  # against the ivar directly. Returns "" when the method
+  # doesn't match the simple getter shape or isn't defined on
+  # the class.
+  def method_returns_ivar_in_class(ci, mname)
+    if ci < 0
+      return ""
+    end
+    midx = cls_find_method_direct(ci, mname)
+    if midx < 0
+      return ""
+    end
+    bodies = @cls_meth_bodies[ci].split(";")
+    if midx >= bodies.length
+      return ""
+    end
+    bid = bodies[midx].to_i
+    if bid < 0
+      return ""
+    end
+    stmts = get_stmts(bid)
+    if stmts.length == 0
+      return ""
+    end
+    last = stmts[stmts.length - 1]
+    if @nd_type[last] == "InstanceVariableReadNode"
+      return @nd_name[last]
+    end
+    ""
+  end
+
   def scan_writer_calls(nid)
     bname = ""
     if nid < 0
@@ -12304,6 +12338,58 @@ class Compiler
                   @needs_rb_value = 1
                 elsif promoted == "poly_poly_hash"
                   @needs_poly_poly_hash = 1
+                  @needs_rb_value = 1
+                end
+              end
+            end
+          end
+        end
+      end
+      # Issue #430: push through a getter method that returns the
+      # ivar. Recognise the canonical "lazy init + return" shape:
+      #
+      #   def errors
+      #     @errors = [] if @errors.nil?
+      #     @errors
+      #   end
+      #   ...
+      #   errors << "bad"
+      #
+      # The recv of `<<` is a bare call to `errors`, not the ivar
+      # directly. Resolve through that to the underlying ivar so
+      # the IntArray default (from `[]`) promotes to the correct
+      # element-typed array when the push args are non-int.
+      push_alias_iname = ""
+      if (mname == "push" || mname == "<<") && @current_class_idx >= 0 && recv >= 0
+        if @nd_type[recv] == "CallNode" && @nd_receiver[recv] < 0
+          getter_mname_430 = @nd_name[recv]
+          push_alias_iname = method_returns_ivar_in_class(@current_class_idx, getter_mname_430)
+        end
+        if @nd_type[recv] == "CallNode" && @nd_receiver[recv] >= 0 && @nd_type[@nd_receiver[recv]] == "SelfNode"
+          getter_mname_430s = @nd_name[recv]
+          push_alias_iname = method_returns_ivar_in_class(@current_class_idx, getter_mname_430s)
+        end
+      end
+      if (mname == "push" || mname == "<<") && @current_class_idx >= 0 && push_alias_iname != ""
+        iname = push_alias_iname
+        cur_t = cls_ivar_type(@current_class_idx, iname)
+        if cur_t == "int_array"
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            ai = get_args(args_id)
+            if ai.length > 0
+              et = infer_type(ai[0])
+              promoted = empty_array_promotion_for([et])
+              if promoted != "" && promoted != cur_t
+                replace_ivar_type(@current_class_idx, iname, promoted)
+                if promoted == "str_array"
+                  @needs_str_array = 1
+                elsif promoted == "float_array"
+                  @needs_float_array = 1
+                elsif promoted == "sym_array"
+                  @needs_sym_intern = 1
+                elsif promoted == "poly_array"
+                  @needs_poly_array = 1
                   @needs_rb_value = 1
                 end
               end
