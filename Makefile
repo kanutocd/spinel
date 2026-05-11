@@ -238,19 +238,43 @@ spinel_codegen$(EXE): $(CODEGEN_STAMP) spinel_parse$(EXE)
 # analysis IR and the emitted C, so any drift in either phase is
 # caught.
 
-bootstrap: spinel_analyze$(EXE) spinel_codegen$(EXE)
-	@echo "=== Bootstrap round 2: analyze + codegen with spinel_{analyze,codegen} ==="
+# Round 2: gen1 binaries (spinel_{analyze,codegen}) compile each .rb
+# source into a fresh `bin2_*` binary. The analyze and codegen sources
+# are independent, so the two pipelines are split into per-binary
+# targets that `make -j` can run in parallel. Same for the round 3
+# verify step.
+
+build/analyze2.ir: build/analyze.ast spinel_analyze$(EXE)
 	./spinel_analyze$(EXE) build/analyze.ast build/analyze2.ir
+
+build/analyze2.c: build/analyze.ast build/analyze2.ir spinel_codegen$(EXE)
 	./spinel_codegen$(EXE) build/analyze.ast build/analyze2.ir build/analyze2.c
+
+build/bin2_analyze$(EXE): build/analyze2.c $(SP_RT_LIB)
 	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/analyze2.c $(LDFLAGS) -lm -o build/bin2_analyze$(EXE)
+
+build/codegen2.ir: build/codegen.ast spinel_analyze$(EXE)
 	./spinel_analyze$(EXE) build/codegen.ast build/codegen2.ir
+
+build/codegen2.c: build/codegen.ast build/codegen2.ir spinel_codegen$(EXE)
 	./spinel_codegen$(EXE) build/codegen.ast build/codegen2.ir build/codegen2.c
+
+build/bin2_codegen$(EXE): build/codegen2.c $(SP_RT_LIB)
 	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/codegen2.c $(LDFLAGS) -lm -o build/bin2_codegen$(EXE)
-	@echo "=== Bootstrap round 3: analyze + codegen with bin2_* — verify ==="
+
+build/analyze3.ir: build/analyze.ast build/bin2_analyze$(EXE)
 	./build/bin2_analyze$(EXE) build/analyze.ast build/analyze3.ir
+
+build/analyze3.c: build/analyze.ast build/analyze3.ir build/bin2_codegen$(EXE)
 	./build/bin2_codegen$(EXE) build/analyze.ast build/analyze3.ir build/analyze3.c
+
+build/codegen3.ir: build/codegen.ast build/bin2_analyze$(EXE)
 	./build/bin2_analyze$(EXE) build/codegen.ast build/codegen3.ir
+
+build/codegen3.c: build/codegen.ast build/codegen3.ir build/bin2_codegen$(EXE)
 	./build/bin2_codegen$(EXE) build/codegen.ast build/codegen3.ir build/codegen3.c
+
+bootstrap: build/analyze3.c build/codegen3.c
 	@diff build/analyze2.ir build/analyze3.ir > /dev/null && echo "analyze.rb: IR fixpoint OK" || (echo "BOOTSTRAP FAILED: analyze.rb IR diverged" && exit 1)
 	@diff build/analyze2.c  build/analyze3.c  > /dev/null && echo "analyze.rb: C fixpoint OK"  || (echo "BOOTSTRAP FAILED: analyze.rb C diverged"  && exit 1)
 	@diff build/codegen2.ir build/codegen3.ir > /dev/null && echo "codegen.rb: IR fixpoint OK" || (echo "BOOTSTRAP FAILED: codegen.rb IR diverged" && exit 1)
