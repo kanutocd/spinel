@@ -154,6 +154,38 @@ class Compiler
     # by spinel_analyze and shipped through the IR; codegen
     # resolves the names to module indices for ancestors / parents.
     @cls_includes = "".split(",")
+    # Issue #404 Phase 3 Tier 4: built-in class prefix. cls_ids
+    # 0..20 are reserved for Ruby primitive classes / modules per
+    # docs/CLASS-OBJECT.md (minus Method which the existing
+    # register_builtin_classes pushes as a user-class entry).
+    # User @cls_names entries shift to cls_id 21 + internal_ci;
+    # modules shift to 21 + N + module_idx. Lets sp_class_for_poly
+    # map primitive tags to the built-in cls_id so
+    # `5.is_a?(Integer)` against a dynamic klass resolves via
+    # the same sp_class_le path as user-class checks.
+    @builtin_class_names    = ["BasicObject", "Object", "Kernel", "Comparable", "Enumerable",
+                               "NilClass", "TrueClass", "FalseClass",
+                               "Numeric", "Integer", "Float",
+                               "String", "Symbol",
+                               "Array", "Hash", "Range", "Time",
+                               "Module", "Class", "Complex", "Proc"]
+    # -1 = no parent (root). Module entries (Kernel, Comparable,
+    # Enumerable) intentionally have -1 since modules don't
+    # have superclasses.
+    @builtin_class_parents  = [-1, 0, -1, -1, -1,
+                                1, 1, 1,
+                                1, 8, 8,
+                                1, 1,
+                                1, 1, 1, 1,
+                                1, 17, 8, 1]
+    # Semicolon-separated module-name includes per built-in class.
+    @builtin_class_includes = ["", "Kernel", "", "", "",
+                               "", "", "",
+                               "Comparable", "", "",
+                               "Comparable", "Comparable",
+                               "Enumerable", "Enumerable", "Enumerable", "Comparable",
+                               "", "", "", ""]
+    @builtin_class_count = @builtin_class_names.length
     # Issue #404 Phase 1: emit-time toggle for the per-program
     # sp_class_names[] table + sp_class_to_s helper. compile_expr's
     # ConstantReadNode arm and any class.to_s lowering set this to 1
@@ -6279,9 +6311,9 @@ class Compiler
     # sentinel 1-slot array carries the empty case (ISO C forbids
     # zero-length array initializers).
     emit_raw("/* sp_Class names table (issue #404) */")
-    # Phase 3 Tier 2: unified cls_id space across classes +
-    # modules. Classes occupy [0 .. N-1], modules occupy
-    # [N .. N+M-1].
+    # Phase 3 Tier 4: unified cls_id space prefixed with
+    # built-in primitives (cls_ids 0..BC-1), then user classes
+    # (BC..BC+N-1), then modules (BC+N..BC+N+M-1).
     total_count = unified_class_count
     emit_raw("#define SP_CLASS_COUNT " + total_count.to_s)
     arr_len = total_count
@@ -6289,9 +6321,17 @@ class Compiler
       arr_len = 1
     end
     line = "static const char *const sp_class_names[" + arr_len.to_s + "] = {"
+    bi = 0
+    while bi < @builtin_class_names.length
+      if bi > 0
+        line = line + ","
+      end
+      line = line + c_string_literal(@builtin_class_names[bi])
+      bi = bi + 1
+    end
     i = 0
     while i < @cls_names.length
-      if i > 0
+      if @builtin_class_count + i > 0
         line = line + ","
       end
       line = line + c_string_literal(@cls_names[i])
@@ -6299,7 +6339,7 @@ class Compiler
     end
     mi = 0
     while mi < @module_names.length
-      if @cls_names.length + mi > 0
+      if @builtin_class_count + @cls_names.length + mi > 0
         line = line + ","
       end
       line = line + c_string_literal(@module_names[mi])
@@ -6327,15 +6367,30 @@ class Compiler
     # programs and zero for programs that never declare a class.
     if unified_class_count > 0
       parents_line = "static const mrb_int sp_class_parents[" + unified_class_count.to_s + "] __attribute__((unused)) = {"
+      # Built-in parents per the design doc table.
+      bi_pl = 0
+      while bi_pl < @builtin_class_count
+        if bi_pl > 0
+          parents_line = parents_line + ","
+        end
+        parents_line = parents_line + @builtin_class_parents[bi_pl].to_s + "LL"
+        bi_pl = bi_pl + 1
+      end
       pi_pl = 0
       while pi_pl < @cls_names.length
-        if pi_pl > 0
+        if @builtin_class_count + pi_pl > 0
           parents_line = parents_line + ","
         end
         ppname = @cls_parents[pi_pl]
         ppidx = -1
         if ppname != ""
-          ppidx = find_class_idx(ppname)
+          ppidx_internal = find_class_idx(ppname)
+          if ppidx_internal >= 0
+            ppidx = cls_id_for_user_internal(ppidx_internal)
+          else
+            # Parent name might be a built-in (e.g., `class Foo < Numeric`)
+            ppidx = builtin_class_id_for_name(ppname)
+          end
         end
         parents_line = parents_line + ppidx.to_s + "LL"
         pi_pl = pi_pl + 1
@@ -6343,7 +6398,7 @@ class Compiler
       # Modules have no superclass: emit -1 for each module entry.
       mi_pl = 0
       while mi_pl < @module_names.length
-        if @cls_names.length + mi_pl > 0
+        if @builtin_class_count + @cls_names.length + mi_pl > 0
           parents_line = parents_line + ","
         end
         parents_line = parents_line + "-1LL"
@@ -6366,7 +6421,8 @@ class Compiler
       off = []
       flat = []
       ai = 0
-      while ai < unified_class_count
+      total_ai = unified_class_count
+      while ai < total_ai
         off.push(flat.length)
         acc = compute_ancestors_for_unified(ai)
         aj = 0
@@ -6418,17 +6474,61 @@ class Compiler
       emit_raw("static mrb_bool sp_class_lt(sp_Class child, sp_Class anc){if(child.cls_id==anc.cls_id)return FALSE;return sp_class_le(child,anc);}")
       emit_raw("static sp_PolyArray *sp_class_ancestors_arr(sp_Class c) __attribute__((unused));")
       emit_raw("static sp_PolyArray *sp_class_ancestors_arr(sp_Class c){sp_PolyArray*r=sp_PolyArray_new();if(c.cls_id<0||c.cls_id>=SP_CLASS_COUNT)return r;mrb_int s=sp_class_ancestors_off[c.cls_id];mrb_int e=sp_class_ancestors_off[c.cls_id+1];for(mrb_int k=s;k<e;k++){sp_Class el={sp_class_ancestors_flat[k]};sp_PolyArray_push(r,sp_box_class(el));}return r;}")
-      # Tier 3: recover the cls_id of a poly value. SP_TAG_CLASS
-      # returns itself; SP_TAG_OBJ with a non-negative cls_id is a
-      # user-class instance; everything else (primitives, built-in
-      # pointer types) returns the sentinel sp_Class{-1} because
-      # primitives don't have user-class cls_ids in spinel's current
-      # numbering. Programs that need `5.is_a?(Integer)` continue to
-      # use the existing static tag-check path (poly_is_a_tag_check).
+      # Tier 4: recover the cls_id of a poly value. Each primitive
+      # tag maps to the corresponding built-in cls_id (Integer=9,
+      # Float=10, String=11, Symbol=12, NilClass=5, TrueClass=6,
+      # FalseClass=7); SP_TAG_OBJ with built-in negative cls_id
+      # maps to Array / Hash / Range / Time / Proc. SP_TAG_CLASS
+      # returns itself; SP_TAG_OBJ with non-negative cls_id is a
+      # user-class instance.
       emit_raw("static sp_Class sp_class_for_poly(sp_RbVal v) __attribute__((unused));")
-      emit_raw("static sp_Class sp_class_for_poly(sp_RbVal v){if(v.tag==SP_TAG_CLASS)return (sp_Class){(mrb_int)v.cls_id};if(v.tag==SP_TAG_OBJ&&v.cls_id>=0)return (sp_Class){(mrb_int)v.cls_id};return (sp_Class){-1};}")
+      emit_raw("static sp_Class sp_class_for_poly(sp_RbVal v){switch(v.tag){case SP_TAG_NIL:return (sp_Class){5};case SP_TAG_BOOL:return (sp_Class){v.v.b?6:7};case SP_TAG_INT:return (sp_Class){9};case SP_TAG_FLT:return (sp_Class){10};case SP_TAG_STR:return (sp_Class){11};case SP_TAG_SYM:return (sp_Class){12};case SP_TAG_CLASS:return (sp_Class){(mrb_int)v.cls_id};case SP_TAG_OBJ:if(v.cls_id>=0)return (sp_Class){(mrb_int)v.cls_id};switch(v.cls_id){case SP_BUILTIN_INT_ARRAY:case SP_BUILTIN_STR_ARRAY:case SP_BUILTIN_FLT_ARRAY:case SP_BUILTIN_SYM_ARRAY:case SP_BUILTIN_PTR_ARRAY:case SP_BUILTIN_POLY_ARRAY:return (sp_Class){13};case SP_BUILTIN_STR_INT_HASH:case SP_BUILTIN_STR_STR_HASH:case SP_BUILTIN_INT_STR_HASH:case SP_BUILTIN_SYM_INT_HASH:case SP_BUILTIN_SYM_STR_HASH:case SP_BUILTIN_STR_POLY_HASH:case SP_BUILTIN_SYM_POLY_HASH:case SP_BUILTIN_POLY_POLY_HASH:return (sp_Class){14};case SP_BUILTIN_RANGE:return (sp_Class){15};case SP_BUILTIN_TIME:return (sp_Class){16};case SP_BUILTIN_PROC:return (sp_Class){20};default:return (sp_Class){-1};}}return (sp_Class){-1};}")
     end
     emit_raw("")
+  end
+
+  # Issue #404 Phase 3 Tier 4: unified cls_id space layout.
+  # The emit-side cls_id is global: built-ins occupy
+  # [0 .. builtin_class_count - 1], user classes
+  # [BC .. BC + N - 1], modules [BC + N .. BC + N + M - 1].
+  # Internal Ruby indices into @cls_names / @module_names stay
+  # 0-based; conversion happens through the helpers below.
+  def cls_id_for_user_internal(internal_ci)
+    @builtin_class_count + internal_ci
+  end
+
+  def cls_id_for_module_internal(internal_mi)
+    @builtin_class_count + @cls_names.length + internal_mi
+  end
+
+  # Returns -1 when name doesn't match a built-in.
+  def builtin_class_id_for_name(name)
+    bi = 0
+    while bi < @builtin_class_names.length
+      if @builtin_class_names[bi] == name
+        return bi
+      end
+      bi = bi + 1
+    end
+    -1
+  end
+
+  # Public-facing: name -> emit cls_id, searching built-ins
+  # first, then user classes, then modules. Returns -1 on miss.
+  def unified_cls_id_for_name(name)
+    bi = builtin_class_id_for_name(name)
+    if bi >= 0
+      return bi
+    end
+    ci = find_class_idx(name)
+    if ci >= 0
+      return cls_id_for_user_internal(ci)
+    end
+    mi = find_module_idx_local(name)
+    if mi >= 0
+      return cls_id_for_module_internal(mi)
+    end
+    -1
   end
 
   # Issue #404 Phase 3 Tier 2: unified cls_id space spans
@@ -6437,7 +6537,7 @@ class Compiler
   # combined view; the standalone find_class_idx still works
   # for class-only lookups.
   def unified_class_count
-    @cls_names.length + @module_names.length
+    @builtin_class_count + @cls_names.length + @module_names.length
   end
 
   def find_module_idx_local(name)
@@ -6452,15 +6552,7 @@ class Compiler
   end
 
   def find_class_or_module_unified_idx(name)
-    ci = find_class_idx(name)
-    if ci >= 0
-      return ci
-    end
-    mi = find_module_idx_local(name)
-    if mi >= 0
-      return @cls_names.length + mi
-    end
-    -1
+    return unified_cls_id_for_name(name)
   end
 
   def acc_includes(acc, uid)
@@ -6474,36 +6566,75 @@ class Compiler
     0
   end
 
-  # Issue #404 Phase 3 Tier 2: MRO over unified cls_id space.
-  # For a class at index ci, the ancestors are
-  #   [self, ...reverse(includes), ...ancestors(parent)]
-  # with the includes resolved through @cls_includes and dedup
-  # at append. Modules in our model don't include other modules
-  # (the include collector only fires inside class bodies), so
-  # ancestors(module) is just [module] -- this matches CRuby for
-  # the include-only mixin shape.
+  # Issue #404 Phase 3 Tier 4: MRO over unified cls_id space.
+  # Three ranges:
+  #   [0 .. BC-1]            -> built-in (table-driven, hardcoded
+  #                             parents + includes per design doc)
+  #   [BC .. BC+N-1]         -> user class (walk @cls_parents +
+  #                             @cls_includes)
+  #   [BC+N .. BC+N+M-1]     -> module (just self, modules don't
+  #                             include other modules in our model)
   def compute_ancestors_for_unified(uid)
     if uid < 0 || uid >= unified_class_count
       return []
     end
     acc = []
-    if uid >= @cls_names.length
+    if uid < @builtin_class_count
+      # Built-in. Walk hardcoded parent + includes per the design
+      # doc table. Same MRO shape as the user-class arm.
+      cur = uid
+      acc.push(cur)
+      incs_str = @builtin_class_includes[cur]
+      incs = incs_str.split(";")
+      j = incs.length - 1
+      while j >= 0
+        if incs[j] != ""
+          mod_uid = unified_cls_id_for_name(incs[j])
+          if mod_uid >= 0
+            sub = compute_ancestors_for_unified(mod_uid)
+            sj = 0
+            while sj < sub.length
+              if acc_includes(acc, sub[sj]) == 0
+                acc.push(sub[sj])
+              end
+              sj = sj + 1
+            end
+          end
+        end
+        j = j - 1
+      end
+      pp = @builtin_class_parents[cur]
+      if pp >= 0
+        psub = compute_ancestors_for_unified(pp)
+        pj = 0
+        while pj < psub.length
+          if acc_includes(acc, psub[pj]) == 0
+            acc.push(psub[pj])
+          end
+          pj = pj + 1
+        end
+      end
+      return acc
+    end
+    if uid >= @builtin_class_count + @cls_names.length
       # Module entry. Just itself.
       acc.push(uid)
       return acc
     end
-    # Class. Walk down: self, includes (reverse), parent's ancestors.
-    cur = uid
-    acc.push(cur)
+    # User class. Walk down: self, includes (reverse), parent's
+    # ancestors. Internal index is uid - BC; cls_id emitted for
+    # the entry stays unified (uid).
+    cur_internal = uid - @builtin_class_count
+    acc.push(uid)
     incs_str = ""
-    if cur < @cls_includes.length
-      incs_str = @cls_includes[cur]
+    if cur_internal < @cls_includes.length
+      incs_str = @cls_includes[cur_internal]
     end
     incs = incs_str.split(";")
     j = incs.length - 1
     while j >= 0
       if incs[j] != ""
-        mod_uid = find_class_or_module_unified_idx(incs[j])
+        mod_uid = unified_cls_id_for_name(incs[j])
         if mod_uid >= 0
           sub = compute_ancestors_for_unified(mod_uid)
           sj = 0
@@ -6517,11 +6648,11 @@ class Compiler
       end
       j = j - 1
     end
-    pname = @cls_parents[cur]
+    pname = @cls_parents[cur_internal]
     if pname != ""
-      pp = find_class_idx(pname)
-      if pp >= 0
-        psub = compute_ancestors_for_unified(pp)
+      pp_internal = find_class_idx(pname)
+      if pp_internal >= 0
+        psub = compute_ancestors_for_unified(cls_id_for_user_internal(pp_internal))
         pj = 0
         while pj < psub.length
           if acc_includes(acc, psub[pj]) == 0
@@ -6537,7 +6668,7 @@ class Compiler
   # Kept for any callers that still want a class-only view; routes
   # through the unified MRO so behavior stays consistent.
   def compute_ancestors_for_class(ci)
-    compute_ancestors_for_unified(ci)
+    compute_ancestors_for_unified(cls_id_for_user_internal(ci))
   end
 
   def emit_sym_runtime
@@ -7942,8 +8073,10 @@ class Compiler
       # Issue #422: tag the freshly-allocated instance with its
       # concrete class id so a parent-method's `self.class.<cmeth>`
       # path can read self->cls_id at runtime and switch to the
-      # subclass's override.
-      emit_raw("  self->cls_id = " + ci.to_s + "LL;")
+      # subclass's override. Unified cls_id (#404 Tier 4): the
+      # emitted id is BC + internal_ci so it sits past the
+      # built-in prefix.
+      emit_raw("  self->cls_id = " + cls_id_for_user_internal(ci).to_s + "LL;")
       emit_raw("  SP_GC_ROOT(self);")
     end
 
@@ -8837,7 +8970,9 @@ class Compiler
   def emit_method_eql_dispatch
     return unless @needs_poly_poly_hash == 1
     has_method = find_class_idx("Method") >= 0
-    method_cid = has_method ? find_class_idx("Method").to_s : ""
+    # Tier 4: unified cls_id stamped on boxed instances. Compare
+    # against that rather than the internal index.
+    method_cid = has_method ? cls_id_for_user_internal(find_class_idx("Method")).to_s : ""
     emit_raw("static mrb_int sp_method_obj_hash_dispatch(int cls_id, void *p) {")
     if has_method
       emit_raw("  if (cls_id == " + method_cid + ") {")
@@ -9532,20 +9667,25 @@ class Compiler
       # constructor_class_name / cls_cmethod_owner without ever
       # going through compile_expr on the receiver, so this
       # branch only ever fires in a true value-position site.
+      # Issue #404 Phase 3 Tier 4: built-in class const (Integer,
+      # String, Array, ...) lowers to the reserved cls_id so
+      # dynamic is_a?(Integer) on a poly primitive recv resolves
+      # via the same sp_class_le path.
+      bi_404 = builtin_class_id_for_name(rname)
+      if bi_404 >= 0
+        @needs_class_table = 1
+        return "((sp_Class){" + bi_404.to_s + "LL})"
+      end
       cls_idx_404 = find_class_idx(rname)
       if cls_idx_404 >= 0
         @needs_class_table = 1
-        return "((sp_Class){" + cls_idx_404.to_s + "LL})"
+        return "((sp_Class){" + cls_id_for_user_internal(cls_idx_404).to_s + "LL})"
       end
       # Issue #404 Phase 3 Tier 2: module name in value position.
-      # Resolved to the unified cls_id (@cls_names.length +
-      # @module_names_idx). Lets `Foo.include?(M)` /
-      # `Foo.ancestors.include?(M)` carry the module identity
-      # through.
       mod_idx_404 = find_module_idx_local(rname)
       if mod_idx_404 >= 0
         @needs_class_table = 1
-        return "((sp_Class){" + (@cls_names.length + mod_idx_404).to_s + "LL})"
+        return "((sp_Class){" + cls_id_for_module_internal(mod_idx_404).to_s + "LL})"
       end
       # Built-in module-like constants (Math, File, ENV, …) and
       # registered classes / modules legitimately reach here as a
@@ -16243,7 +16383,7 @@ class Compiler
               if ci_404 >= 0
                 @needs_class_table = 1
                 @needs_class_ancestors = 1
-                return "sp_class_le((sp_Class){" + ci_404.to_s + "LL}, " + compile_expr(a[0]) + ")"
+                return "sp_class_le((sp_Class){" + cls_id_for_user_internal(ci_404).to_s + "LL}, " + compile_expr(a[0]) + ")"
               end
             end
             arg0 = @nd_name[a[0]]
@@ -16473,11 +16613,14 @@ class Compiler
                     op2_422 = 0
                     while op2_422 < ovr_pairs_422.length
                       pair2_422 = ovr_pairs_422[op2_422].split(",")
-                      cand_cid_422 = pair2_422[0]
+                      cand_cid_422 = pair2_422[0].to_i
                       cand_owner_422 = pair2_422[1].to_i
                       cand_name_422 = @cls_names[cand_owner_422]
                       cand_call_422 = "sp_" + cand_name_422 + "_cls_" + sanitize_name(mname) + "()"
-                      emit("    case " + cand_cid_422 + "LL: " + tmp_422 + " = " + cand_call_422 + "; break;")
+                      # cls_id_for_user_internal converts the candidate
+                      # internal index to the unified id that the
+                      # constructor stamped into self->cls_id.
+                      emit("    case " + cls_id_for_user_internal(cand_cid_422).to_s + "LL: " + tmp_422 + " = " + cand_call_422 + "; break;")
                       op2_422 = op2_422 + 1
                     end
                     emit("  }")
@@ -16505,7 +16648,7 @@ class Compiler
       cls_idx_419 = find_class_idx(cls_cname_419)
       if cls_idx_419 >= 0
         @needs_class_table = 1
-        return "((sp_Class){" + cls_idx_419.to_s + "LL})"
+        return "((sp_Class){" + cls_id_for_user_internal(cls_idx_419).to_s + "LL})"
       end
     end
     # Object method calls
@@ -17062,14 +17205,17 @@ class Compiler
           # arg_name (cls_is_descendant) and OR them in.
           ci = find_class_idx(arg_name)
           if ci >= 0
+            # Tier 4: cls_id stamped on boxed instances is unified
+            # (BC + internal_ci) -- compare against that.
+            ci_uid = cls_id_for_user_internal(ci)
             if mname == "instance_of?"
-              return "(" + recv_tmp + ".tag == SP_TAG_OBJ && " + recv_tmp + ".cls_id == " + ci.to_s + ")"
+              return "(" + recv_tmp + ".tag == SP_TAG_OBJ && " + recv_tmp + ".cls_id == " + ci_uid.to_s + ")"
             end
-            check = "(" + recv_tmp + ".tag == SP_TAG_OBJ && (" + recv_tmp + ".cls_id == " + ci.to_s
+            check = "(" + recv_tmp + ".tag == SP_TAG_OBJ && (" + recv_tmp + ".cls_id == " + ci_uid.to_s
             cn = 0
             while cn < @cls_names.length
               if cn != ci && cls_is_descendant(cn, ci) == 1
-                check = check + " || " + recv_tmp + ".cls_id == " + cn.to_s
+                check = check + " || " + recv_tmp + ".cls_id == " + cls_id_for_user_internal(cn).to_s
               end
               cn = cn + 1
             end
@@ -17207,7 +17353,7 @@ class Compiler
         if narrowed_int_idx == 1 && cls_method_return(i, mname) != "int"
           # skip
         else
-          emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+          emit("    if (" + recv_tmp + ".cls_id == " + cls_id_for_user_internal(i).to_s + ") " + tmp + " = " + rhs + ";")
         end
       elsif cls_has_attr_reader(i, mname) == 1
         # An auto-registered attr_reader doesn't appear in
@@ -17222,7 +17368,7 @@ class Compiler
         if narrowed_int_idx == 1 && cls_ivar_type(i, "@" + mname) != "int"
           # skip non-int attr_reader arms on a narrowed `[]`
         else
-          emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+          emit("    if (" + recv_tmp + ".cls_id == " + cls_id_for_user_internal(i).to_s + ") " + tmp + " = " + rhs + ";")
         end
       elsif mname.length > 1 && mname[mname.length - 1] == "=" && cls_has_attr_writer(i, mname[0, mname.length - 1]) == 1
         # An auto-registered attr_writer setter (`obj.x = v`) on a
@@ -17256,7 +17402,7 @@ class Compiler
         if is_poly_ret == 1
           rhs_for_tmp = box_val_to_poly(store_val, slot_t)
         end
-        emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") { " + ivar_lhs + " = " + store_val + "; " + tmp + " = " + rhs_for_tmp + "; }")
+        emit("    if (" + recv_tmp + ".cls_id == " + cls_id_for_user_internal(i).to_s + ") { " + ivar_lhs + " = " + store_val + "; " + tmp + " = " + rhs_for_tmp + "; }")
       end
       i = i + 1
     end
@@ -17323,8 +17469,19 @@ class Compiler
       # arm in that case.
       if narrowed_int == 0
         pc = "sp_PtrArray_get((sp_PtrArray *)" + recv_tmp + ".v.p, " + a0 + ")"
-        prhs = is_poly_ret == 1 ? "sp_box_obj(" + pc + ", 0)" : pc
-        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) " + result_tmp + " = " + prhs + ";")
+        # Tier 4: read the actual cls_id off the user-class struct's
+        # cls_id field rather than stamping a 0 sentinel; otherwise
+        # downstream cls_id-keyed dispatch on the boxed element
+        # mismatches (cls_id 0 now means BasicObject, not "unknown").
+        # The sp_PtrArray_get call must stay inside the cls_id ==
+        # SP_BUILTIN_PTR_ARRAY guard -- the recv may carry a different
+        # built-in (IntArray, etc.) at runtime and casting it to
+        # sp_PtrArray then dereferencing segfaults.
+        if is_poly_ret == 1
+          emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) { void *_pe = " + pc + "; " + result_tmp + " = sp_box_obj(_pe, sp_obj_cls_id_of(_pe)); }")
+        else
+          emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) " + result_tmp + " = " + pc + ";")
+        end
       end
       # PolyArray dispatch — sp_PolyArray_get returns sp_RbVal directly.
       # When the result temp is poly, just assign; otherwise unbox via .v.i
@@ -17364,7 +17521,7 @@ class Compiler
         end
         mc = "(" + mp + " && " + mp + "->iv_fn_ptr ? ((mrb_int (*)(" + sig_args + "))(uintptr_t)" + mp + "->iv_fn_ptr)(" + call_args + ") : 0)"
         mrhs = is_poly_ret == 1 ? "sp_box_int(" + mc + ")" : mc
-        emit("    if (" + recv_tmp + ".cls_id == " + method_idx.to_s + ") " + result_tmp + " = " + mrhs + ";")
+        emit("    if (" + recv_tmp + ".cls_id == " + cls_id_for_user_internal(method_idx).to_s + ") " + result_tmp + " = " + mrhs + ";")
       end
     end
     # `[]` with a symbol key — sym_poly_hash dispatch. Mirrors the
@@ -17709,7 +17866,10 @@ class Compiler
       if is_obj_type(at) == 1
         cname = at[4, at.length - 4]
         ci = find_class_idx(cname)
-        return "sp_box_nullable_obj(" + val + ", " + ci.to_s + ")"
+        # Issue #404 Tier 4: stamp the unified cls_id so the
+        # boxed value carries the same id that constructors
+        # write and that sp_class_for_poly reads back.
+        return "sp_box_nullable_obj(" + val + ", " + cls_id_for_user_internal(ci).to_s + ")"
       end
       # Stamp hash cls_id so Hash#dig can recover the concrete type;
       # falling through to cls_id=0 would make dig collapse to nil.
@@ -17787,7 +17947,7 @@ class Compiler
     if is_obj_type(at) == 1
       cname = at[4, at.length - 4]
       ci = find_class_idx(cname)
-      return "sp_box_obj(" + val + ", " + ci.to_s + ")"
+      return "sp_box_obj(" + val + ", " + cls_id_for_user_internal(ci).to_s + ")"
     end
     hcid = cls_id_for_hash_type(at)
     if hcid != ""
@@ -25761,7 +25921,7 @@ class Compiler
       emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_FLT_ARRAY) " + val_tmp + " = sp_box_float(sp_FloatArray_get((sp_FloatArray *)" + poly_tmp + ".v.p, " + idx_tmp + "));")
       emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_STR_ARRAY) " + val_tmp + " = sp_box_str(sp_StrArray_get((sp_StrArray *)" + poly_tmp + ".v.p, " + idx_tmp + "));")
       emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_SYM_ARRAY) " + val_tmp + " = sp_box_sym((sp_sym)sp_IntArray_get((sp_IntArray *)" + poly_tmp + ".v.p, " + idx_tmp + "));")
-      emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) " + val_tmp + " = sp_box_obj(sp_PtrArray_get((sp_PtrArray *)" + poly_tmp + ".v.p, " + idx_tmp + "), 0);")
+      emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_PTR_ARRAY) { void *_pe = sp_PtrArray_get((sp_PtrArray *)" + poly_tmp + ".v.p, " + idx_tmp + "); " + val_tmp + " = sp_box_obj(_pe, sp_obj_cls_id_of(_pe)); }")
       emit("      else if (" + poly_tmp + ".cls_id == SP_BUILTIN_POLY_ARRAY) " + val_tmp + " = sp_PolyArray_get((sp_PolyArray *)" + poly_tmp + ".v.p, " + idx_tmp + ");")
       if has_bp == 1
         if bp2 != ""

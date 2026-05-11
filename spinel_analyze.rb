@@ -2081,6 +2081,12 @@ class Compiler
         end
         mx = mx + 1
       end
+      # Issue #404 Phase 3 Tier 4: built-in class const in value
+      # position (Integer, String, Array, ...). Same sp_Class
+      # representation; codegen maps to the reserved cls_id 0..20.
+      if is_builtin_class_const_name(rname) == 1
+        return "class"
+      end
       return "int"
     end
     if t == "ConstantPathNode"
@@ -6104,6 +6110,31 @@ class Compiler
       return 1
     end
     if name == "Float"
+      return 1
+    end
+    0
+  end
+
+  # Issue #404 Phase 3 Tier 4: built-in class / module names that
+  # get a reserved cls_id (0..20). Kept in sync with
+  # spinel_codegen.rb's @builtin_class_names array.
+  def is_builtin_class_const_name(name)
+    if name == "BasicObject" || name == "Object" || name == "Kernel" || name == "Comparable" || name == "Enumerable"
+      return 1
+    end
+    if name == "NilClass" || name == "TrueClass" || name == "FalseClass"
+      return 1
+    end
+    if name == "Numeric" || name == "Integer" || name == "Float"
+      return 1
+    end
+    if name == "String" || name == "Symbol"
+      return 1
+    end
+    if name == "Array" || name == "Hash" || name == "Range" || name == "Time"
+      return 1
+    end
+    if name == "Module" || name == "Class" || name == "Complex" || name == "Proc"
       return 1
     end
     0

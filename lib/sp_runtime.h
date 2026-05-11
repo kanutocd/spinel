@@ -948,6 +948,14 @@ static sp_RbVal sp_box_obj(void *p, int cls_id) { sp_RbVal r; r.tag = SP_TAG_OBJ
 static sp_RbVal sp_box_sym(sp_sym v) { sp_RbVal r; r.tag = SP_TAG_SYM; r.cls_id = 0; r.v.i = (mrb_int)v; return r; }
 /* Issue #404 Phase 3: box a sp_Class into a poly slot. */
 static sp_RbVal sp_box_class(sp_Class c) { sp_RbVal r; r.tag = SP_TAG_CLASS; r.cls_id = (int)c.cls_id; r.v.i = c.cls_id; return r; }
+
+/* Issue #404 Phase 3 Tier 4: every non-value-type sp_<C> starts
+   with `mrb_int cls_id` (#422). Read it back from a void* when
+   the static type at the call site has lost the cls_id (e.g.
+   sp_PtrArray_get returning void*). NULL-safe via the guard
+   on p; expects p to actually point at a user-class struct
+   when non-NULL. */
+static inline mrb_int sp_obj_cls_id_of(void *p) { return p ? *(mrb_int *)p : 0; }
 static sp_RbVal sp_box_nullable_str(const char *v) { return v ? sp_box_str(v) : sp_box_nil(); }
 static sp_RbVal sp_box_nullable_obj(void *p, int cls_id) { return p ? sp_box_obj(p, cls_id) : sp_box_nil(); }
 /* Built-in pointer boxes — share SP_TAG_OBJ with a reserved negative
