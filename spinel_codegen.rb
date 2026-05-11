@@ -14665,6 +14665,24 @@ class Compiler
       if mname == "clear"
         return "(" + rc + "->len = 0, " + rc + ")"
       end
+      # Issue #427: dup / to_a -- shallow copy preserving element
+      # variant. sp_PolyArray_dup is already in the runtime; the
+      # missing piece was the dispatch arm here, which left every
+      # `<poly_array>.dup` call as an unresolved emit-0 that
+      # dereferenced when the caller used the result as a typed
+      # pointer.
+      if mname == "dup" || mname == "to_a"
+        return "sp_PolyArray_dup(" + rc + ")"
+      end
+      if mname == "empty?"
+        return "(sp_PolyArray_length(" + rc + ") == 0)"
+      end
+      if mname == "first"
+        return "sp_PolyArray_get(" + rc + ", 0LL)"
+      end
+      if mname == "last"
+        return "sp_PolyArray_get(" + rc + ", sp_PolyArray_length(" + rc + ") - 1LL)"
+      end
     end
     ""
   end

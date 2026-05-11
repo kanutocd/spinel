@@ -4635,6 +4635,9 @@ class Compiler
         if rt == "int_array"
           return "int_array"
         end
+        if rt == "poly_array"
+          return "poly_array"
+        end
       end
       return "int_array"
     end
