@@ -12480,6 +12480,10 @@ class Compiler
       @needs_rb_value = 1
       return "poly_array"
     end
+    if elem_acc[0] == "proc"
+      @needs_rb_value = 1
+      return "poly_array"
+    end
     if is_obj_type(elem_acc[0]) == 1
  # Homogeneous obj array — use a typed `<obj>_ptr_array` so reads
  # return a typed pointer (no sp_RbVal unbox needed at the call
@@ -16603,7 +16607,6 @@ class Compiler
       bci = bci + 1
     end
     $stderr.puts "-----------------"
-  end
   end
 
 
