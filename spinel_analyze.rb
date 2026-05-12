@@ -3524,8 +3524,21 @@ class Compiler
  # the shortest collision target; struct field accessors etc.
  # commonly take that single-letter shape).
     if mname == "force_encoding" || mname == "encode" || mname == "b"
-      if recv >= 0 && infer_type(recv) == "string"
-        return "string"
+      if recv >= 0
+        rt_fe = infer_type(recv)
+        if rt_fe == "string"
+          return "string"
+        end
+ # A mutable_str (sp_String *) recv goes through codegen's
+ # mutable-str arm which dispatches the inner call against
+ # `rc + "->data"`; force_encoding's body return is then the
+ # mutable's `->data` (const char *), not the wrapping struct
+ # pointer. The function-return signature should match — pick
+ # "string", not "mutable_str", so the C signature reads
+ # `const char *` and the body's `return lv_out->data` fits.
+        if rt_fe == "mutable_str"
+          return "string"
+        end
       end
     end
     if mname == "include?"
