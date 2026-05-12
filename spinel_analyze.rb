@@ -13091,6 +13091,16 @@ class Compiler
       end
       rt = infer_body_return(@meth_body_ids[i])
       @meth_return_types[i] = rt
+ # Back-propagate: a `default = nil` param leaves its slot typed
+ # "nil" (= mrb_int at C codegen). If the function's overall return
+ # type is a nullable pointer (e.g. "string?"), an implicit-return
+ # of the param mismatches the function signature (`return mrb_int`
+ # vs declared `const char *`). Widen those params to the return
+ # type's nullable form so the implicit-return and any callers'
+ # default-value sites lower as NULL of the right pointer type.
+      if is_nullable_pointer_type(rt) == 1
+        widen_nil_defaults_to(@meth_param_types, i, rt)
+      end
       @current_method_name = saved_meth_ar
       pop_scope
       i = i + 1
@@ -13232,6 +13242,20 @@ class Compiler
         if j < returns.length
           returns[j] = rt
         end
+ # Same back-propagation as the top-level case: widen any "nil"-
+ # typed param (from `default = nil`) to the function's nullable
+ # pointer return type, so `return param` doesn't emit a mrb_int →
+ # const-char* mismatch.
+        if is_nullable_pointer_type(rt) == 1
+          widened = widen_nil_ptypes(ptypes, rt)
+          if widened != 0
+            if j < all_ptypes.length
+              all_ptypes[j] = ptypes.join(",")
+            end
+            @cls_meth_ptypes[i] = all_ptypes.join("|")
+            @cls_meth_ptypes_version = @cls_meth_ptypes_version + 1
+          end
+        end
  # Save incrementally so later methods can see updated return types
         @cls_meth_returns[i] = returns.join(";")
         @cls_meth_return_cache = {}
@@ -13291,6 +13315,15 @@ class Compiler
         if j < cm_returns.length
           cm_returns[j] = rt
         end
+        if is_nullable_pointer_type(rt) == 1
+          widened = widen_nil_ptypes(cptypes, rt)
+          if widened != 0
+            if j < cm_ptypes.length
+              cm_ptypes[j] = cptypes.join(",")
+            end
+            @cls_cmeth_ptypes[i] = cm_ptypes.join("|")
+          end
+        end
         pop_scope
         j = j + 1
       end
@@ -13298,6 +13331,38 @@ class Compiler
       @cls_cmeth_returns[i] = cm_returns.join(";")
       @current_class_idx = -1
       i = i + 1
+    end
+  end
+
+ # Widen "nil"-typed entries in `ptypes` to the nullable form of `rt`.
+ # Used by the back-propagation pass in infer_all_returns: if a method
+ # returns a nullable pointer (e.g. "string?"), any param defaulted to
+ # nil should be typed as that nullable pointer too so `return param`
+ # doesn't generate a mrb_int → pointer cast in C.
+ # Returns 1 if any entry was widened, 0 otherwise.
+  def widen_nil_ptypes(ptypes, rt)
+    target = rt
+    if is_nullable_type(target) == 0
+      target = base_type(target) + "?"
+    end
+    changed = 0
+    pk = 0
+    while pk < ptypes.length
+      if ptypes[pk] == "nil"
+        ptypes[pk] = target
+        changed = 1
+      end
+      pk = pk + 1
+    end
+    changed
+  end
+
+ # Top-level method variant of widen_nil_ptypes: reads/writes
+ # @meth_param_types[i] directly.
+  def widen_nil_defaults_to(table, i, rt)
+    ptypes = table[i].split(",")
+    if widen_nil_ptypes(ptypes, rt) == 1
+      table[i] = ptypes.join(",")
     end
   end
 

@@ -5051,6 +5051,14 @@ class Compiler
         return "(" + val + " ? \"true\" : \"false\")"
       end
       if at == "nil"
+ # nil → "" for the non-nullable string slot (the receiver
+ # treats empty as falsy-ish), but → NULL for `string?` slots
+ # where the receiver explicitly opted into nullability and a
+ # NULL check is meaningful (e.g. `default = nil` flowing into
+ # an implicit-return path).
+        if is_nullable_type(expected_type) == 1
+          return "NULL"
+        end
         return "(&(\"\\xff\")[1])"
       end
       if at == "symbol"
