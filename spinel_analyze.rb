@@ -20530,6 +20530,15 @@ class Compiler
           elsif ltypes[k] == "int_str_hash" && (ltypes2[j] == "str_str_hash" || ltypes2[j] == "sym_str_hash" || ltypes2[j] == "str_int_hash" || ltypes2[j] == "sym_int_hash")
             ltypes[k] = ltypes2[j]
             set_var_type(lnames[k], ltypes2[j])
+ # Symmetric: pass 1 saw `vt=int` because the value's source
+ # local (e.g. `pb` from `pb = b.split("/")`) wasn't declared
+ # yet, leaving the hash at str_int_hash. Pass 2 with `pb`
+ # declared as str_array correctly resolves pb[i] as string and
+ # picks str_str_hash. Mirrors the rule in
+ # refine_locals_multi_pass_full at line 20142.
+          elsif ltypes[k] == "str_int_hash" && ltypes2[j] == "str_str_hash"
+            ltypes[k] = ltypes2[j]
+            set_var_type(lnames[k], ltypes2[j])
           end
         end
         k = k + 1
