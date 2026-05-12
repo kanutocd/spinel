@@ -1958,6 +1958,80 @@ class Compiler
     out
   end
 
+ # Walk the parent chain looking for an instance method named
+ # `mname`. Returns the class index that defines it (the owner),
+ # or -1. Imeth analog of cls_cmethod_owner.
+  def cls_imethod_owner(ci, mname)
+    if ci < 0
+      return -1
+    end
+    mnames = @cls_meth_names[ci].split(";")
+    cj = 0
+    while cj < mnames.length
+      if mnames[cj] == mname
+        return ci
+      end
+      cj = cj + 1
+    end
+    if @cls_parents[ci] != ""
+      pi = find_class_idx(@cls_parents[ci])
+      if pi >= 0
+        return cls_imethod_owner(pi, mname)
+      end
+    end
+    -1
+  end
+
+ # Enumerate descendants of inner_ci (including inner_ci itself)
+ # whose imeth owner differs from base_owner. Imeth analog of
+ # cls_cmeth_override_descendants. Used by the bare-receiver imeth
+ # dispatch site to decide whether a cls_id switch is needed.
+  def cls_imeth_override_descendants(inner_ci, base_owner, mname)
+    out = ""
+    ck = 0
+    while ck < @cls_names.length
+      if ck == inner_ci || cls_is_descendant(ck, inner_ci) == 1
+        ow = cls_imethod_owner(ck, mname)
+        if ow >= 0 && ow != base_owner
+          if out != ""
+            out = out + ";"
+          end
+          out = out + ck.to_s + "," + ow.to_s
+        end
+      end
+      ck = ck + 1
+    end
+    out
+  end
+
+ # Whether all imeth overrides in `pairs_str` have a param-type
+ # signature compatible with `base_ptypes` (and same length).
+ # Used as a gate on the cls_id-switch dispatch — without this,
+ # an override declared with narrower param types than the base
+ # would emit a C call site that doesn't match its signature.
+  def cls_imeth_override_ptypes_match(pairs_str, mname, base_ptypes)
+    pairs = pairs_str.split(";")
+    pi = 0
+    while pi < pairs.length
+      p = pairs[pi].split(",")
+      cand_owner = p[1].to_i
+      cand_midx = cls_find_method_direct(cand_owner, mname)
+      cand_pt = cls_meth_ptypes_get(cand_owner, cand_midx)
+      if cand_pt.length != base_ptypes.length
+        return 0
+      end
+      k = 0
+      while k < base_ptypes.length
+        if cand_pt[k] != base_ptypes[k]
+          return 0
+        end
+        k = k + 1
+      end
+      pi = pi + 1
+    end
+    1
+  end
+
  # `<arr>.method(:op)` for built-in array types: which (recv_type,
  # mname) pairs we can lower into a Method-dispatch adapter. Limited
  # to int_array's bracket ops + push for now (the optcarrot CPU
@@ -12541,6 +12615,66 @@ class Compiler
         recv_arg = self_expr
         if owner != "" && owner != @cls_names[@current_class_idx]
           recv_arg = "(sp_" + owner + " *)" + self_expr
+        end
+ # When descendants of @current_class_idx override `mname` as an
+ # instance method, the static call below routes everything to
+ # the resolved owner — wrong when the runtime instance is a
+ # subclass with its own override (the canonical "abstract base
+ # method overridden by concrete subclass" template). Lower to
+ # a switch on `self->cls_id` so the dispatch lands on the
+ # override. Imeth analog of the cmeth path's cls_id switch.
+ # Gated on: non-value-type, has_proc absent, return types
+ # match across overrides, and param types match (the bare
+ # call site doesn't propagate arg types to override defs, so
+ # mismatched signatures would emit a broken C call).
+        if owner_ci >= 0 && @cls_is_value_type[@current_class_idx] == 0 && has_proc == 0
+          ovr_pairs = cls_imeth_override_descendants(@current_class_idx, owner_ci, mname)
+          if ovr_pairs != ""
+            base_rt = cls_method_return(owner_ci, mname)
+            base_rt_c = c_type(base_rt)
+            rt_ok = 1
+            ovr_list = ovr_pairs.split(";")
+            ol = 0
+            while ol < ovr_list.length
+              p = ovr_list[ol].split(",")
+              cand_owner = p[1].to_i
+              cand_rt = cls_method_return(cand_owner, mname)
+              if c_type(cand_rt) != base_rt_c
+                rt_ok = 0
+                ol = ovr_list.length
+              else
+                ol = ol + 1
+              end
+            end
+            base_ptypes = cls_meth_ptypes_get(owner_ci, owner_midx)
+            pt_ok = cls_imeth_override_ptypes_match(ovr_pairs, mname, base_ptypes)
+            if rt_ok == 1 && pt_ok == 1
+              tmp = new_temp
+              rt_c = c_type(base_rt)
+              default_call = "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp) + ")"
+ # Initialize tmp to a type-default so the base call only runs
+ # in the default arm — calling it eagerly before the switch
+ # would raise from an abstract stub before any subclass arm
+ # gets a chance to dispatch.
+              emit("  " + rt_c + " " + tmp + " = " + c_return_default(base_rt) + ";")
+              emit("  switch (" + self_expr + "->cls_id) {")
+              ol2 = 0
+              while ol2 < ovr_list.length
+                p2 = ovr_list[ol2].split(",")
+                cand_internal_ci = p2[0].to_i
+                cand_cid = cls_id_for_user_internal(cand_internal_ci)
+                cand_owner2 = p2[1].to_i
+                cand_name = @cls_names[cand_owner2]
+                cand_recv = "(sp_" + cand_name + " *)" + self_expr
+                cand_call = "sp_" + cand_name + "_" + sanitize_name(mname) + "(" + cand_recv + build_call_tail(ca, bp) + ")"
+                emit("    case " + cand_cid.to_s + "LL: " + tmp + " = " + cand_call + "; break;")
+                ol2 = ol2 + 1
+              end
+              emit("    default: " + tmp + " = " + default_call + "; break;")
+              emit("  }")
+              return tmp
+            end
+          end
         end
         return "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp) + ")"
       end
