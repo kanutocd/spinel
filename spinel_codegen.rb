@@ -1884,88 +1884,20 @@ class Compiler
     -1
   end
 
- # Walk the parent chain looking for a class method
- # (`def self.<mname>`) named `mname`. Returns the class index that
- # defines it, or -1 if not found. Lets `Leaf.all` resolve to
- # `Base.all` (and emit `sp_Base_cls_all(...)`) when Leaf inherits
- # from Base without overriding `.all`. Mirrors cls_method_return's
- # parent walk for instance methods.
-  def cls_cmethod_owner(ci, mname)
+ # Walk the parent chain looking for a method named `mname`.
+ # Returns the class index that defines it (the owner), or -1.
+ # `kind` selects @cls_cmeth_names ("cmeth") or @cls_meth_names
+ # ("imeth"). Used by the dispatch lowering to find the static
+ # owner before deciding whether a cls_id switch is needed.
+  def cls_method_owner_for(ci, mname, kind)
     if ci < 0
       return -1
     end
-    cmnames = @cls_cmeth_names[ci].split(";")
-    cj = 0
-    while cj < cmnames.length
-      if cmnames[cj] == mname
-        return ci
-      end
-      cj = cj + 1
+    if kind == "cmeth"
+      mnames = @cls_cmeth_names[ci].split(";")
+    else
+      mnames = @cls_meth_names[ci].split(";")
     end
-    if @cls_parents[ci] != ""
-      pi = find_class_idx(@cls_parents[ci])
-      if pi >= 0
-        return cls_cmethod_owner(pi, mname)
-      end
-    end
-    -1
-  end
-
- # look up the C return type of `ci`'s cmeth named
- # `mname`. Walks @cls_cmeth_returns directly (cls_cmethod_owner
- # already resolves inheritance, so callers pass the owner ci).
- # Defaults to "int" when the name isn't present -- the chained
- # dispatch path verifies owner >= 0 before consulting this.
-  def cls_cmeth_return_type(ci, mname)
-    if ci < 0
-      return "int"
-    end
-    cmnames = @cls_cmeth_names[ci].split(";")
-    cm_returns = @cls_cmeth_returns[ci].split(";")
-    cj = 0
-    while cj < cmnames.length
-      if cmnames[cj] == mname
-        if cj < cm_returns.length
-          return cm_returns[cj]
-        end
-        return "int"
-      end
-      cj = cj + 1
-    end
-    "int"
-  end
-
- # enumerate descendants of inner_ci (including
- # inner_ci itself) whose cmeth owner differs from base_owner.
- # Each entry is encoded `<descendant_ci>,<owner_ci>` separated
- # by `;`. Empty string when no overrides exist (caller stays on
- # the static-dispatch path).
-  def cls_cmeth_override_descendants(inner_ci, base_owner, mname)
-    out = ""
-    ck = 0
-    while ck < @cls_names.length
-      if ck == inner_ci || cls_is_descendant(ck, inner_ci) == 1
-        ow = cls_cmethod_owner(ck, mname)
-        if ow >= 0 && ow != base_owner
-          if out != ""
-            out = out + ";"
-          end
-          out = out + ck.to_s + "," + ow.to_s
-        end
-      end
-      ck = ck + 1
-    end
-    out
-  end
-
- # Walk the parent chain looking for an instance method named
- # `mname`. Returns the class index that defines it (the owner),
- # or -1. Imeth analog of cls_cmethod_owner.
-  def cls_imethod_owner(ci, mname)
-    if ci < 0
-      return -1
-    end
-    mnames = @cls_meth_names[ci].split(";")
     cj = 0
     while cj < mnames.length
       if mnames[cj] == mname
@@ -1976,22 +1908,23 @@ class Compiler
     if @cls_parents[ci] != ""
       pi = find_class_idx(@cls_parents[ci])
       if pi >= 0
-        return cls_imethod_owner(pi, mname)
+        return cls_method_owner_for(pi, mname, kind)
       end
     end
     -1
   end
 
  # Enumerate descendants of inner_ci (including inner_ci itself)
- # whose imeth owner differs from base_owner. Imeth analog of
- # cls_cmeth_override_descendants. Used by the bare-receiver imeth
- # dispatch site to decide whether a cls_id switch is needed.
-  def cls_imeth_override_descendants(inner_ci, base_owner, mname)
+ # whose method owner differs from base_owner. Each entry is
+ # encoded `<descendant_ci>,<owner_ci>` separated by `;`. Empty
+ # string when no overrides exist (caller stays on the
+ # static-dispatch path). `kind` is "cmeth" or "imeth".
+  def cls_method_override_descendants(inner_ci, base_owner, mname, kind)
     out = ""
     ck = 0
     while ck < @cls_names.length
       if ck == inner_ci || cls_is_descendant(ck, inner_ci) == 1
-        ow = cls_imethod_owner(ck, mname)
+        ow = cls_method_owner_for(ck, mname, kind)
         if ow >= 0 && ow != base_owner
           if out != ""
             out = out + ";"
@@ -2180,9 +2113,17 @@ class Compiler
   end
 
 
-  def cls_method_return(ci, mname)
-    names = @cls_meth_names[ci].split(";")
-    returns = @cls_meth_returns[ci].split(";")
+  def cls_method_return(ci, mname, kind = "imeth")
+    if ci < 0
+      return "int"
+    end
+    if kind == "cmeth"
+      names = @cls_cmeth_names[ci].split(";")
+      returns = @cls_cmeth_returns[ci].split(";")
+    else
+      names = @cls_meth_names[ci].split(";")
+      returns = @cls_meth_returns[ci].split(";")
+    end
     j = 0
     while j < names.length
       if names[j] == mname
@@ -2196,7 +2137,7 @@ class Compiler
     if @cls_parents[ci] != ""
       pi = find_class_idx(@cls_parents[ci])
       if pi >= 0
-        return cls_method_return(pi, mname)
+        return cls_method_return(pi, mname, kind)
       end
     end
     "int"
@@ -10235,7 +10176,7 @@ class Compiler
  # cls_id is just the class's index in @cls_names; the
  # generated sp_class_names[] table indexes by that. Class
  # constants used as method-call receivers are handled by
- # constructor_class_name / cls_cmethod_owner without ever
+ # constructor_class_name / cls_method_owner_for without ever
  # going through compile_expr on the receiver, so this
  # branch only ever fires in a true value-position site.
  # built-in class const (Integer,
@@ -12628,7 +12569,7 @@ class Compiler
  # call site doesn't propagate arg types to override defs, so
  # mismatched signatures would emit a broken C call).
         if owner_ci >= 0 && @cls_is_value_type[@current_class_idx] == 0 && has_proc == 0
-          ovr_pairs = cls_imeth_override_descendants(@current_class_idx, owner_ci, mname)
+          ovr_pairs = cls_method_override_descendants(@current_class_idx, owner_ci, mname, "imeth")
           if ovr_pairs != ""
             base_rt = cls_method_return(owner_ci, mname)
             base_rt_c = c_type(base_rt)
@@ -16864,7 +16805,7 @@ class Compiler
               if cm_ref == ""
                 cm_ref = @nd_name[arg_ids_cm[0]]
               end
-              owner_cm = cls_cmethod_owner(ci_cm, cm_ref)
+              owner_cm = cls_method_owner_for(ci_cm, cm_ref, "cmeth")
               if owner_cm >= 0
                 owner_cm_name = @cls_names[owner_cm]
                 emit_cls_method_adapter(owner_cm, cm_ref)
@@ -16881,7 +16822,7 @@ class Compiler
  # generated when Leaf doesn't override).
       ci3 = find_class_idx(rcname)
       if ci3 >= 0
-        owner_ci = cls_cmethod_owner(ci3, mname)
+        owner_ci = cls_method_owner_for(ci3, mname, "cmeth")
         if owner_ci >= 0
           owner_name = @cls_names[owner_ci]
           ca = compile_call_args(nid)
@@ -17223,7 +17164,7 @@ class Compiler
             inner_cname = inner_bt[4, inner_bt.length - 4]
             inner_ci = find_class_idx(inner_cname)
             if inner_ci >= 0
-              owner_idx = cls_cmethod_owner(inner_ci, mname)
+              owner_idx = cls_method_owner_for(inner_ci, mname, "cmeth")
               if owner_idx >= 0
                 owner_name = @cls_names[owner_idx]
                 ca = compile_call_args(nid)
@@ -17248,18 +17189,18 @@ class Compiler
                 if @cls_is_value_type[inner_ci] == 0 && ca == ""
                   nty = @nd_type[inner_recv]
                   if nty == "SelfNode" || nty == "LocalVariableReadNode"
-                    ovr = cls_cmeth_override_descendants(inner_ci, owner_idx, mname)
+                    ovr = cls_method_override_descendants(inner_ci, owner_idx, mname, "cmeth")
                   end
                 end
                 if ovr != ""
-                  base_rt = cls_cmeth_return_type(owner_idx, mname)
+                  base_rt = cls_method_return(owner_idx, mname, "cmeth")
                   ovr_pairs = ovr.split(";")
                   rt_ok = 1
                   op = 0
                   while op < ovr_pairs.length
                     pair = ovr_pairs[op].split(",")
                     cand_owner_check = pair[1].to_i
-                    cand_rt = cls_cmeth_return_type(cand_owner_check, mname)
+                    cand_rt = cls_method_return(cand_owner_check, mname, "cmeth")
                     if cand_rt != base_rt
                       rt_ok = 0
                       op = ovr_pairs.length
@@ -17320,7 +17261,7 @@ class Compiler
                       cand_cid_div = pair_div[0].to_i
                       cand_owner_div = pair_div[1].to_i
                       cand_name_div = @cls_names[cand_owner_div]
-                      cand_rt_div = cls_cmeth_return_type(cand_owner_div, mname)
+                      cand_rt_div = cls_method_return(cand_owner_div, mname, "cmeth")
                       cand_call_div = "sp_" + cand_name_div + "_cls_" + sanitize_name(mname) + "()"
                       cand_box_div = box_value_to_poly(cand_rt_div, cand_call_div)
                       emit("    case " + cls_id_for_user_internal(cand_cid_div).to_s + "LL: " + tmp_chain + " = " + cand_box_div + "; break;")
