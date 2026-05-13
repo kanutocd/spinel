@@ -20925,6 +20925,30 @@ class Compiler
       if @current_class_idx >= 0
         ivt = cls_ivar_type(@current_class_idx, iname)
       end
+ # Module class method (`def self.X` on a module): the ivar
+ # `@X` resolves to a module-level constant `cst_<Mod>_<X>`,
+ # not an instance ivar. Look up the const's stored type so the
+ # empty-`{}` / empty-`[]` promotion below picks the right
+ # `sp_*_new()` for the slot's actual hash/array variant.
+ # Without this, `def self.reset_slots!; @slots = {}; end` on a
+ # module whose @slots constant is sym_poly_hash emits
+ # sp_StrIntHash_new() (the empty-hash default), failing C
+ # compile at the cst write.
+      if ivt == "" && @current_method_name != ""
+        mci = 0
+        while mci < @module_names.length
+          mod_n = @module_names[mci]
+          if mod_n != "" && @current_method_name.start_with?(mod_n + "_cls_")
+            const_n = mod_n + "_" + iname[1, iname.length - 1]
+            const_idx = find_const_idx(const_n)
+            if const_idx >= 0
+              ivt = @const_types[const_idx]
+              break
+            end
+          end
+          mci = mci + 1
+        end
+      end
       if is_empty_hash_literal(expr_id) == 1 && ivt != "" && ivt != "str_int_hash"
         ctor = ""
         if ivt == "str_str_hash"
@@ -20950,7 +20974,7 @@ class Compiler
         end
         if ctor != ""
           @needs_gc = 1
-          emit("  " + self_arrow + sanitize_ivar(iname) + " = " + ctor + ";")
+          emit("  " + ivar_lhs(iname) + " = " + ctor + ";")
           return
         end
       end
@@ -20958,7 +20982,7 @@ class Compiler
         ctor = empty_array_new_for_type(ivt)
         if ctor != ""
           @needs_gc = 1
-          emit("  " + self_arrow + sanitize_ivar(iname) + " = " + ctor + ";")
+          emit("  " + ivar_lhs(iname) + " = " + ctor + ";")
           return
         end
       end
