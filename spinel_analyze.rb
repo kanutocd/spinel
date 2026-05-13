@@ -14549,6 +14549,87 @@ class Compiler
     result
   end
 
+ # Two-pass scan_locals merge: given the older type stored in
+ # scope (cur_t) and a freshly-observed type from a re-scan with
+ # more locals declared (new_t), return the type that should
+ # replace cur_t, or "" to keep cur_t unchanged. Centralises the
+ # rule table that previously lived inline at every refine_* /
+ # multi-pass merge site. Each clause encodes a known transition
+ # where the later pass is strictly better informed; everything
+ # else (incl. regressions like T -> int) is rejected.
+  def merge_refined_local_type(cur_t, new_t)
+    if new_t == cur_t || new_t == ""
+      return ""
+    end
+ # Never regress to default placeholders. A pass that produced
+ # "int" / "void" usually means it walked into a scope where the
+ # local wasn't visible — keep the earlier pass's verdict.
+    if new_t == "int" || new_t == "void"
+      return ""
+    end
+ # int default → anything specific (incl. nil for nullable vars).
+    if cur_t == "int"
+      if new_t == "nil"
+        return ""
+      end
+      return new_t
+    end
+ # nil starting type → nullable pointer. Add "?" so the C slot
+ # gets NULL-init and tag handling. is_nullable_type already
+ # checks for trailing "?".
+    if cur_t == "nil"
+      if is_nullable_pointer_type(new_t) == 1
+        if is_nullable_type(new_t) == 1
+          return new_t
+        end
+        return new_t + "?"
+      end
+      return ""
+    end
+ # Concrete → poly: genuine polymorphism detected after an
+ # upstream local resolved. Fixes the #463 cascade where
+ # `sub = if raw_sub.is_a?(Hash) then raw_sub else {} end`
+ # got stuck at str_int_hash from pass 1.
+    if new_t == "poly"
+      return "poly"
+    end
+ # str_poly_hash / sym_poly_hash widen any hash variant (poly
+ # value side covers the disagreement).
+    if new_t == "str_poly_hash" || new_t == "sym_poly_hash"
+      return new_t
+    end
+ # int_array pass-1 default → typed / poly array once the push
+ # rhs resolves.
+    if cur_t == "int_array"
+      if new_t == "str_array" || new_t == "float_array" || new_t == "sym_array" || is_ptr_array_type(new_t) == 1 || new_t == "poly_array"
+        return new_t
+      end
+    end
+ # ptr_array lateral move (sp_FooPtrArray <-> sp_BarPtrArray) —
+ # pass 2 typically picks the right element class.
+    if is_ptr_array_type(cur_t) == 1 && is_ptr_array_type(new_t) == 1
+      return new_t
+    end
+ # int_str_hash pass-1 default → resolved key/value combination.
+    if cur_t == "int_str_hash"
+      if new_t == "str_str_hash" || new_t == "sym_str_hash" || new_t == "str_int_hash" || new_t == "sym_int_hash"
+        return new_t
+      end
+    end
+ # str_int_hash → str_str_hash (value refinement once rhs local
+ # is declared as string).
+    if cur_t == "str_int_hash" && new_t == "str_str_hash"
+      return new_t
+    end
+ # Tuple refinements: non-tuple → tuple, and tuple X → tuple Y.
+    if is_tuple_type(new_t) == 1
+      if is_tuple_type(cur_t) == 0 || cur_t != new_t
+        return new_t
+      end
+    end
+    ""
+  end
+
   def fix_lambda_return_types
  # For methods that return "lambda", check if they are called from
  # contexts that expect primitive types. If so, downgrade the return type.
@@ -21619,54 +21700,13 @@ class Compiler
         k = 0
         while k < lnames.length
           if lnames[k] == ln[j]
-            if ltypes[k] == "int" || ltypes[k] == "nil"
-              if lt[j] != "int" && lt[j] != "nil"
-                ltypes[k] = lt[j]
-                set_var_type(lnames[k], lt[j])
+            merged_p = merge_refined_local_type(ltypes[k], lt[j])
+            if merged_p != ""
+              ltypes[k] = merged_p
+              set_var_type(lnames[k], merged_p)
+              if merged_p == "poly"
+                @needs_rb_value = 1
               end
-            end
-            if ltypes[k] == "int_array" && lt[j] != "int_array" && lt[j] != "int"
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
-            if is_ptr_array_type(ltypes[k]) == 1 && lt[j] != ltypes[k] && is_ptr_array_type(lt[j]) == 1
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
-            if ltypes[k] == "str_int_hash" && lt[j] == "str_str_hash"
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
- # When pass 0 saw an unresolved key expression (e.g. `parts[0]`
- # where parts wasn't declared yet) and produced `int_str_hash`
- # from `kt=int + vt=string`, but pass 1 with parts declared
- # correctly resolves the key as string (str_str_hash) or
- # symbol (sym_str_hash), promote the local to the better
- # variant. Symmetric to the str_int_hash → str_str_hash rule
- # above; without it the hash stays pinned at int_str_hash and
- # the call site emits `sp_IntStrHash_set(h, const char *, ...)`
- # with a -Wint-conversion error.
-            if ltypes[k] == "int_str_hash" && (lt[j] == "str_str_hash" || lt[j] == "sym_str_hash" || lt[j] == "str_int_hash" || lt[j] == "sym_int_hash")
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
-            if is_tuple_type(lt[j]) == 1 && is_tuple_type(ltypes[k]) == 0
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
- # tuple:X → tuple:Y refinement (matches emit_main pass 3).
-            if is_tuple_type(ltypes[k]) == 1 && is_tuple_type(lt[j]) == 1 && ltypes[k] != lt[j]
-              ltypes[k] = lt[j]
-              set_var_type(lnames[k], lt[j])
-            end
- # Pass N detected genuine polymorphism (writes from sites with
- # incompatible types) that an earlier pass missed because an
- # upstream local was still defaulted to int. Mirrors the rule
- # in refine_method_body_locals; same reasoning.
-            if lt[j] == "poly" && ltypes[k] != "poly"
-              ltypes[k] = "poly"
-              set_var_type(lnames[k], "poly")
-              @needs_rb_value = 1
             end
           end
           k = k + 1
@@ -21930,67 +21970,13 @@ class Compiler
       k = 0
       while k < lnames.length
         if lnames[k] == lnames2[j]
-          if ltypes[k] == "int"
-            if ltypes2[j] != "int"
-              ltypes[k] = ltypes2[j]
-              set_var_type(lnames[k], ltypes2[j])
+          merged = merge_refined_local_type(ltypes[k], ltypes2[j])
+          if merged != ""
+            ltypes[k] = merged
+            set_var_type(lnames[k], merged)
+            if merged == "poly"
+              @needs_rb_value = 1
             end
-          elsif ltypes[k] == "nil" && is_nullable_pointer_type(ltypes2[j]) == 1
-            if is_nullable_type(ltypes2[j]) == 1
-              ltypes[k] = ltypes2[j]
-            else
-              ltypes[k] = ltypes2[j] + "?"
-            end
-            set_var_type(lnames[k], ltypes[k])
-          elsif (ltypes2[j] == "str_poly_hash" || ltypes2[j] == "sym_poly_hash") && ltypes[k] != ltypes2[j]
-            ltypes[k] = ltypes2[j]
-            set_var_type(lnames[k], ltypes2[j])
- # pass 1 typed `results` as int_array (from
- # the empty `[]` literal). Pass 2's `<<` push observation,
- # with the rhs local now in scope, refined the type to
- # str_array / float_array / sym_array / *_ptr_array. Without
- # this branch the refined type is dropped and codegen emits
- # `sp_IntArray *` against a body that pushes typed pointers,
- # tripping the cc step at the push site.
-          elsif ltypes[k] == "int_array" && ltypes2[j] != "int_array" &&
-                (ltypes2[j] == "str_array" || ltypes2[j] == "float_array" ||
-                 ltypes2[j] == "sym_array" || is_ptr_array_type(ltypes2[j]) == 1 ||
-                 ltypes2[j] == "poly_array")
-            ltypes[k] = ltypes2[j]
-            set_var_type(lnames[k], ltypes2[j])
- # Pass 1 picked int_str_hash from an unresolved key
- # expression (`kt=int + vt=string` via the analyzer
- # fallback for an undeclared local). Pass 2 with the key
- # resolved as string (or symbol) corrects to str_str_hash /
- # sym_str_hash. Mirrors the str_int_hash → str_str_hash
- # widening rule in refine_locals_multi_pass_full.
-          elsif ltypes[k] == "int_str_hash" && (ltypes2[j] == "str_str_hash" || ltypes2[j] == "sym_str_hash" || ltypes2[j] == "str_int_hash" || ltypes2[j] == "sym_int_hash")
-            ltypes[k] = ltypes2[j]
-            set_var_type(lnames[k], ltypes2[j])
- # Symmetric: pass 1 saw `vt=int` because the value's source
- # local (e.g. `pb` from `pb = b.split("/")`) wasn't declared
- # yet, leaving the hash at str_int_hash. Pass 2 with `pb`
- # declared as str_array correctly resolves pb[i] as string and
- # picks str_str_hash. Mirrors the rule in
- # refine_locals_multi_pass_full at line 20142.
-          elsif ltypes[k] == "str_int_hash" && ltypes2[j] == "str_str_hash"
-            ltypes[k] = ltypes2[j]
-            set_var_type(lnames[k], ltypes2[j])
- # Pass 2 detected genuine polymorphism (the local is written
- # from sites of incompatible types) that pass 1 missed because
- # an upstream local was still defaulted to int. Example:
- # `sub = if raw_sub.is_a?(Hash) then raw_sub else {} end` where
- # raw_sub is poly (from `params.fetch "k", {}`): pass 1 typed
- # the then-arm as int (raw_sub not yet in scope) so unify gave
- # str_int_hash; pass 2 with raw_sub declared poly correctly
- # unifies to poly. Without this rule the LV slot stays
- # str_int_hash and codegen emits sp_StrIntHash * for a value
- # that's actually sp_RbVal at runtime — incompatible-pointer
- # assignment at the write site.
-          elsif ltypes2[j] == "poly" && ltypes[k] != "poly"
-            ltypes[k] = "poly"
-            set_var_type(lnames[k], "poly")
-            @needs_rb_value = 1
           end
         end
         k = k + 1
@@ -22016,12 +22002,13 @@ class Compiler
       k = 0
       while k < lnames.length
         if lnames[k] == lnames3[j]
-          if ltypes[k] == "str_int_hash" && ltypes3[j] == "str_str_hash"
-            ltypes[k] = ltypes3[j]
-            set_var_type(lnames[k], ltypes3[j])
-          elsif ltypes[k] == "int_str_hash" && (ltypes3[j] == "str_str_hash" || ltypes3[j] == "sym_str_hash" || ltypes3[j] == "str_int_hash" || ltypes3[j] == "sym_int_hash")
-            ltypes[k] = ltypes3[j]
-            set_var_type(lnames[k], ltypes3[j])
+          merged3 = merge_refined_local_type(ltypes[k], ltypes3[j])
+          if merged3 != ""
+            ltypes[k] = merged3
+            set_var_type(lnames[k], merged3)
+            if merged3 == "poly"
+              @needs_rb_value = 1
+            end
           end
         end
         k = k + 1
