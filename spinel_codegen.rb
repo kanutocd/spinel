@@ -14946,9 +14946,24 @@ class Compiler
       tname = tuple_c_name(tt)
       arg = compile_arg0(nid)
       tmp = new_temp
+      @needs_setjmp = 1
+      # CRuby raises:
+      #   ZeroDivisionError on `1.0.divmod(0)` / `divmod(0.0)`.
+      #   FloatDomainError("NaN") on NaN dividend or NaN divisor.
+      # Bind both operands to float locals before the raise checks so
+      # they're each evaluated exactly once and so gcc can't constant-
+      # fold `1.0 / 0LL` and trip -Wdiv-by-zero on the literal-zero
+      # path below. The (mrb_int)floor cast on a NaN result would also
+      # be C undefined behaviour; raise before reaching it.
+      recv_tmp = new_temp
+      arg_tmp = new_temp
+      emit("  mrb_float " + recv_tmp + " = (mrb_float)(" + rc + ");")
+      emit("  mrb_float " + arg_tmp + " = (mrb_float)(" + arg + ");")
+      emit("  if (" + arg_tmp + " == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\");")
+      emit("  if (" + arg_tmp + " != " + arg_tmp + " || " + recv_tmp + " != " + recv_tmp + ") sp_raise_cls(\"FloatDomainError\", \"NaN\");")
       emit("  " + tname + " *" + tmp + " = (" + tname + " *)sp_gc_alloc(sizeof(" + tname + "), NULL, " + tuple_scan_name(tt) + ");")
-      emit("  " + tmp + "->_0 = (mrb_int)floor(" + rc + " / " + arg + ");")
-      emit("  " + tmp + "->_1 = " + rc + " - " + tmp + "->_0 * " + arg + ";")
+      emit("  " + tmp + "->_0 = (mrb_int)floor(" + recv_tmp + " / " + arg_tmp + ");")
+      emit("  " + tmp + "->_1 = " + recv_tmp + " - " + tmp + "->_0 * " + arg_tmp + ";")
       return tmp
     end
     ""
