@@ -246,6 +246,8 @@ class Compiler
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
     @cls_cmeth_defaults = "".split(",")
+    @cls_cmeth_scope_names = "".split(",")
+    @cls_cmeth_scope_types = "".split(",")
     @cls_is_value_type = []
  # SRA (scalar replacement of aggregates) eligibility flag per class.
  # Classes marked here can have their non-escaping instances replaced
@@ -8324,6 +8326,11 @@ class Compiler
       cm_params = @cls_cmeth_params[i].split("|")
       cm_ptypes = @cls_cmeth_ptypes[i].split("|")
       cm_bodies = @cls_cmeth_bodies[i].split(";")
+ # Per-(class, cmj) scope tables for inherited bodies — see the
+ # analyze-side comment on @cls_cmeth_scope_names. Empty fallback
+ # when analyze hasn't populated it (legacy compatibility).
+      cm_scope_names = @cls_cmeth_scope_names[i].split(";", -1)
+      cm_scope_types = @cls_cmeth_scope_types[i].split(";", -1)
       j = 0
       while j < cmnames.length
         rt = "int"
@@ -8343,6 +8350,14 @@ class Compiler
         if j < cm_ptypes.length
           ptypes = cm_ptypes[j].split(",")
         end
+        scope_n_j = ""
+        scope_t_j = ""
+        if j < cm_scope_names.length
+          scope_n_j = cm_scope_names[j]
+        end
+        if j < cm_scope_types.length
+          scope_t_j = cm_scope_types[j]
+        end
  # Dead-code-eliminate cls methods with no call site. An
  # unused `def self.factory(attrs); new(attrs); ...; end`
  # would emit a body whose `sp_<this>_new(args)` may not
@@ -8355,7 +8370,7 @@ class Compiler
         if cls_cmeth_is_live(i, cmnames[j]) == 0
           j = j + 1
         else
-          emit_class_level_method(i, cmnames[j], pnames, ptypes, rt, bid)
+          emit_class_level_method(i, cmnames[j], pnames, ptypes, rt, bid, scope_n_j, scope_t_j)
           j = j + 1
         end
       end
@@ -8993,7 +9008,7 @@ class Compiler
     emit_raw("")
   end
 
-  def emit_class_level_method(ci, mname, pnames, ptypes, rt, bid)
+  def emit_class_level_method(ci, mname, pnames, ptypes, rt, bid, scope_n = "", scope_t = "")
     cname = @cls_names[ci]
     @current_class_idx = ci
     @current_method_name = mname
@@ -9017,7 +9032,15 @@ class Compiler
     end
 
     if bid >= 0
-      declare_method_locals(bid, pnames)
+ # Prefer per-(ci, cmj) scope tables when analyze populated
+ # them. Inherited cmeth bodies share the AST bid across
+ # subclasses, so the per-bid @nd_scope_names entry was last-
+ # class-wins; the per-(ci, cmj) entry is subclass-specific.
+      if scope_n != "" || scope_t != ""
+        declare_method_locals_from(scope_n, scope_t, pnames)
+      else
+        declare_method_locals(bid, pnames)
+      end
       compile_body_return(bid, rt)
     end
 
@@ -9029,6 +9052,48 @@ class Compiler
     emit_raw("  return " + c_return_default(rt) + ";")
     emit_raw("}")
     emit_raw("")
+  end
+
+ # Variant of declare_method_locals that takes precomputed
+ # scope tables (in the same "|"-joined format as
+ # @nd_scope_names) instead of looking them up by bid. Used by
+ # the cmeth emit path to plumb per-(ci, cmj) tables through.
+  def declare_method_locals_from(sn, st, params)
+    lnames = "".split(",")
+    ltypes = "".split(",")
+    if sn != ""
+      lnames = sn.split("|")
+      ltypes = st.split("|")
+    end
+    j = 0
+    while j < lnames.length
+      declare_var(lnames[j], ltypes[j])
+      j = j + 1
+    end
+    has_gc_locals = 0
+    j = 0
+    while j < lnames.length
+      if type_is_pointer(ltypes[j]) == 1
+        has_gc_locals = 1
+      end
+      j = j + 1
+    end
+    if has_gc_locals == 1
+      if @needs_gc == 1 && @in_gc_scope == 0
+        emit("  SP_GC_SAVE();")
+        @in_gc_scope = 1
+      end
+    end
+    j = 0
+    while j < lnames.length
+      emit("  " + c_type(ltypes[j]) + " lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
+      j = j + 1
+    end
+    if has_gc_locals == 1
+      if @needs_gc == 1
+        emit_gc_roots(lnames, ltypes)
+      end
+    end
   end
 
   def build_params_str(pnames, ptypes)
@@ -30765,6 +30830,10 @@ class Compiler
       @cls_cmeth_bodies = val
     elsif name == "@cls_cmeth_defaults"
       @cls_cmeth_defaults = val
+    elsif name == "@cls_cmeth_scope_names"
+      @cls_cmeth_scope_names = val
+    elsif name == "@cls_cmeth_scope_types"
+      @cls_cmeth_scope_types = val
     elsif name == "@cls_meth_has_yield"
       @cls_meth_has_yield = val
     elsif name == "@cls_method_adapters"

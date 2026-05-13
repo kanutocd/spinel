@@ -230,6 +230,18 @@ class Compiler
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
     @cls_cmeth_defaults = "".split(",")
+ # Per-(class, cmeth) local scope tables. @nd_scope_names is
+ # keyed by AST body id only; an inherited class method's body
+ # is shared across subclasses, so the per-bid table gets
+ # overwritten by whichever subclass scans last. These per-
+ # (class, cmj) tables preserve subclass-specific local type
+ # info (e.g. Comment.find's `result : sp_Comment *` vs
+ # Article.find's `result : sp_Article *`). Outer separator
+ # ";" indexes by cmj (mirrors @cls_cmeth_bodies); inner
+ # separator "|" matches @nd_scope_names' format so the codegen
+ # consumer can split into the same (lnames, ltypes) pair.
+    @cls_cmeth_scope_names = "".split(",")
+    @cls_cmeth_scope_types = "".split(",")
     @cls_is_value_type = []
  # SRA (scalar replacement of aggregates) eligibility flag per class.
  # Classes marked here can have their non-escaping instances replaced
@@ -6809,6 +6821,8 @@ class Compiler
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
     @cls_cmeth_defaults.push("")
+    @cls_cmeth_scope_names.push("")
+    @cls_cmeth_scope_types.push("")
     @cls_meth_has_yield.push("")
 
  # Collect class body
@@ -9301,6 +9315,8 @@ class Compiler
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
     @cls_cmeth_defaults.push("")
+    @cls_cmeth_scope_names.push("")
+    @cls_cmeth_scope_types.push("")
     @cls_meth_has_yield.push("0")
   end
 
@@ -9331,6 +9347,8 @@ class Compiler
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
     @cls_cmeth_defaults.push("")
+    @cls_cmeth_scope_names.push("")
+    @cls_cmeth_scope_types.push("")
     @cls_meth_has_yield.push("")
 
  # Get field names from symbol args (skip keyword_init hash)
@@ -20546,6 +20564,8 @@ class Compiler
     buf = ir_emit_sa(buf, "@cls_cmeth_returns", @cls_cmeth_returns)
     buf = ir_emit_sa(buf, "@cls_cmeth_bodies", @cls_cmeth_bodies)
     buf = ir_emit_sa(buf, "@cls_cmeth_defaults", @cls_cmeth_defaults)
+    buf = ir_emit_sa(buf, "@cls_cmeth_scope_names", @cls_cmeth_scope_names)
+    buf = ir_emit_sa(buf, "@cls_cmeth_scope_types", @cls_cmeth_scope_types)
     buf = ir_emit_ia(buf, "@cls_is_value_type", @cls_is_value_type)
     buf = ir_emit_ia(buf, "@cls_is_sra", @cls_is_sra)
     buf = ir_emit_sa(buf, "@cls_meth_has_yield", @cls_meth_has_yield)
@@ -22051,9 +22071,20 @@ class Compiler
       cm_bodies = @cls_cmeth_bodies[ci].split(";")
       cm_names = @cls_cmeth_names[ci].split(";")
       saved_meth = @current_method_name
+ # Build per-(ci, cmj) scope tables alongside the per-bid
+ # @nd_scope_names entry. Inherited cmeths share their body id
+ # across subclasses, so the per-bid entry gets overwritten by
+ # whichever subclass scans last (effectively last-class-wins,
+ # leaving every other subclass with the wrong LV types — see
+ # Comment.find returning sp_Article *). Per-(ci, cmj) keeps
+ # each subclass's specialized result alive for codegen.
+      cms_per_ci = "".split(",")
+      cmt_per_ci = "".split(",")
       cbj = 0
       while cbj < cm_bodies.length
         cbid = cm_bodies[cbj].to_i
+        scope_n_entry = ""
+        scope_t_entry = ""
         if cbid >= 0
           if cbj < cm_names.length
             @current_method_name = @cls_names[ci] + "_cls_" + cm_names[cbj]
@@ -22075,10 +22106,16 @@ class Compiler
           refine_method_body_locals(cbid, cml, cmt, cpnames)
           @nd_scope_names[cbid] = cml.join("|")
           @nd_scope_types[cbid] = cmt.join("|")
+          scope_n_entry = cml.join("|")
+          scope_t_entry = cmt.join("|")
           pop_scope
         end
+        cms_per_ci.push(scope_n_entry)
+        cmt_per_ci.push(scope_t_entry)
         cbj = cbj + 1
       end
+      @cls_cmeth_scope_names[ci] = cms_per_ci.join(";")
+      @cls_cmeth_scope_types[ci] = cmt_per_ci.join(";")
       @current_method_name = saved_meth
       @current_class_idx = saved_ci
       ci = ci + 1
