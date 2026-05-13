@@ -3709,6 +3709,25 @@ class Compiler
     end
     if mname == "dup"
       if recv >= 0
+ # `nullable_poly_hash[k].dup` shape: the recv emits sp_RbVal
+ # at runtime (codegen-side expr_emits_poly_rb_val handles the
+ # unbox at call sites), but analyze's cached infer for the
+ # `[]` access falls back to int because the recv carries the
+ # `?` suffix. Recognize the shape here so dup surfaces as
+ # poly — without this, the LV write site pins the slot at int
+ # and downstream `iv_params = lv_merged` (StrIntHash * slot)
+ # fails -Wint-conversion.
+        if @nd_type[recv] == "CallNode" && @nd_name[recv] == "[]"
+          inner_recv = @nd_receiver[recv]
+          if inner_recv >= 0
+            inner_rt = infer_type(inner_recv)
+            inner_bt = base_type(inner_rt)
+            if inner_bt == "sym_poly_hash" || inner_bt == "str_poly_hash" || inner_bt == "poly_poly_hash"
+              @needs_rb_value = 1
+              return "poly"
+            end
+          end
+        end
         return infer_type(recv)
       end
       return "string"
@@ -19787,6 +19806,18 @@ class Compiler
 
   def poly_dispatch_return_type(mname)
     if mname == "[]"
+      @needs_rb_value = 1
+      return "poly"
+    end
+ # Methods that conventionally return the receiver's
+ # representation (or compatible-shape). dup preserves storage
+ # so the result is the same poly. each returns self (Ruby's
+ # convention). merge returns a fresh hash of the same family.
+ # to_h is identity for hashes. Without surfacing these as
+ # poly, the result_tmp in the poly-recv dispatcher is declared
+ # mrb_int and the per-cls_id arm's `tmp = sp_box_obj(...)`
+ # assignment silently no-ops.
+    if mname == "dup" || mname == "each" || mname == "to_h" || mname == "merge"
       @needs_rb_value = 1
       return "poly"
     end

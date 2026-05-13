@@ -6448,6 +6448,7 @@ class Compiler
     emit_raw("static void sp_SymIntHash_delete(sp_SymIntHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k){h->keys[idx]=-1;h->vals[idx]=0;h->len--;mrb_int j=(idx+1)&h->mask;while(h->keys[j]>=0){mrb_int nj=(mrb_int)(((mrb_int)h->keys[j])&h->mask);if((j>idx&&(nj<=idx||nj>j))||(j<idx&&nj<=idx&&nj>j)){h->keys[idx]=h->keys[j];h->vals[idx]=h->vals[j];h->keys[j]=-1;h->vals[j]=0;idx=j;}j=(j+1)&h->mask;}{mrb_int oi=0;while(oi<=h->len){if(h->order[oi]==k){while(oi<h->len){h->order[oi]=h->order[oi+1];oi++;}break;}oi++;}}return;}idx=(idx+1)&h->mask;}}")
     emit_raw("static sp_IntArray*sp_SymIntHash_keys(sp_SymIntHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,(mrb_int)h->order[i]);return a;}")
     emit_raw("static sp_IntArray*sp_SymIntHash_values(sp_SymIntHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,sp_SymIntHash_get(h,h->order[i]));return a;}")
+    emit_raw("static sp_SymIntHash*sp_SymIntHash_dup(sp_SymIntHash*h){sp_SymIntHash*r=sp_SymIntHash_new();for(mrb_int i=0;i<h->len;i++)sp_SymIntHash_set(r,h->order[i],sp_SymIntHash_get(h,h->order[i]));return r;}")
  # Hash inspect — Ruby's modern shorthand `{k: v, ...}`. All keys
  # in a sym_int_hash are valid identifier symbols (the parser only
  # routes literal symbol keys here), so the bare-name form always
@@ -6476,6 +6477,7 @@ class Compiler
     emit_raw("static void sp_SymStrHash_delete(sp_SymStrHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k){h->keys[idx]=-1;h->vals[idx]=NULL;h->len--;mrb_int j=(idx+1)&h->mask;while(h->keys[j]>=0){mrb_int nj=(mrb_int)(((mrb_int)h->keys[j])&h->mask);if((j>idx&&(nj<=idx||nj>j))||(j<idx&&nj<=idx&&nj>j)){h->keys[idx]=h->keys[j];h->vals[idx]=h->vals[j];h->keys[j]=-1;h->vals[j]=NULL;idx=j;}j=(j+1)&h->mask;}{mrb_int oi=0;while(oi<=h->len){if(h->order[oi]==k){while(oi<h->len){h->order[oi]=h->order[oi+1];oi++;}break;}oi++;}}return;}idx=(idx+1)&h->mask;}}")
     emit_raw("static sp_IntArray*sp_SymStrHash_keys(sp_SymStrHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,(mrb_int)h->order[i]);return a;}")
     emit_raw("static sp_StrArray*sp_SymStrHash_values(sp_SymStrHash*h){sp_StrArray*a=sp_StrArray_new();for(mrb_int i=0;i<h->len;i++)sp_StrArray_push(a,sp_SymStrHash_get(h,h->order[i]));return a;}")
+    emit_raw("static sp_SymStrHash*sp_SymStrHash_dup(sp_SymStrHash*h){sp_SymStrHash*r=sp_SymStrHash_new();for(mrb_int i=0;i<h->len;i++)sp_SymStrHash_set(r,h->order[i],sp_SymStrHash_get(h,h->order[i]));return r;}")
     emit_raw("")
   end
 
@@ -12071,6 +12073,17 @@ class Compiler
  # to the "0" fallback. .
     if is_nullable_type(recv_type) == 1
       recv_type = base_type(recv_type)
+    end
+ # Recv expr emits sp_RbVal even though the cached static type
+ # is something narrower (typically int default for a nullable
+ # poly-hash `[]` access — see expr_emits_poly_rb_val for the
+ # canonical shape: `matched[:k]` where matched is sym_poly_hash?).
+ # Treat as poly so the dispatcher reaches compile_poly_method_call
+ # instead of falling through to compile_int_method_expr and
+ # emitting the "cannot resolve" fallback. Without this, downstream
+ # `.dup` / `.each` / etc. on such expressions silently no-op.
+    if recv_type != "poly" && expr_emits_poly_rb_val(recv) == 1
+      recv_type = "poly"
     end
     rc = compile_expr_gc_rooted(recv)
  # Root receiver if it may be collected during argument evaluation
@@ -17904,6 +17917,15 @@ class Compiler
       @needs_rb_value = 1
       return "poly"
     end
+ # Hash-shape preserving methods on a poly recv carrying hash
+ # storage. The result temp must be sp_RbVal so the per-cls_id
+ # arm's `tmp = sp_box_obj(...)` lands. Without this, the temp
+ # is mrb_int and the assignment silently no-ops, leaving every
+ # downstream consumer reading the int 0 default.
+    if mname == "dup" || mname == "each" || mname == "to_h" || mname == "merge"
+      @needs_rb_value = 1
+      return "poly"
+    end
  # Built-in string methods that compile_poly_method_call also
  # lowers via a SP_TAG_STR arm — their result temp needs to be
  # at least string-typed so the per-tag dispatch assignment
@@ -18397,6 +18419,26 @@ class Compiler
           emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_STR_HASH) " + result_tmp + " = sp_box_str(sp_StrStrHash_get((sp_StrStrHash *)" + recv_tmp + ".v.p, " + arg_compiled[0] + "));")
           emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_POLY_HASH) " + result_tmp + " = sp_StrPolyHash_get((sp_StrPolyHash *)" + recv_tmp + ".v.p, " + arg_compiled[0] + ");")
         end
+      end
+    end
+ # `dup` arms — Hash#dup on a poly recv whose runtime storage is
+ # any hash variant. matched[:path_params].dup is the canonical
+ # form in real-blog's request-params chain. Pre-fix the call
+ # fell through to int default ("cannot resolve call to 'dup' on
+ # int" warning), leaving downstream chained writes silently
+ # against the int 0. Each arm dups via the matching runtime
+ # helper and boxes back as obj. Only the always-in hash variants
+ # (sp_runtime.h) are emitted; SymInt / SymStr variants are
+ # typedef-gated by @needs flags which aren't reliably set at
+ # this emit point.
+    if mname == "dup"
+      if is_poly_ret == 1
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_INT_HASH) " + result_tmp + " = sp_box_obj((void *)sp_StrIntHash_dup((sp_StrIntHash *)" + recv_tmp + ".v.p), SP_BUILTIN_STR_INT_HASH);")
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_STR_HASH) " + result_tmp + " = sp_box_obj((void *)sp_StrStrHash_dup((sp_StrStrHash *)" + recv_tmp + ".v.p), SP_BUILTIN_STR_STR_HASH);")
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_INT_STR_HASH) " + result_tmp + " = sp_box_obj((void *)sp_IntStrHash_dup((sp_IntStrHash *)" + recv_tmp + ".v.p), SP_BUILTIN_INT_STR_HASH);")
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_STR_POLY_HASH) " + result_tmp + " = sp_box_obj((void *)sp_StrPolyHash_dup((sp_StrPolyHash *)" + recv_tmp + ".v.p), SP_BUILTIN_STR_POLY_HASH);")
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_SYM_POLY_HASH) " + result_tmp + " = sp_box_obj((void *)sp_SymPolyHash_dup((sp_SymPolyHash *)" + recv_tmp + ".v.p), SP_BUILTIN_SYM_POLY_HASH);")
+        emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_POLY_POLY_HASH) " + result_tmp + " = sp_box_obj((void *)sp_PolyPolyHash_dup((sp_PolyPolyHash *)" + recv_tmp + ".v.p), SP_BUILTIN_POLY_POLY_HASH);")
       end
     end
     if mname == "[]" && arg_compiled.length >= 1 && a0_is_int
