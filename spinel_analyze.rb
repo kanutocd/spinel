@@ -7612,7 +7612,18 @@ class Compiler
  # `@m = method(:foo)` initially scans as int and a
  # refinement promotes it to `obj_Method` — no heterogeneity
  # to widen for).
-          if (old == "int" || old == "nil") && is_obj_type(new_type) == 1 && cls_ivar_definite_flag(ci, iname) == 1
+          nil_scalar_mix = 0
+          if old == "nil" && (new_type == "int" || new_type == "float" || new_type == "bool" || new_type == "symbol")
+            nil_scalar_mix = 1
+          elsif new_type == "nil" && (old == "int" || old == "float" || old == "bool" || old == "symbol")
+            nil_scalar_mix = 1
+          end
+          if nil_scalar_mix == 1
+            types[k] = "poly"
+            @needs_rb_value = 1
+            @cls_ivar_types[ci] = types.join(";")
+            @cls_ivar_types_version = @cls_ivar_types_version + 1
+          elsif (old == "int" || old == "nil") && is_obj_type(new_type) == 1 && cls_ivar_definite_flag(ci, iname) == 1
             types[k] = "poly"
             @needs_rb_value = 1
             @cls_ivar_types[ci] = types.join(";")
@@ -7904,7 +7915,7 @@ class Compiler
             if new_def == 1 && cur_def == 1 && cur != vtype && cur != "poly"
               replace_ivar_type(ci, iname, "poly")
               @needs_rb_value = 1
-            elsif vtype != "int"
+            elsif vtype != "int" || cur == "nil"
               update_ivar_type(ci, iname, vtype)
             end
           end
@@ -10829,7 +10840,12 @@ class Compiler
                           if ij < ivar_types.length
                             if ivar_names[ij] == iname
                               if ptypes[pi] != ""
-                                ivar_types[ij] = unify_call_types(ivar_types[ij], ptypes[pi], -1)
+                                if ivar_types[ij] == "nil" && (ptypes[pi] == "int" || ptypes[pi] == "float" || ptypes[pi] == "bool" || ptypes[pi] == "symbol")
+                                  ivar_types[ij] = "poly"
+                                  @needs_rb_value = 1
+                                else
+                                  ivar_types[ij] = unify_call_types(ivar_types[ij], ptypes[pi], -1)
+                                end
                               end
                             end
                           end
@@ -13435,7 +13451,7 @@ class Compiler
               update_ivar_type(@current_class_idx, chain_inames[ci_idx], at)
               ci_idx = ci_idx + 1
             end
-          elsif at != "int" && at != "nil"
+          elsif at != "nil" && (at != "int" || cls_ivar_type(@current_class_idx, iname) == "nil")
             update_ivar_type(@current_class_idx, iname, at)
           end
         end
