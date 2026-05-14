@@ -3208,6 +3208,67 @@ class Compiler
     1
   end
 
+  def bare_call_builtin_name_inference?(mname)
+    if is_primitive_shared_method(mname) == 1
+      return 1
+    end
+    if mname == "Integer" || mname == "Float"
+      return 1
+    end
+    if mname == "delete_prefix" || mname == "delete_suffix"
+      return 1
+    end
+    if mname == "cover?" || mname == "method_defined?"
+      return 1
+    end
+    if mname == "allbits?" || mname == "anybits?" || mname == "nobits?"
+      return 1
+    end
+    if mname == "gcd" || mname == "lcm" || mname == "ceildiv" || mname == "div" || mname == "clamp"
+      return 1
+    end
+    if mname == "itself" || mname == "then" || mname == "yield_self"
+      return 1
+    end
+    if mname == "getbyte" || mname == "setbyte" || mname == "__method__"
+      return 1
+    end
+    if mname == "slice!" || mname == "intern"
+      return 1
+    end
+    if mname == "format" || mname == "sprintf"
+      return 1
+    end
+    if mname == "between?" || mname == "pow"
+      return 1
+    end
+    if mname == "member?" || mname == "readline" || mname == "readlines"
+      return 1
+    end
+    if mname == "squeeze" || mname == "hex" || mname == "oct"
+      return 1
+    end
+    if mname == "delete_at" || mname == "insert" || mname == "filter_map" || mname == "detect"
+      return 1
+    end
+    if mname == "sample" || mname == "fdiv" || mname == "nan?" || mname == "finite?" || mname == "infinite?"
+      return 1
+    end
+    if mname == "tally" || mname == "take" || mname == "drop" || mname == "rotate" || mname == "fill"
+      return 1
+    end
+    if mname == "shuffle" || mname == "shuffle!" || mname == "flat_map" || mname == "sort_by"
+      return 1
+    end
+    if mname == "min_by" || mname == "max_by" || mname == "reduce" || mname == "inject" || mname == "each_with_object"
+      return 1
+    end
+    if mname == "zip"
+      return 1
+    end
+    0
+  end
+
   def infer_method_name_type(nid, mname, recv)
  # when recv is a class/module constant ref whose
  # class/module defines a class method of the given name, defer
@@ -3257,7 +3318,7 @@ class Compiler
  # user-defined method on self. Let the receiver-aware class method
  # lookup later in infer_call_type answer those before the generic
  # name-based builtins (`length` -> int, `to_s` -> string, ...).
-    if recv < 0 && @current_class_idx >= 0
+    if recv < 0 && @current_class_idx >= 0 && bare_call_builtin_name_inference?(mname) == 1
       if cls_find_method(@current_class_idx, mname) >= 0
         return ""
       end
