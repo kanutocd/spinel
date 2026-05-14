@@ -15968,6 +15968,50 @@ class Compiler
         r_idx = r_idx + 1
       }
     end
+ # Block parameters of `recv.method do |bp| ... end` need to be
+ # declared as locals so the enclosing scope's call-site widening
+ # (driven by scan_new_calls -> widen_ptypes_from_args ->
+ # infer_type(arg)) can resolve `bp` to its real type rather than
+ # the find_var_type-not-found fallback `int`. Mirrors the
+ # equivalent (more elaborate) block-param block in scan_locals.
+ # Without this, a `class M; def self.driver; arr.each { |pair|
+ # M.use(pair) } end end` shape leaves M.use's `s` param at
+ # mrb_int even though pair is `const char *`.
+    if @nd_type[nid] == "CallNode"
+      blk_fp = @nd_block[nid]
+      if blk_fp >= 0
+        bp_fp = @nd_parameters[blk_fp]
+        if bp_fp >= 0 && @nd_type[bp_fp] != "NumberedParametersNode"
+          inner_fp = @nd_parameters[bp_fp]
+          if inner_fp >= 0
+            reqs_fp = parse_id_list(@nd_requireds[inner_fp])
+            recv_t_fp = ""
+            if @nd_receiver[nid] >= 0
+              recv_t_fp = infer_type(@nd_receiver[nid])
+            end
+            elem_t_fp = "int"
+            if recv_t_fp == "str_array"
+              elem_t_fp = "string"
+            elsif recv_t_fp == "float_array"
+              elem_t_fp = "float"
+            elsif recv_t_fp == "sym_array"
+              elem_t_fp = "symbol"
+            elsif is_ptr_array_type(recv_t_fp) == 1
+              elem_t_fp = ptr_array_elem_type(recv_t_fp)
+            end
+            bk_fp = 0
+            while bk_fp < reqs_fp.length
+              bname_fp = @nd_name[reqs_fp[bk_fp]]
+              if not_in(bname_fp, names) == 1 && not_in(bname_fp, params) == 1
+                names.push(bname_fp)
+                types.push(elem_t_fp)
+              end
+              bk_fp = bk_fp + 1
+            end
+          end
+        end
+      end
+    end
  # Recurse
     if @nd_body[nid] >= 0
       scan_locals_first_type(@nd_body[nid], names, types, params)
