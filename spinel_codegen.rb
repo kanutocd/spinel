@@ -2942,6 +2942,30 @@ class Compiler
           if all_sym_keys == 1
             return "sym_poly_hash"
           end
+ # Mixed-shape keys (IntegerNode + SymbolNode etc.): no single
+ # *_poly_hash variant can carry them. Use poly_poly_hash where
+ # both key and value are sp_RbVal. Mirrors the analyzer arm.
+ # Issue #536: `{ 0 => false, a: 1 }` segfaulted because
+ # str_poly_hash was selected and the integer key was passed
+ # directly to `sp_StrPolyHash_set` (which dereferences a
+ # `const char *`).
+          all_str_keys_check = 1
+          ksk = 0
+          while ksk < elems.length
+            ekks = elems[ksk]
+            if @nd_type[ekks] == "AssocNode"
+              kids = @nd_key[ekks]
+              if kids < 0 || (@nd_type[kids] != "StringNode" && @nd_type[kids] != "InterpolatedStringNode" && @nd_type[kids] != "SymbolNode")
+                all_str_keys_check = 0
+              end
+            end
+            ksk = ksk + 1
+          end
+          if all_str_keys_check == 0
+            @needs_rb_value = 1
+            @needs_poly_poly_hash = 1
+            return "poly_poly_hash"
+          end
           return "str_poly_hash"
         end
       end
@@ -15656,7 +15680,17 @@ class Compiler
     if mname == "sample"
       @needs_rand = 1
       pfx = array_c_prefix(recv_type)
-      return "sp_" + pfx + "_get(" + rc + ", rand() % sp_" + pfx + "_length(" + rc + "))"
+ # Per-prefix sp_<X>_sample helper guards against `rand()%0` on
+ # an empty array (SIGFPE under -O0, UB otherwise) and returns
+ # the zero value of the slot's element type to mirror CRuby's
+ # `nil` semantics in the typed-array representation. Also single-
+ # evaluates rc, which the prior inline expansion did not. Issue
+ # #536.
+      if pfx == "PtrArray"
+        elem_t = ptr_array_elem_type(recv_type)
+        return "((" + c_type(elem_t) + ")sp_PtrArray_sample(" + rc + "))"
+      end
+      return "sp_" + pfx + "_sample(" + rc + ")"
     end
     if mname == "shuffle" && is_array_type(recv_type) == 1
       @needs_rand = 1
@@ -21685,6 +21719,21 @@ class Compiler
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_StrPolyHash_set(" + tmp + ", " + compile_expr_as_string(@nd_key[el]) + ", " + box_expr_to_poly(@nd_expression[el]) + ");")
+        end
+      }
+      return tmp
+    end
+    if ht == "poly_poly_hash"
+ # Mixed-shape keys (e.g. `{ 0 => false, a: 1 }`). Both key
+ # and value carry their own tag; box each at the assoc site.
+ # Issue #536.
+      @needs_rb_value = 1
+      @needs_poly_poly_hash = 1
+      tmp = new_temp
+      emit("  sp_PolyPolyHash *" + tmp + " = sp_PolyPolyHash_new();")
+      elems.each { |el|
+        if @nd_type[el] == "AssocNode"
+          emit("  sp_PolyPolyHash_set(" + tmp + ", " + box_expr_to_poly(@nd_key[el]) + ", " + box_expr_to_poly(@nd_expression[el]) + ");")
         end
       }
       return tmp

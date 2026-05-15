@@ -2649,6 +2649,30 @@ class Compiler
           if all_sym_keys == 1
             return "sym_poly_hash"
           end
+ # Mixed-shape keys (e.g. `{ 0 => false, a: 1 }` -- IntegerNode +
+ # SymbolNode in the same literal). Neither all-sym nor all-string
+ # holds, so the keys themselves can't share a single hash variant.
+ # Use poly_poly_hash where both keys and values are sp_RbVal.
+ # Without this arm we fell through to str_poly_hash and the
+ # codegen handed the integer key directly to `sp_StrPolyHash_set`,
+ # which dereferenced it as a `const char *` and segfaulted on the
+ # next access. Issue #536.
+          all_str_keys_check = 1
+          ksk = 0
+          while ksk < elems.length
+            ekks = elems[ksk]
+            if @nd_type[ekks] == "AssocNode"
+              kids = @nd_key[ekks]
+              if kids < 0 || (@nd_type[kids] != "StringNode" && @nd_type[kids] != "InterpolatedStringNode" && @nd_type[kids] != "SymbolNode")
+                all_str_keys_check = 0
+              end
+            end
+            ksk = ksk + 1
+          end
+          if all_str_keys_check == 0
+            @needs_rb_value = 1
+            return "poly_poly_hash"
+          end
           return "str_poly_hash"
         end
       end
