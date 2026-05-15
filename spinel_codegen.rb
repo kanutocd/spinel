@@ -11213,7 +11213,7 @@ class Compiler
       arg_ids = get_args(args_id)
     end
     if arg_ids.length <= 1
-      return "({ fflush(stdout); sp_last_status = system(" + compile_arg0(nid) + "); sp_last_status == 0; })"
+      return "({ fflush(NULL); sp_last_status = system(" + compile_arg0(nid) + "); sp_last_status == 0; })"
     end
 
     argv = ""
@@ -24129,9 +24129,8 @@ class Compiler
  # Important on Windows where stdio is fully-buffered when stdout
  # is a pipe — without an explicit flush, output written via puts
  # before a `system(...)` call appears after the child process's
- # output. The expression-context system path already emits
- # fflush(stdout) implicitly; this lets user code do the same
- # explicitly.
+ # output. The expression-context system path already flushes open
+ # streams implicitly; this lets user code do the same explicitly.
     if mname == "flush" && recv >= 0
       stream = ""
       if @nd_type[recv] == "GlobalVariableReadNode"
