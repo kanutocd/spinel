@@ -6927,18 +6927,11 @@ class Compiler
               inc_ids = get_args(inc_args)
               ik = 0
               while ik < inc_ids.length
-                if @nd_type[inc_ids[ik]] == "ConstantReadNode"
-                  mod_name = @nd_name[inc_ids[ik]]
- # when this class is nested inside a
- # module (module_prefix != ""), the include arg is
- # a bare ConstantReadNode but the registered module
- # name is `<prefix>_<name>`. Try the qualified form
- # first; fall back to the bare name for top-level
- # modules.
-                  resolved_mod_name = resolve_include_module_name(mod_name, module_prefix)
-                  collect_module_methods_into_class(ci, resolved_mod_name)
-                  record_class_include(ci, resolved_mod_name)
-                end
+ # `include Mod` / `A::B::C` / `::Top`. Shared helper
+ # flattens the path, distinguishes absolute from
+ # relative for prefix selection, and records the
+ # include on @cls_includes.
+                include_module_on_class(ci, inc_ids[ik], module_prefix)
                 ik = ik + 1
               end
             end
@@ -7162,21 +7155,13 @@ class Compiler
             inc_ids = get_args(inc_args)
             ik = 0
             while ik < inc_ids.length
-              if @nd_type[inc_ids[ik]] == "ConstantReadNode"
-                mod_name = @nd_name[inc_ids[ik]]
- # same prefix resolution as the
- # class-reopening branch -- the include arg is a
- # bare name but the registered module's name is
- # `<prefix>_<name>` when nested in a module.
-                resolved_mod_name = resolve_include_module_name(mod_name, module_prefix)
-                collect_module_methods_into_class(ci, resolved_mod_name)
- # record the include
- # relationship for ancestors-table emission. The
- # methods are already merged into the class above;
- # this pass keeps the module link alive so the
- # codegen can weave it into the MRO.
-                record_class_include(ci, resolved_mod_name)
-              end
+ # Same resolution as the class-reopening branch:
+ # the shared helper accepts ConstantReadNode and
+ # qualified ConstantPathNode (`include Foo::Bar`,
+ # `include ::Top`), routes through the prefix-
+ # aware resolver for relative paths, and records
+ # the include for ancestors-table emission.
+              include_module_on_class(ci, inc_ids[ik], module_prefix)
               ik = ik + 1
             end
           end
@@ -7335,6 +7320,32 @@ class Compiler
       end
     end
     mod_name
+  end
+
+ # Resolve and record an `include` argument on a class. Shared between
+ # the class-reopening and fresh-class branches of
+ # collect_class_with_prefix. `inc_nid` is the AST node for the include
+ # argument; accepts bare ConstantReadNode (`include Helper`) and
+ # qualified ConstantPathNode (`include A::B::Foo`, `include ::Top`).
+ # Absolute paths (`::A::B`) bypass the lexical-scope prefix so a
+ # top-level `A_B` wins over a nested `Outer_A_B`; relative paths
+ # prefer the nested form via resolve_include_module_name.
+  def include_module_on_class(ci, inc_nid, module_prefix)
+    inc_t = @nd_type[inc_nid]
+    if inc_t != "ConstantReadNode" && inc_t != "ConstantPathNode"
+      return
+    end
+    mod_name = const_ref_flat_name(inc_nid)
+    if mod_name == ""
+      return
+    end
+    effective_prefix = module_prefix
+    if const_ref_is_relative(inc_nid) == 0
+      effective_prefix = ""
+    end
+    resolved_mod_name = resolve_include_module_name(mod_name, effective_prefix)
+    collect_module_methods_into_class(ci, resolved_mod_name)
+    record_class_include(ci, resolved_mod_name)
   end
 
   def collect_module_methods_into_class(ci, mod_name)
