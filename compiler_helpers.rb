@@ -93,7 +93,7 @@ class Compiler
 
  # ---- Compile-time class-body declaration helpers ----
 
-  compiler_state_int :nd_count, :root_id, :analysis_frozen, :ieval_counter, :needs_gc, :needs_system
+  compiler_state_int :nd_count, :root_id, :analysis_frozen, :ieval_counter, :iexec_counter, :needs_gc, :needs_system
   compiler_state_int :needs_int_array, :needs_float_array, :needs_str_array, :needs_str_int_hash, :needs_str_str_hash, :needs_int_str_hash
   compiler_state_int :needs_sym_int_hash, :needs_sym_str_hash, :needs_sym_intern, :needs_setjmp, :needs_mutable_str, :needs_rb_value
   compiler_state_int :needs_regexp, :needs_rand, :needs_stringio, :needs_lambda, :needs_fiber, :needs_bigint
@@ -116,11 +116,13 @@ class Compiler
   compiler_state_sa :sym_names, :tuple_types, :poly_funcs, :poly_param_types, :ieval_return_types, :ieval_self_param_names
   compiler_state_sa :ieval_extra_param_names, :compile_time_subst_keys, :compile_time_subst_vals, :cls_with_internal_ieval_lift, :toplevel_ivar_names, :toplevel_ivar_types
   compiler_state_sa :lambda_var_ret_names, :lambda_var_ret_types, :multi_const_inits, :meth_blk_param_types, :cls_cmeth_blk_param_types
+  compiler_state_sa :iexec_block_pnames, :iexec_block_ptypes
 
   compiler_state_ia :meth_body_ids, :meth_rest_index, :meth_kwrest_index, :meth_has_yield, :cls_rest_idxs, :cls_is_value_type
   compiler_state_ia :cls_is_sra, :const_expr_ids, :const_mutated, :gvar_written, :module_body_ids, :ffi_buf_sizes, :ffi_reader_offsets
   compiler_state_ia :dyn_regex_node_ids, :local_regex_idx, :local_regex_call_nids, :undef_class_idx, :ieval_class_idxs, :ieval_body_ids
   compiler_state_ia :pre_execution_blocks, :post_execution_blocks
+  compiler_state_ia :iexec_class_idxs, :iexec_body_ids
 
   def compiler_state_init_body_id; -31; end
   def compiler_state_dump_body_id; -32; end
