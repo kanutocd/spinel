@@ -9224,10 +9224,17 @@ class Compiler
   end
 
  # Builds the trailing portion of a call-args list — each non-empty
- # piece prefixed with ", ", empties skipped. Returns "" when both
+ # piece prefixed with ", ", empties skipped. Returns "" when all
  # are empty. Mirrors build_params_str: callers concatenate the
  # result onto a self/recv prefix to form the full arg list.
-  def build_call_tail(ca, bp)
+ #
+ # `yargs` carries the trailing yield ABI args (`_block, _benv`) when
+ # the callee declares `yield` but the call site doesn't pass a
+ # literal block. Without it, methods with both `&block` and `yield`
+ # in their body get a 3-arg call against a 5-arg signature and clang
+ # fails the build. Mirrors the `, NULL, NULL` shape that the
+ # top-level no-recv path appends in compile_no_recv_call_expr.
+  def build_call_tail(ca, bp, yargs = "")
     result = ""
     if ca != ""
       result = result + ", " + ca
@@ -9235,7 +9242,27 @@ class Compiler
     if bp != ""
       result = result + ", " + bp
     end
+    if yargs != ""
+      result = result + yargs
+    end
     result
+  end
+
+ # Returns the trailing yield-ABI args (`, NULL, NULL`) when an
+ # instance method declares `yield` in its body but the call site
+ # doesn't inline (no literal block — those route through
+ # compile_yield_call_stmt and bypass the C call entirely). The
+ # callee's C signature is `..., _block, _benv` whenever
+ # cls_method_has_yield is set; omitting these triggers
+ # "too few arguments to function call" at clang time.
+  def cls_call_yargs(ci, midx)
+    if ci < 0 || midx < 0
+      return ""
+    end
+    if cls_method_has_yield(ci, midx) == 1
+      return ", NULL, NULL"
+    end
+    ""
   end
 
  # ---- Emit top-level methods ----
@@ -12921,6 +12948,12 @@ class Compiler
             bp = "0"
           end
         end
+ # Pad the trailing `_block, _benv` yield-ABI slots when the callee's
+ # body uses `yield`. The literal-block path (compile_yield_call_stmt)
+ # bypasses this C call entirely by inlining the body, so reaching
+ # here means no literal block at the call site — `NULL, NULL` is
+ # always safe.
+        yargs = cls_call_yargs(owner_ci, owner_midx)
  # When the call resolves through inheritance to an
  # ancestor's method, the C function takes `sp_<owner>
  # *self`. Our `self` here is `sp_<current> *`. Cast so
@@ -12966,7 +12999,7 @@ class Compiler
             if rt_ok == 1 && pt_ok == 1
               tmp = new_temp
               rt_c = c_type(base_rt)
-              default_call = "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp) + ")"
+              default_call = "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp, yargs) + ")"
  # Initialize tmp to a type-default so the base call only runs
  # in the default arm — calling it eagerly before the switch
  # would raise from an abstract stub before any subclass arm
@@ -12981,7 +13014,7 @@ class Compiler
                 cand_owner2 = p2[1].to_i
                 cand_name = @cls_names[cand_owner2]
                 cand_recv = "(sp_" + cand_name + " *)" + self_expr
-                cand_call = "sp_" + cand_name + "_" + sanitize_name(mname) + "(" + cand_recv + build_call_tail(ca, bp) + ")"
+                cand_call = "sp_" + cand_name + "_" + sanitize_name(mname) + "(" + cand_recv + build_call_tail(ca, bp, yargs) + ")"
                 emit("    case " + cand_cid.to_s + "LL: " + tmp + " = " + cand_call + "; break;")
                 ol2 = ol2 + 1
               end
@@ -12991,7 +13024,7 @@ class Compiler
             end
           end
         end
-        return "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp) + ")"
+        return "sp_" + owner + "_" + sanitize_name(mname) + "(" + recv_arg + build_call_tail(ca, bp, yargs) + ")"
       end
  # Check attr_readers (bare method call like `x` meaning self.x)
       readers = @cls_attr_readers[@current_class_idx].split(";")
@@ -17976,7 +18009,12 @@ class Compiler
               bp = "0"
             end
           end
-          tail = build_call_tail(ca, bp)
+ # Pad the trailing `_block, _benv` yield-ABI slots when the callee's
+ # body uses `yield`. The literal-block path inlines via
+ # compile_yield_call_stmt and bypasses this C call entirely, so
+ # reaching here means no literal block at the call site.
+          yargs = cls_call_yargs(oci2, midx2)
+          tail = build_call_tail(ca, bp, yargs)
           if owner == cname
             return "sp_" + owner + "_" + sanitize_name(mname) + "(" + rc + tail + ")"
           else
@@ -29903,7 +29941,17 @@ class Compiler
     while emitted.length < @current_method_yield_arity
       emitted.push("0")
     end
-    emit("  if (_block) _block(" + emitted.join(", ") + ", _benv);")
+ # When the enclosing method declares `&block`, fall back to invoking the
+ # captured proc if the yield-ABI slot is empty. This matches Ruby semantics
+ # (yield and `block.call` drive the same proc) and lets `&block_arg` call
+ # sites work even when the call emit fills lv_block but leaves _block NULL.
+    if @current_method_block_param != ""
+      bp = "lv_" + @current_method_block_param
+      emit("  if (_block) _block(" + emitted.join(", ") + ", _benv);")
+      emit("  else if (" + bp + ") sp_proc_call(" + bp + ", (mrb_int[]){" + emitted.join(", ") + "});")
+    else
+      emit("  if (_block) _block(" + emitted.join(", ") + ", _benv);")
+    end
   end
 
   def compile_yield_call_stmt(nid, mi)
