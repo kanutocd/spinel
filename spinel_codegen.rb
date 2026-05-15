@@ -24135,33 +24135,40 @@ class Compiler
       end
     end
 
- # delete
+ # delete on built-in containers. Issue #518: the receiver's
+ # compile_expr_gc_rooted was previously called UNCONDITIONALLY
+ # before the type check, so a non-container receiver (e.g.
+ # `M.adapter.delete` where `M.adapter` is a singleton-accessor
+ # reader returning a Module) emitted the receiver expression
+ # (with its attendant warn_unresolved_call probe) even when
+ # none of the hash / array arms matched. Defer the side-effect
+ # into each arm so non-matching shapes fall through cleanly to
+ # the general dispatch at the bottom of compile_call_stmt.
     if mname == "delete"
       if recv >= 0
         rt = infer_type(recv)
-        rc = compile_expr_gc_rooted(recv)
         if rt == "sym_int_hash"
-          emit("  sp_SymIntHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_SymIntHash_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_arg0(nid) + ");")
           return 1
         end
         if rt == "sym_str_hash"
-          emit("  sp_SymStrHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_SymStrHash_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_arg0(nid) + ");")
           return 1
         end
         if rt == "str_int_hash"
-          emit("  sp_StrIntHash_delete(" + rc + ", " + compile_str_arg0(nid) + ");")
+          emit("  sp_StrIntHash_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_str_arg0(nid) + ");")
           return 1
         end
         if rt == "str_str_hash"
-          emit("  sp_StrStrHash_delete(" + rc + ", " + compile_str_arg0(nid) + ");")
+          emit("  sp_StrStrHash_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_str_arg0(nid) + ");")
           return 1
         end
         if rt == "int_array"
-          emit("  sp_IntArray_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_IntArray_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_arg0(nid) + ");")
           return 1
         end
         if rt == "str_array"
-          emit("  sp_StrArray_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_StrArray_delete(" + compile_expr_gc_rooted(recv) + ", " + compile_arg0(nid) + ");")
           return 1
         end
       end
