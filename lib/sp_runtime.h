@@ -885,10 +885,13 @@ static const char*sp_FloatArrayPtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_St
 static const char*sp_StrArrayPtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_StrArray_inspect((sp_StrArray*)a->data[i]));}sp_String_append(s,"]");return s->data;}
 static const char*sp_SymArrayPtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_SymArray_inspect((sp_IntArray*)a->data[i]));}sp_String_append(s,"]");return s->data;}
 /* issue #526: join for a sp_PtrArray of sp_String* (mutable_str_ptr_array).
-   Sibling to sp_StrArray_join — same shape, but reads each element's
-   bytes from the sp_String data/len pair (preserves embedded NULs)
-   rather than strlen on a const char*. */
-static const char*sp_PtrArray_str_join(sp_PtrArray*a,const char*sep){size_t sl=strlen(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;for(mrb_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}sp_String*s=(sp_String*)a->data[i];size_t el=s?(size_t)s->len:0;if(len+el>=cap){cap=(len+el)*2+1;buf=(char*)realloc(buf,cap);}if(el){memcpy(buf+len,s->data,el);len+=el;}}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);free(buf);return r;}
+   Sibling to sp_StrArray_join, but takes advantage of sp_String's known
+   length: two-pass — sum the exact total, sp_str_alloc once, then memcpy
+   each element by its s->len (preserves embedded NULs). Avoids the
+   realloc-grow loop's leak-on-failure and long-separator overflow
+   risks, and skips an intermediate malloc'd buffer. NULL entries
+   contribute zero length. */
+static const char*sp_PtrArray_str_join(sp_PtrArray*a,const char*sep){mrb_int al=a->len;if(al==0)return sp_str_empty;size_t sl=strlen(sep),total=0;for(mrb_int i=0;i<al;i++){if(i>0)total+=sl;sp_String*s=(sp_String*)a->data[i];if(s)total+=(size_t)s->len;}char*r=sp_str_alloc(total);size_t cur=0;for(mrb_int i=0;i<al;i++){if(i>0){memcpy(r+cur,sep,sl);cur+=sl;}sp_String*s=(sp_String*)a->data[i];if(s&&s->len){memcpy(r+cur,s->data,(size_t)s->len);cur+=(size_t)s->len;}}return r;}
 
 #ifdef __FreeBSD__
 
