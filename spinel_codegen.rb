@@ -331,6 +331,7 @@ class Compiler
  # narrowed type without per-pass plumbing.
     @type_narrow_names = "".split(",")
     @type_narrow_types = "".split(",")
+    @in_narrow_recompute = 0
 
     @current_class_idx = -1
     @current_method_name = ""
@@ -1318,6 +1319,23 @@ class Compiler
     ""
   end
 
+ # Push / pop on the is_a? narrow stack. Codegen pushes during
+ # body-stmt walks where a `raise unless x.is_a?(C)` guard
+ # eliminates the non-C path; the rest of the StatementsNode sees
+ # `x` as `C` via find_var_type's narrow-first lookup, so
+ # `compile_call_expr`'s `recv_type == "poly"` check resolves to
+ # the concrete obj_<C> path and emits a monomorphic dispatch
+ # (vs. the full cls_id-switch). Issue #493.
+  def push_type_narrow(var_name, narrow_type)
+    @type_narrow_names.push(var_name)
+    @type_narrow_types.push(narrow_type)
+  end
+
+  def pop_type_narrow
+    @type_narrow_names.pop
+    @type_narrow_types.pop
+  end
+
  # Like find_var_type but bypasses the is_a? narrow stack — returns
  # the var's declared (C-level) type. Used by call-site arg lowering
  # to detect cases where the narrow says "string" but the underlying
@@ -1488,11 +1506,151 @@ class Compiler
     "FALSE"
   end
 
- # Decode `<expr>.is_a?(<Class>)` / `.kind_of?(<Class>)` into
- # `(var_name, narrow_type)` when expr is a LocalVariableReadNode
- # and the argument is a constant naming a known class. Returns
- # `["", ""]` if the predicate isn't a narrowable shape (the empty
- # var name is the sentinel; the caller skips the push).
+ # Codegen-side mirrors of the analyze helpers
+ # (narrow_type_for_class / parse_is_a_predicate /
+ # body_definitely_raises? / parse_raise_guard_narrow). The
+ # analyze pass already pushes narrows during fixpoint walks so
+ # callee param types widen correctly; codegen has to push them
+ # again at emit time so `find_var_type` returns the narrowed
+ # type for a LocalVariableReadNode inside the post-guard
+ # sibling scope. Without this, the dispatch fall-through at
+ # `compile_call_expr`'s `recv_type == "poly"` branch never
+ # collapses the cls_id-switch to the single narrowed-class arm.
+ # Issue #493.
+  def narrow_type_for_class(cname)
+    if cname == "Symbol"
+      return "symbol"
+    end
+    if cname == "Integer" || cname == "Numeric"
+      return "int"
+    end
+    if cname == "Float"
+      return "float"
+    end
+    if cname == "String"
+      return "string"
+    end
+    if cname == "TrueClass" || cname == "FalseClass"
+      return "bool"
+    end
+    if cname == "NilClass"
+      return "nil"
+    end
+    if cname == "Proc"
+      return "proc"
+    end
+    if cname == "Range"
+      return "range"
+    end
+    if find_class_idx(cname) >= 0
+      return "obj_" + cname
+    end
+    ""
+  end
+
+  def parse_is_a_predicate(pred_id)
+    if pred_id < 0
+      return ["", ""]
+    end
+    if @nd_type[pred_id] == "AndNode"
+      l_isa = parse_is_a_predicate(@nd_left[pred_id])
+      if l_isa[0] != ""
+        return l_isa
+      end
+      r_isa = parse_is_a_predicate(@nd_right[pred_id])
+      if r_isa[0] != ""
+        return r_isa
+      end
+      return ["", ""]
+    end
+    if @nd_type[pred_id] != "CallNode"
+      return ["", ""]
+    end
+    pname = @nd_name[pred_id]
+    if pname != "is_a?" && pname != "kind_of?"
+      return ["", ""]
+    end
+    expr = @nd_receiver[pred_id]
+    if expr < 0 || @nd_type[expr] != "LocalVariableReadNode"
+      return ["", ""]
+    end
+    args = @nd_arguments[pred_id]
+    if args < 0
+      return ["", ""]
+    end
+    arg_ids = get_args(args)
+    if arg_ids.length < 1
+      return ["", ""]
+    end
+    arg0 = arg_ids[0]
+    cname = ""
+    if @nd_type[arg0] == "ConstantReadNode"
+      cname = @nd_name[arg0]
+    elsif @nd_type[arg0] == "ConstantPathNode"
+      cname = resolve_const_ref_name(arg0)
+    end
+    if cname == ""
+      return ["", ""]
+    end
+    nt = narrow_type_for_class(cname)
+    if nt == ""
+      return ["", ""]
+    end
+    [@nd_name[expr], nt]
+  end
+
+  def body_definitely_raises?(body_id)
+    if body_id < 0
+      return 0
+    end
+    stmts_r = get_stmts(body_id)
+    if stmts_r.length == 0
+      return 0
+    end
+    last = stmts_r[stmts_r.length - 1]
+    if @nd_type[last] != "CallNode"
+      return 0
+    end
+    if @nd_name[last] != "raise"
+      return 0
+    end
+    1
+  end
+
+  def parse_raise_guard_narrow(nid)
+    if nid < 0
+      return ["", ""]
+    end
+    t = @nd_type[nid]
+    if t == "UnlessNode"
+      body_u = @nd_body[nid]
+      if body_definitely_raises?(body_u) == 0
+        return ["", ""]
+      end
+      return parse_is_a_predicate(@nd_predicate[nid])
+    end
+    if t == "IfNode"
+      pred_i = @nd_predicate[nid]
+      if pred_i < 0 || @nd_type[pred_i] != "CallNode" || @nd_name[pred_i] != "!"
+        return ["", ""]
+      end
+      inner_i = @nd_receiver[pred_i]
+      if inner_i < 0
+        return ["", ""]
+      end
+      body_i = @nd_body[nid]
+      if body_definitely_raises?(body_i) == 0
+        return ["", ""]
+      end
+      sub_i = @nd_subsequent[nid]
+      else_i = @nd_else_clause[nid]
+      if sub_i >= 0 || else_i >= 0
+        return ["", ""]
+      end
+      return parse_is_a_predicate(inner_i)
+    end
+    ["", ""]
+  end
 
  # Try to evaluate a predicate expression at compile time. Returns
  # "TRUE" / "FALSE" when the result is known statically; "" when it
@@ -2125,6 +2283,40 @@ class Compiler
     pa = poly_aref_call_type(nid)
     if pa != ""
       return pa
+    end
+ # Sibling-scope narrow override: when the active narrow stack
+ # narrows `x` to `obj_<C>` and this CallNode is `x.attr` where
+ # `attr` is an attr_reader on `C`, the cached type (filled by
+ # analyze's walk_and_cache before the narrow was active) is
+ # stale. Resolve the attr_reader directly off the narrowed
+ # class's ivar table and return its type, bypassing the cache.
+ # Issue #493. Cheap: only fires when narrow is non-empty AND
+ # the node is `LV(narrowed_name).attr_reader_name`.
+    if @type_narrow_names.length > 0 && @nd_type[nid] == "CallNode"
+      narrow_recv_id = @nd_receiver[nid]
+      if narrow_recv_id >= 0 && @nd_type[narrow_recv_id] == "LocalVariableReadNode"
+        narrow_lvname = @nd_name[narrow_recv_id]
+        narrow_t_lookup = ""
+        ki_nt = @type_narrow_names.length - 1
+        while ki_nt >= 0
+          if @type_narrow_names[ki_nt] == narrow_lvname
+            narrow_t_lookup = @type_narrow_types[ki_nt]
+            ki_nt = -1
+          else
+            ki_nt = ki_nt - 1
+          end
+        end
+        if is_obj_type(narrow_t_lookup) == 1
+          ncname_nt = narrow_t_lookup[4, narrow_t_lookup.length - 4]
+          nci_nt = find_class_idx(ncname_nt)
+          if nci_nt >= 0
+            mname_nt = @nd_name[nid]
+            if cls_has_attr_reader(nci_nt, mname_nt) == 1
+              return cls_ivar_type(nci_nt, "@" + mname_nt)
+            end
+          end
+        end
+      end
     end
  # Cache lookup. analyze.rb's annotate_all_node_types fills
  # @nd_inferred_type for every reachable node OUTSIDE block bodies
@@ -12428,6 +12620,22 @@ class Compiler
       recv_type = "poly"
     end
     rc = compile_expr_gc_rooted(recv)
+ # Type-narrow unbox: when recv is a LocalVariableReadNode whose
+ # narrowed type (post-`raise unless x.is_a?(C)` guard) is a
+ # concrete obj_<C> but the declared storage is sp_RbVal, the
+ # `rc` expression is still the boxed local (`lv_x`). Downstream
+ # emits like `rc->iv_body` then dereference an sp_RbVal as a
+ # struct pointer — C compile error. Cast through the union
+ # payload here so the post-guard recv reads as the narrowed
+ # pointer type. Issue #493.
+    if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+      lvname_cu = @nd_name[recv]
+      declared_t_cu = find_var_declared_type(lvname_cu)
+      if declared_t_cu == "poly" && is_obj_type(recv_type) == 1
+        cname_cu = recv_type[4, recv_type.length - 4]
+        rc = "((sp_" + cname_cu + " *)(" + rc + ").v.p)"
+      end
+    end
  # Root receiver if it may be collected during argument evaluation
     if expr_may_gc(recv) == 1 && type_is_pointer(recv_type) == 1
       args_id = @nd_arguments[nid]
@@ -31534,7 +31742,20 @@ class Compiler
     0
   end
 
+ # Wrapper: snapshots the narrow-stack depth, delegates to the
+ # inner emit (which pushes raise-guard narrows for #493 in its
+ # stmt loop), then pops everything pushed during the body emit.
+ # The inner has many early-return paths; counting at the
+ # baseline lets each path leave without explicit cleanup.
   def compile_body_return(body_id, return_type)
+    narrow_baseline_cbr = @type_narrow_names.length
+    compile_body_return_inner(body_id, return_type)
+    while @type_narrow_names.length > narrow_baseline_cbr
+      pop_type_narrow
+    end
+  end
+
+  def compile_body_return_inner(body_id, return_type)
     if body_id < 0
       if return_type != "void"
         emit("  return " + c_return_default(return_type) + ";")
@@ -31548,10 +31769,19 @@ class Compiler
       end
       return
     end
- # All but last
+ # All but last. Sibling-scope narrow for
+ # `raise unless x.is_a?(C)` guards: when a guard appears at
+ # stmts[i], the rest of the body (i+1..N including `last`)
+ # sees `x` as the narrowed type via find_var_type. Pops happen
+ # via the compile_body_return wrapper's baseline tracking
+ # below, after every internal return path. Issue #493.
     i = 0
     while i < stmts.length - 1
       compile_stmt(stmts[i])
+      rg_p_cbr = parse_raise_guard_narrow(stmts[i])
+      if rg_p_cbr[0] != ""
+        push_type_narrow(rg_p_cbr[0], rg_p_cbr[1])
+      end
       i = i + 1
     end
     last = stmts.last

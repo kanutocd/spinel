@@ -1336,6 +1336,87 @@ class Compiler
  # and the argument is a constant naming a known class. Returns
  # `["", ""]` if the predicate isn't a narrowable shape (the empty
  # var name is the sentinel; the caller skips the push).
+ # Returns 1 if `body_id` is a body whose statements always raise
+ # (every reachable tail is a `raise ...` call). The simple form
+ # is a single-statement body whose statement is `raise ...`;
+ # we treat that as the canonical "definite throw" shape and
+ # leave more complex shapes (raise inside nested if/case) to a
+ # future extension. Issue #493.
+  def body_definitely_raises?(body_id)
+    if body_id < 0
+      return 0
+    end
+    stmts_r = get_stmts(body_id)
+    if stmts_r.length == 0
+      return 0
+    end
+ # Multi-statement bodies: check the LAST stmt for the raise.
+ # CRuby's semantics treat the body as definitely-throwing iff
+ # the tail throws; earlier statements may do bookkeeping
+ # before the raise (logger.error, etc.).
+    last = stmts_r[stmts_r.length - 1]
+    if @nd_type[last] != "CallNode"
+      return 0
+    end
+    if @nd_name[last] != "raise"
+      return 0
+    end
+    1
+  end
+
+ # Decode `raise ... unless x.is_a?(C)` / `if !x.is_a?(C); raise; end`
+ # / `raise ... if !x.is_a?(C)` into `(var_name, narrow_type)`. After
+ # such a guard, the rest of the enclosing scope can assume `x` is
+ # of class `C` (the raise eliminated the other path). Returns
+ # `["", ""]` for non-guard statements. Used by the body-walker
+ # in scan_new_calls / collect_return_types_nid /
+ # scan_cls_method_calls (and the codegen-side body walkers) to
+ # push a sibling-scope narrow for the statements that follow.
+ # Issue #493.
+  def parse_raise_guard_narrow(nid)
+    if nid < 0
+      return ["", ""]
+    end
+    t = @nd_type[nid]
+    if t == "UnlessNode"
+ # `raise ... unless x.is_a?(C)`: body fires when predicate is
+ # false. Fall-through assumes `x.is_a?(C)` is true.
+      body_u = @nd_body[nid]
+      if body_definitely_raises?(body_u) == 0
+        return ["", ""]
+      end
+      return parse_is_a_predicate(@nd_predicate[nid])
+    end
+    if t == "IfNode"
+ # `raise ... if !x.is_a?(C)` and `if !x.is_a?(C); raise; end`:
+ # body fires when the negated predicate is true (so x is NOT
+ # of class C). Fall-through assumes x IS of class C. Peel one
+ # level of `!` off the predicate before reusing
+ # parse_is_a_predicate.
+      pred_i = @nd_predicate[nid]
+      if pred_i < 0 || @nd_type[pred_i] != "CallNode" || @nd_name[pred_i] != "!"
+        return ["", ""]
+      end
+      inner_i = @nd_receiver[pred_i]
+      if inner_i < 0
+        return ["", ""]
+      end
+      body_i = @nd_body[nid]
+      if body_definitely_raises?(body_i) == 0
+        return ["", ""]
+      end
+      sub_i = @nd_subsequent[nid]
+      else_i = @nd_else_clause[nid]
+      if sub_i >= 0 || else_i >= 0
+ # Has an else clause — falling through doesn't necessarily
+ # mean the predicate was true (the else might run). Skip.
+        return ["", ""]
+      end
+      return parse_is_a_predicate(inner_i)
+    end
+    ["", ""]
+  end
+
   def parse_is_a_predicate(pred_id)
     if pred_id < 0
       return ["", ""]
@@ -11155,10 +11236,27 @@ class Compiler
       scan_new_calls(@nd_body[nid])
     end
     stmts = parse_id_list(@nd_stmts[nid])
+ # Sibling-scope narrow for `raise ... unless x.is_a?(C)` guards.
+ # When stmts[k] is a definite-throw guard, push the narrow
+ # before walking siblings k+1..N so any recursive call inside
+ # those siblings sees `x` as the narrowed type (and
+ # unify_call_types widens the callee's param accordingly).
+ # The narrow is asymmetric vs. the if-arm shape: pushed at
+ # stmts[k], popped at end-of-StatementsNode. Issue #493.
+    pushed_raise_guards_snc = 0
     k = 0
     while k < stmts.length
       scan_new_calls(stmts[k])
+      rg_p = parse_raise_guard_narrow(stmts[k])
+      if rg_p[0] != ""
+        push_type_narrow(rg_p[0], rg_p[1])
+        pushed_raise_guards_snc = pushed_raise_guards_snc + 1
+      end
       k = k + 1
+    end
+    while pushed_raise_guards_snc > 0
+      pop_type_narrow
+      pushed_raise_guards_snc = pushed_raise_guards_snc - 1
     end
     if @nd_receiver[nid] >= 0
       scan_new_calls(@nd_receiver[nid])
@@ -15562,10 +15660,24 @@ class Compiler
 
   def collect_return_types_nid(nid, types)
     stmts = get_stmts(nid)
+ # Sibling-scope narrow for `raise unless x.is_a?(C)` guards, so
+ # a `return v` inside a sibling sees the narrowed type and the
+ # return-unify uses the narrow instead of the wider underlying
+ # poly param. Mirrors scan_new_calls' stmts loop. Issue #493.
+    pushed_raise_guards_crt = 0
     k = 0
     while k < stmts.length
       collect_return_types(stmts[k], types)
+      rg_p = parse_raise_guard_narrow(stmts[k])
+      if rg_p[0] != ""
+        push_type_narrow(rg_p[0], rg_p[1])
+        pushed_raise_guards_crt = pushed_raise_guards_crt + 1
+      end
       k = k + 1
+    end
+    while pushed_raise_guards_crt > 0
+      pop_type_narrow
+      pushed_raise_guards_crt = pushed_raise_guards_crt - 1
     end
   end
 
@@ -17513,10 +17625,22 @@ class Compiler
       scan_cls_method_calls(ci, @nd_body[nid])
     end
     stmts = parse_id_list(@nd_stmts[nid])
+ # Sibling-scope narrow for `raise unless x.is_a?(C)` guards.
+ # Same shape as scan_new_calls' stmts loop. Issue #493.
+    pushed_raise_guards_scm = 0
     k = 0
     while k < stmts.length
       scan_cls_method_calls(ci, stmts[k])
+      rg_p = parse_raise_guard_narrow(stmts[k])
+      if rg_p[0] != ""
+        push_type_narrow(rg_p[0], rg_p[1])
+        pushed_raise_guards_scm = pushed_raise_guards_scm + 1
+      end
       k = k + 1
+    end
+    while pushed_raise_guards_scm > 0
+      pop_type_narrow
+      pushed_raise_guards_scm = pushed_raise_guards_scm - 1
     end
     if @nd_receiver[nid] >= 0
       scan_cls_method_calls(ci, @nd_receiver[nid])
