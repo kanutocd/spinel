@@ -14742,13 +14742,15 @@ class Compiler
       return "((mrb_int)(unsigned char)(" + rc + ")[" + compile_arg0(nid) + "])"
     end
     if mname == "setbyte"
-      args_id = @nd_arguments[nid]
-      if args_id >= 0
-        a = get_args(args_id)
-        if a.length >= 2
-          return "(((char*)" + rc + ")[" + compile_expr(a[0]) + "] = (char)" + compile_expr(a[1]) + ", 0)"
-        end
-      end
+ # `s.setbyte(i, v)` mutates the receiver in place. Spinel
+ # strings are stored as `const char *`, and the canonical
+ # interning path keeps literal strings in read-only memory.
+ # The previous emit cast `rc` to `char *` and wrote through —
+ # for a literal source this SEGVs at the write. Issue #504.
+ # Until proper mutable-string support lands, drop the mutation
+ # and return 0 — the user's downstream read of the modified
+ # string will see the unchanged value, but we don't crash.
+      warn_unresolved_call(mname, "string")
       return "0"
     end
     if mname == "bytesize"
