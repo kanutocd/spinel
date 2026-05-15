@@ -7146,11 +7146,18 @@ class Compiler
 
  # ---- Struct emission ----
   def emit_global_constants
- # Emit file-scope constant declarations (initialized in main)
+ # Emit file-scope constant declarations (initialized in main).
+ # Poly-typed consts can't use the runtime-call default
+ # (sp_box_nil() isn't a constant expression at file scope), so
+ # emit a struct initializer pinning the tag to SP_TAG_NIL.
     i = 0
     while i < @const_names.length
       ctp = c_type(@const_types[i])
-      emit_raw("static " + ctp + " cst_" + @const_names[i] + " = " + c_default_val(@const_types[i]) + ";")
+      if @const_types[i] == "poly"
+        emit_raw("static " + ctp + " cst_" + @const_names[i] + " = {SP_TAG_NIL, 0, {0}};")
+      else
+        emit_raw("static " + ctp + " cst_" + @const_names[i] + " = " + c_default_val(@const_types[i]) + ";")
+      end
       i = i + 1
     end
     if @const_names.length > 0
@@ -17147,6 +17154,24 @@ class Compiler
 
   def compile_constant_recv_expr(nid, mname, recv, rc)
     rcname = constructor_class_name(recv)
+ # `Mod.accessor` read for a `class << self; attr_accessor :x; end`
+ # whose write side stored to the poly-slot const synthesized at
+ # analyze time. The constant-fold path (used when every observed
+ # write had a ConstantReadNode RHS) is checked separately below;
+ # this arm covers the non-const RHS case where the slot holds an
+ # sp_RbVal at runtime. Issue #511.
+    if rcname != "" && (@nd_arguments[nid] < 0 || get_args(@nd_arguments[nid]).length == 0)
+      if module_name_exists(rcname) == 1
+        slot_r = rcname + "_" + mname
+        if find_const_idx(slot_r) >= 0 && find_module_acc_idx(rcname + "." + mname) >= 0
+          rconsts_r = module_acc_resolved(rcname, mname)
+          if rconsts_r == "" || rconsts_r == "?"
+            @needs_rb_value = 1
+            return "cst_" + slot_r
+          end
+        end
+      end
+    end
     if rcname != ""
  # Foo.method_defined?(:sym[, inherit=true]) — compile-time decide.
  # Default arm walks the parent chain via class_has_method (covers
@@ -23897,6 +23922,22 @@ class Compiler
               slot = "sp_module_" + mod_name + "_" + sanitize_name(accessor)
               emit("  " + slot + " = " + module_sentinel(rhs).to_s + ";")
               return
+            end
+          end
+        end
+ # Non-constant RHS (or poisoned ?): write the poly-slot
+ # const synthesized by the analyze-side SingletonClassNode
+ # pass. Issue #511.
+        if rconsts == "" || rconsts == "?"
+          poly_slot = mod_name + "_" + accessor
+          if find_const_idx(poly_slot) >= 0
+            args_id_w = @nd_arguments[nid]
+            if args_id_w >= 0
+              ai_w = get_args(args_id_w)
+              if ai_w.length > 0
+                emit("  cst_" + poly_slot + " = " + box_expr_to_poly(ai_w[0]) + ";")
+                return
+              end
             end
           end
         end

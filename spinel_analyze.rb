@@ -4906,6 +4906,29 @@ class Compiler
   end
 
   def infer_constant_recv_type(nid, mname, recv)
+ # `Mod.accessor` read for a module-level singleton attr_accessor.
+ # The poly-slot const synthesized at module-collect time
+ # backs the read; codegen returns it as cst_<Mod>_<accessor>
+ # (sp_RbVal). Skip when args are present so this doesn't
+ # collide with method-style calls. Issue #511.
+    if recv >= 0 && @nd_type[recv] == "ConstantReadNode"
+      args_id_acc = @nd_arguments[nid]
+      if args_id_acc < 0 || get_args(args_id_acc).length == 0
+        rcname_acc = @nd_name[recv]
+        if module_name_exists(rcname_acc) == 1
+          if find_module_acc_idx(rcname_acc + "." + mname) >= 0
+            slot_a = rcname_acc + "_" + mname
+            if find_const_idx(slot_a) >= 0
+              rconsts_a = module_acc_resolved(rcname_acc, mname)
+              if rconsts_a == "" || rconsts_a == "?"
+                @needs_rb_value = 1
+                return "poly"
+              end
+            end
+          end
+        end
+      end
+    end
  # File operations
     if recv >= 0
       if @nd_type[recv] == "ConstantReadNode"
@@ -9051,6 +9074,11 @@ class Compiler
  # module-level singleton accessor. Stage 1 of the
  # accessor's value is resolved later via the constant-fold pass
  # (rewrite_module_singleton_accessors) once we've seen all writes.
+ # ALSO synthesize a poly-typed file-scope const `<Mod>_<accessor>`
+ # so that non-constant assignments (`M.adapter = "x"`) have a
+ # backing slot to write to. The constant-fold path takes priority
+ # when every RHS is a ConstantReadNode; otherwise codegen falls
+ # through to a direct cst_<Mod>_<accessor> read/write. Issue #511.
       if @nd_type[sid] == "SingletonClassNode"
         sbody = @nd_body[sid]
         if sbody >= 0
@@ -9065,6 +9093,14 @@ class Compiler
                     accessor = @nd_content[aid]
                     @module_acc_keys.push(mname + "." + accessor)
                     @module_acc_consts.push("")
+                    slot_name = mname + "_" + accessor
+                    if find_const_idx(slot_name) < 0
+                      @const_names.push(slot_name)
+                      @const_types.push("poly")
+                      @const_expr_ids.push(-1)
+                      @const_scope_names.push(mname)
+                      @needs_rb_value = 1
+                    end
                   end
                 }
               end
