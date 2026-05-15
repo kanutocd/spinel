@@ -185,7 +185,7 @@ typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); voi
 static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 256*1024;
 
 /* ---- String GC ---- */
-typedef struct sp_str_hdr { struct sp_str_hdr *next; size_t size; } sp_str_hdr;
+typedef struct sp_str_hdr { struct sp_str_hdr *next; size_t size; size_t len; } sp_str_hdr;
 static sp_str_hdr *sp_str_heap = NULL;
 #define SPL(s) (&("\xff" s)[1])
 static const char sp_str_empty_data[] = "\xff";
@@ -196,6 +196,7 @@ static char *sp_str_alloc(size_t len) {
   sp_str_hdr *h = (sp_str_hdr *)malloc(total);
   h->next = sp_str_heap;
   h->size = total;
+  h->len = len;
   sp_str_heap = h;
   /* Don't fold string-heap pressure into sp_gc_bytes : the
      threshold heuristic in sp_gc_alloc is keyed on heap survivors, and
@@ -220,6 +221,38 @@ static char *sp_str_alloc(size_t len) {
 
 static inline char *sp_str_alloc_raw(size_t total_with_null) {
   return sp_str_alloc(total_with_null > 0 ? total_with_null - 1 : 0);
+}
+
+static inline size_t sp_str_byte_len(const char *s) {
+  if (!s) return 0;
+  unsigned char marker = ((const unsigned char *)s)[-1];
+  if (marker == 0xfe || marker == 0xfc) {
+    const char *body = s - 1;
+    const sp_str_hdr *h = sp_str_heap;
+    while (h) {
+      if ((const char *)(h + 1) == body) {
+        return h->len;
+      }
+      h = h->next;
+    }
+  }
+  return strlen(s);
+}
+
+static inline void sp_str_set_len(char *s, size_t len) {
+  if (!s) return;
+  unsigned char marker = ((unsigned char *)s)[-1];
+  if (marker == 0xfe || marker == 0xfc) {
+    char *body = s - 1;
+    sp_str_hdr *h = sp_str_heap;
+    while (h) {
+      if ((char *)(h + 1) == body) {
+        h->len = len;
+        return;
+      }
+      h = h->next;
+    }
+  }
 }
 
 static const char *sp_str_dup_external(const char *s) {
@@ -685,13 +718,13 @@ static const char*sp_str_field(const char*s,const char*sep,mrb_int n){
 static mrb_int sp_str_field_count(const char*s,const char*sep){
   if(*s==0)return 0;size_t sl=strlen(sep);if(sl==0)return(mrb_int)strlen(s);
   mrb_int c=1;const char*p=s;while((p=strstr(p,sep))!=NULL){c++;p+=sl;}return c;}
-static const char*sp_str_concat(const char*a,const char*b){size_t la=strlen(a),lb=strlen(b);char*r=sp_str_alloc(la+lb);memcpy(r,a,la);memcpy(r+la,b,lb);return r;}
-static const char*sp_str_concat3(const char*a,const char*b,const char*c){size_t la=strlen(a),lb=strlen(b),lc=strlen(c);char*r=sp_str_alloc(la+lb+lc);memcpy(r,a,la);memcpy(r+la,b,lb);memcpy(r+la+lb,c,lc);return r;}
-static const char*sp_str_concat4(const char*a,const char*b,const char*c,const char*d){size_t la=strlen(a),lb=strlen(b),lc=strlen(c),ld=strlen(d);char*r=sp_str_alloc(la+lb+lc+ld);memcpy(r,a,la);memcpy(r+la,b,lb);memcpy(r+la+lb,c,lc);memcpy(r+la+lb+lc,d,ld);return r;}
+static const char*sp_str_concat(const char*a,const char*b){size_t la=sp_str_byte_len(a),lb=sp_str_byte_len(b);char*r=sp_str_alloc(la+lb);memcpy(r,a,la);memcpy(r+la,b,lb);return r;}
+static const char*sp_str_concat3(const char*a,const char*b,const char*c){size_t la=sp_str_byte_len(a),lb=sp_str_byte_len(b),lc=sp_str_byte_len(c);char*r=sp_str_alloc(la+lb+lc);memcpy(r,a,la);memcpy(r+la,b,lb);memcpy(r+la+lb,c,lc);return r;}
+static const char*sp_str_concat4(const char*a,const char*b,const char*c,const char*d){size_t la=sp_str_byte_len(a),lb=sp_str_byte_len(b),lc=sp_str_byte_len(c),ld=sp_str_byte_len(d);char*r=sp_str_alloc(la+lb+lc+ld);memcpy(r,a,la);memcpy(r+la,b,lb);memcpy(r+la+lb,c,lc);memcpy(r+la+lb+lc,d,ld);return r;}
 /* Concatenate N strings into a single GC-managed buffer. */
-static const char*sp_str_concat_arr(const char *const *parts,int n){size_t total=0;for(int i=0;i<n;i++)total+=strlen(parts[i]);char*r=sp_str_alloc(total);char*p=r;for(int i=0;i<n;i++){size_t sl=strlen(parts[i]);memcpy(p,parts[i],sl);p+=sl;}return r;}
-static const char*sp_int_to_s(mrb_int n){char*b=sp_str_alloc_raw(32);snprintf(b,32,"%lld",(long long)n);return b;}
-static const char*sp_int_to_s_base(mrb_int n,mrb_int base){if(base<2||base>36)base=10;char*b=sp_str_alloc_raw(72);char tmp[72];int i=0;int neg=0;uint64_t u;if(n<0){neg=1;u=(uint64_t)(-(n+1))+1;}else{u=(uint64_t)n;}if(u==0){tmp[i++]='0';}else{while(u>0){mrb_int d=u%base;tmp[i++]=d<10?'0'+d:'a'+d-10;u/=base;}}int j=0;if(neg)b[j++]='-';while(i>0)b[j++]=tmp[--i];b[j]=0;return b;}
+static const char*sp_str_concat_arr(const char *const *parts,int n){size_t total=0;for(int i=0;i<n;i++)total+=sp_str_byte_len(parts[i]);char*r=sp_str_alloc(total);char*p=r;for(int i=0;i<n;i++){size_t sl=sp_str_byte_len(parts[i]);memcpy(p,parts[i],sl);p+=sl;}return r;}
+static const char*sp_int_to_s(mrb_int n){char*b=sp_str_alloc_raw(32);int len=snprintf(b,32,"%lld",(long long)n);if(len<0)len=0;sp_str_set_len(b,(size_t)len);return b;}
+static const char*sp_int_to_s_base(mrb_int n,mrb_int base){if(base<2||base>36)base=10;char*b=sp_str_alloc_raw(72);char tmp[72];int i=0;int neg=0;uint64_t u;if(n<0){neg=1;u=(uint64_t)(-(n+1))+1;}else{u=(uint64_t)n;}if(u==0){tmp[i++]='0';}else{while(u>0){mrb_int d=u%base;tmp[i++]=d<10?'0'+d:'a'+d-10;u/=base;}}int j=0;if(neg)b[j++]='-';while(i>0)b[j++]=tmp[--i];b[j]=0;sp_str_set_len(b,(size_t)j);return b;}
 /* Float#to_s (Ruby semantics): produce the shortest decimal that
    round-trips back to the same double, formatted per CRuby — fixed
    point when the decimal exponent is in [-4, 15], scientific
@@ -722,12 +755,12 @@ static const char*sp_float_to_s(mrb_float f){
     if(e>=0)out[o++]='+';else{out[o++]='-';e=-e;}
     if(e<10){out[o++]='0';out[o++]=(char)('0'+e);}else o+=snprintf(out+o,16,"%d",e);
   }
-  out[o]=0;return out;
+  out[o]=0;sp_str_set_len(out,(size_t)o);return out;
 }
 #define sp_float_inspect sp_float_to_s
 /* String#inspect: wrap in double quotes and escape \, ", \n, \t, \r,
    plus any non-printable byte as \xNN. Output is always ASCII-safe. */
-static const char*sp_str_inspect(const char*s){if(!s){char*r=sp_str_alloc_raw(4);r[0]='n';r[1]='i';r[2]='l';r[3]=0;return r;}size_t sl=strlen(s);size_t cap=sl*4+3;char*r=sp_str_alloc_raw(cap);size_t o=0;r[o++]='"';for(size_t i=0;i<sl;i++){unsigned char c=(unsigned char)s[i];if(c=='\\'||c=='"'){r[o++]='\\';r[o++]=c;}else if(c=='\n'){r[o++]='\\';r[o++]='n';}else if(c=='\t'){r[o++]='\\';r[o++]='t';}else if(c=='\r'){r[o++]='\\';r[o++]='r';}else if(c<0x20||c==0x7f){snprintf(r+o,5,"\\x%02X",c);o+=4;}else{r[o++]=(char)c;}}r[o++]='"';r[o]=0;return r;}
+static const char*sp_str_inspect(const char*s){if(!s){char*r=sp_str_alloc_raw(4);r[0]='n';r[1]='i';r[2]='l';r[3]=0;return r;}size_t sl=strlen(s);size_t cap=sl*4+3;char*r=sp_str_alloc_raw(cap);size_t o=0;r[o++]='"';for(size_t i=0;i<sl;i++){unsigned char c=(unsigned char)s[i];if(c=='\\'||c=='"'){r[o++]='\\';r[o++]=c;}else if(c=='\n'){r[o++]='\\';r[o++]='n';}else if(c=='\t'){r[o++]='\\';r[o++]='t';}else if(c=='\r'){r[o++]='\\';r[o++]='r';}else if(c<0x20||c==0x7f){snprintf(r+o,5,"\\x%02X",c);o+=4;}else{r[o++]=(char)c;}}r[o++]='"';r[o]=0;sp_str_set_len(r,o);return r;}
 static const char*sp_str_upcase(const char*s){size_t l=strlen(s);char*r=sp_str_alloc_raw(l+1);for(size_t i=0;i<=l;i++)r[i]=toupper((unsigned char)s[i]);return r;}
 static const char*sp_str_downcase(const char*s){size_t l=strlen(s);char*r=sp_str_alloc_raw(l+1);for(size_t i=0;i<=l;i++)r[i]=tolower((unsigned char)s[i]);return r;}
 static const char*sp_str_swapcase(const char*s){size_t l=strlen(s);char*r=sp_str_alloc_raw(l+1);for(size_t i=0;i<=l;i++){unsigned char c=(unsigned char)s[i];if(isupper(c))r[i]=tolower(c);else if(islower(c))r[i]=toupper(c);else r[i]=s[i];}return r;}
@@ -1461,7 +1494,7 @@ static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; w
    null-termination because text mode shrinks the byte count below
    ftell's raw-file size. */
 static const char *sp_file_read(const char *path) { FILE *f = fopen(path, "r"); if (!f) return &("\xff" "")[1]; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char *buf = sp_str_alloc(sz); size_t n = 0; if (sz > 0) { n = fread(buf, 1, sz, f); } buf[n] = 0; fclose(f); return buf; }
-static void sp_file_write(const char *path, const char *data) { FILE *f = fopen(path, "w"); if (f) { fputs(data, f); fclose(f); } }
+static void sp_file_write(const char *path, const char *data) { FILE *f = fopen(path, "wb"); if (f) { fwrite(data, 1, sp_str_byte_len(data), f); fclose(f); } }
 static mrb_bool sp_file_exist(const char *path) { FILE *f = fopen(path, "r"); if (f) { fclose(f); return TRUE; } return FALSE; }
 static void sp_file_delete(const char *path) { remove(path); }
 static const char *sp_backtick(const char *cmd) { FILE *p = popen(cmd, "r"); if (!p) return sp_str_empty; char *buf = sp_str_alloc_raw(4096); size_t n = fread(buf, 1, 4095, p); buf[n] = 0; pclose(p); return buf; }
