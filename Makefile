@@ -204,9 +204,13 @@ build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
 	@mkdir -p build
 	$(CC) -c -O2 -Wno-all $(SEC_FLAGS) -Ilib lib/sp_bigint.c -o build/sp_bigint.o
 
+build/sp_crypto.o: lib/sp_crypto.c lib/sp_crypto.h
+	@mkdir -p build
+	$(CC) -c -O2 -Wno-all $(SEC_FLAGS) -Ilib lib/sp_crypto.c -o build/sp_crypto.o
+
 SP_RT_LIB = lib/libspinel_rt.a
 
-$(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o
+$(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o build/sp_crypto.o
 	ar rcs $@ $^
 
 regexp: $(SP_RT_LIB)
