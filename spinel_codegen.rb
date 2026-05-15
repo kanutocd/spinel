@@ -16115,6 +16115,13 @@ class Compiler
       if mname == "push"
         return "(sp_PtrArray_push(" + rc + ", " + compile_arg0(nid) + "), 0)"
       end
+      if mname == "pop"
+ # Array#pop on `<X>_ptr_array`. Returns NULL on empty, cast
+ # back to the element type. Issue #520: previously fell
+ # through to the unresolved-call warning and the array was
+ # silently un-modified.
+        return "((" + ct + ")sp_PtrArray_pop(" + rc + "))"
+      end
       if mname == "delete_at"
  # `arr.delete_at(i)` -- remove and return the element at i.
  # Cast back to the array's element type so the caller binding
