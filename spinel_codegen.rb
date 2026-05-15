@@ -6532,6 +6532,12 @@ class Compiler
     emit_raw("static sp_StrArray*sp_SymStrHash_values(sp_SymStrHash*h){sp_StrArray*a=sp_StrArray_new();for(mrb_int i=0;i<h->len;i++)sp_StrArray_push(a,sp_SymStrHash_get(h,h->order[i]));return a;}")
     emit_raw("static sp_SymStrHash*sp_SymStrHash_dup(sp_SymStrHash*h){sp_SymStrHash*r=sp_SymStrHash_new();for(mrb_int i=0;i<h->len;i++)sp_SymStrHash_set(r,h->order[i],sp_SymStrHash_get(h,h->order[i]));return r;}")
     emit_raw("static sp_SymStrHash*sp_SymStrHash_merge(sp_SymStrHash*a,sp_SymStrHash*b){sp_SymStrHash*r=sp_SymStrHash_new();for(mrb_int i=0;i<a->len;i++)sp_SymStrHash_set(r,a->order[i],sp_SymStrHash_get(a,a->order[i]));for(mrb_int i=0;i<b->len;i++)sp_SymStrHash_set(r,b->order[i],sp_SymStrHash_get(b,b->order[i]));return r;}")
+ # Cross-variant merge: when a `sym_str_hash` and a `sym_poly_hash`
+ # are merged in either direction, both result paths return a
+ # fresh sym_poly_hash with the str entries boxed via sp_box_str.
+ # Issue #515.
+    emit_raw("static sp_SymPolyHash*sp_SymStrHash_to_sym_poly(sp_SymStrHash*h){sp_SymPolyHash*r=sp_SymPolyHash_new();for(mrb_int i=0;i<h->len;i++)sp_SymPolyHash_set(r,h->order[i],sp_box_str(sp_SymStrHash_get(h,h->order[i])));return r;}")
+    emit_raw("static sp_SymPolyHash*sp_SymPolyHash_merge_str(sp_SymPolyHash*a,sp_SymStrHash*b){sp_SymPolyHash*r=sp_SymPolyHash_new();for(mrb_int i=0;i<a->len;i++)sp_SymPolyHash_set(r,a->order[i],sp_SymPolyHash_get(a,a->order[i]));for(mrb_int i=0;i<b->len;i++)sp_SymPolyHash_set(r,b->order[i],sp_box_str(sp_SymStrHash_get(b,b->order[i])));return r;}")
     emit_raw("")
   end
 
@@ -16453,6 +16459,17 @@ class Compiler
  # (issue #510). Helpers are emitted at codegen startup
  # alongside the existing sp_SymStrHash_* set.
       if mname == "merge"
+ # Cross-variant merge with sym_poly_hash arg: promote
+ # the receiver to sym_poly_hash (box every str value)
+ # and merge with the poly arg. Result is sym_poly_hash.
+ # Issue #515.
+        args_id_m = @nd_arguments[nid]
+        if args_id_m >= 0
+          a_m = get_args(args_id_m)
+          if a_m.length >= 1 && infer_type(a_m[0]) == "sym_poly_hash"
+            return "sp_SymPolyHash_merge(sp_SymStrHash_to_sym_poly(" + rc + "), " + compile_expr(a_m[0]) + ")"
+          end
+        end
         return "sp_SymStrHash_merge(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "dup" || mname == "clone"
@@ -16496,6 +16513,12 @@ class Compiler
             if arg_t == "sym_poly_hash"
               tmp = new_temp
               emit("  sp_SymPolyHash *" + tmp + " = sp_SymPolyHash_merge(" + rc + ", " + compile_arg0(nid) + ");")
+              return tmp
+ # Cross-variant: sym_str_hash arg merged into a
+ # sym_poly_hash receiver. Issue #515.
+            elsif arg_t == "sym_str_hash"
+              tmp = new_temp
+              emit("  sp_SymPolyHash *" + tmp + " = sp_SymPolyHash_merge_str(" + rc + ", " + compile_expr(aargs[0]) + ");")
               return tmp
             elsif arg_t == "poly"
  # Poly-typed local whose runtime value is a sym_poly_hash

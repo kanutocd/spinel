@@ -4430,7 +4430,22 @@ class Compiler
     end
     if mname == "merge"
       if recv >= 0
-        return infer_type(recv)
+        rt_merge = infer_type(recv)
+ # Cross-variant promote: sym_str_hash.merge(sym_poly_hash)
+ # returns a fresh sym_poly_hash with the receiver's str
+ # values boxed. Mirror direction (poly recv, str arg)
+ # returns the receiver's type. Issue #515.
+        if rt_merge == "sym_str_hash"
+          args_id_mg = @nd_arguments[nid]
+          if args_id_mg >= 0
+            arg_ids_mg = get_args(args_id_mg)
+            if arg_ids_mg.length >= 1 && infer_type(arg_ids_mg[0]) == "sym_poly_hash"
+              @needs_rb_value = 1
+              return "sym_poly_hash"
+            end
+          end
+        end
+        return rt_merge
       end
       return "str_int_hash"
     end
