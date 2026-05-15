@@ -19542,6 +19542,33 @@ class Compiler
           return "(" + lc + " != NULL)"
         end
       end
+ # Pure value-type LHS (int, float, bool) against nil: in Ruby,
+ # `0 == nil` is false (only nil equals nil). Without this arm
+ # `int == nil` fell through to the raw `(lc == 0)` emit, since
+ # compile_expr(NilNode) lowers to "0" and unboxed ints share the
+ # same C representation. The conflation surfaced in #521 where
+ # `v = h[k]; v == nil` mistook a stored 0 for a missing key.
+ # Note: this does NOT fix the underlying hash-missing-key problem
+ # (sp_StrIntHash_get still returns 0 for both stored 0 and miss);
+ # use Hash#has_key? / Hash#fetch when distinguishing matters.
+      if lt == "int" || lt == "float" || lt == "bool"
+        if op == "=="
+          return "(((void)(" + lc + ")), FALSE)"
+        else
+          return "(((void)(" + lc + ")), TRUE)"
+        end
+      end
+    end
+    if lt == "nil"
+ # Symmetric arm for `nil == int` / `nil != int` (and float/bool).
+ # Same reasoning as the LHS-typed-int arm above.
+      if at == "int" || at == "float" || at == "bool"
+        if op == "=="
+          return "(((void)(" + rc + ")), FALSE)"
+        else
+          return "(((void)(" + rc + ")), TRUE)"
+        end
+      end
     end
     if lt == "int_array"
       if at == "int_array"

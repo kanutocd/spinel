@@ -2095,6 +2095,16 @@ class Compiler
     end
     if t == "ConstantPathNode"
       cpname = resolve_const_ref_name(nid)
+ # `::ARGV` resolves to the same top-level argv as `ARGV`. Without
+ # this, the root-scoped path fell through to the int default and
+ # `::ARGV[0]` typed as int -- bracket access then produced an int
+ # result and `::ARGV[0] == nil` lowered to a raw `(int == 0)`
+ # compare. Now that `int == nil` is statically FALSE (per #521),
+ # the wrong-type misroute became user-visible. Treat ARGV
+ # identically regardless of `::` prefix.
+      if cpname == "ARGV"
+        return "argv"
+      end
       if cpname != ""
         ci = find_const_idx(cpname)
         if ci >= 0
