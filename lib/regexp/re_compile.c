@@ -551,9 +551,14 @@ compile_atom(re_compiler *c)
     break;
 
   default:
-    if (ch < 0 || ch == ')' || ch == '|' || ch == '*' || ch == '+' || ch == '?' || ch == '{') {
+    if (ch < 0 || ch == ')' || ch == '|' || ch == '*' || ch == '+' || ch == '?') {
       return;  /* not an atom */
     }
+    /* `{` with no preceding atom (or after one whose quantifier
+       parse failed) is a literal `{`. Without this, compile_seq's
+       outer loop spins -- compile_quantified returns no-atom and
+       the loop never advances. CRuby treats `/{re}/` as matching
+       the literal text `{re}`; we mirror that here. Issue #548. */
     next_char(c);
     if ((c->flags & RE_FLAG_IGNORECASE) && ch < 128) {
       if (ch >= 'A' && ch <= 'Z') {

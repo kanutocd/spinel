@@ -9738,9 +9738,36 @@ class Compiler
         @in_gc_scope = 1
       end
     end
+ # When the body uses setjmp/longjmp (begin/rescue/retry, the
+ # implicit raise-handler around `raise X unless Y`, etc.), locals
+ # modified inside the setjmp scope MUST be volatile -- the C
+ # standard allows the compiler to keep non-volatile locals in
+ # registers across the setjmp/longjmp pair, so longjmp's unwind
+ # may not see the updated register values. The retry-counter
+ # in begin/rescue/retry loops is the canonical victim:
+ # `i += 1; raise; rescue; retry unless i == 7` hung because
+ # lv_i was register-cached and the longjmp-restored value never
+ # reached 7. Issue #548 (`begin..retry` hang).
+ #
+ # Mirrors the volatile-prefix logic for top-level locals at
+ # line ~10192 -- there `@needs_setjmp` reflects the whole
+ # program; here we pre-scan this body for begin/rescue/retry/
+ # raise so methods that don't use setjmp pay no perf cost.
+    body_setjmp = body_uses_setjmp?(bid)
     j = 0
     while j < lnames.length
-      emit("  " + c_type(ltypes[j]) + " lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
+ # Only non-pointer locals get the volatile qualifier. Pointer
+ # locals are GC-rooted via SP_GC_ROOT which keeps them stable
+ # across collection; the volatile-discarded warnings on
+ # `sp_str_length(lv_volatile_str)` etc. would escalate to
+ # -Werror failures in the test harness if we marked every
+ # pointer local volatile too. The retry-counter case (#548)
+ # is `mrb_int`, which this arm covers.
+      vol = ""
+      if body_setjmp == 1 && type_is_pointer(ltypes[j]) == 0
+        vol = "volatile "
+      end
+      emit("  " + vol + c_type(ltypes[j]) + " lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
       j = j + 1
     end
     if has_gc_locals == 1
@@ -9748,6 +9775,46 @@ class Compiler
         emit_gc_roots(lnames, ltypes)
       end
     end
+  end
+
+ # Pre-scan a method body for shapes that emit setjmp/longjmp:
+ # BeginNode + rescue (compile_begin_stmt's main path), RetryNode,
+ # bare `raise X unless Y` / `raise X if !Y` modifier patterns.
+ # Used to decide whether locals need the `volatile` qualifier
+ # to survive longjmp unwinds. Issue #548.
+  def body_uses_setjmp?(nid)
+    if nid < 0
+      return 0
+    end
+    t = @nd_type[nid]
+    if t == "DefNode" || t == "ClassNode" || t == "ModuleNode"
+      return 0
+    end
+    if t == "BeginNode"
+      if @nd_rescue_clause[nid] >= 0 || @nd_ensure_clause[nid] >= 0
+        return 1
+      end
+    end
+    if t == "RetryNode"
+      return 1
+    end
+    if t == "CallNode" && @nd_name[nid] == "raise"
+      return 1
+    end
+ # push_child_ids already includes @nd_body, @nd_stmts, and
+ # every other AST link -- recursing on those separately would
+ # 2x-fan-out per level and explode exponentially on deep bodies
+ # like spinel_codegen.rb itself.
+    cs_setjmp = []
+    push_child_ids(nid, cs_setjmp)
+    k = 0
+    while k < cs_setjmp.length
+      if body_uses_setjmp?(cs_setjmp[k]) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
   end
 
   def emit_gc_roots(lnames, ltypes)
@@ -10189,17 +10256,25 @@ class Compiler
       j = j + 1
     end
 
-    vol = ""
-    if @needs_setjmp == 1
-      vol = "volatile "
-    end
     j = 0
     while j < lnames.length
       ctp = c_type(ltypes[j])
+ # Pointer locals: GC-rooted via SP_GC_ROOT, which keeps them
+ # stable across collection and (incidentally) across longjmp.
+ # Volatile is only required for non-pointer scalars modified
+ # inside a setjmp scope. Tagging pointer locals volatile too
+ # would trigger -Wdiscarded-qualifiers cascade through the
+ # runtime helper signatures (sp_str_length, sp_IntArray_length,
+ # etc.) without affecting correctness. Mirrors the per-method
+ # logic in declare_method_locals (#548).
       if type_is_pointer(ltypes[j]) == 1
-        emit("  " + vol + ctp + "lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
+        emit("  " + ctp + "lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
         emit("  SP_GC_ROOT(lv_" + lnames[j] + ");")
       else
+        vol = ""
+        if @needs_setjmp == 1
+          vol = "volatile "
+        end
         emit("  " + vol + ctp + " lv_" + lnames[j] + " = " + c_default_val(ltypes[j]) + ";")
       end
       j = j + 1
@@ -10441,7 +10516,12 @@ class Compiler
     if regex_match_call_node?(nid)
       return "(" + expr + " != 0)"
     end
-    if t == "nil"
+ # `()` (empty parens) infers as "void" and lowers compile_expr
+ # to "0". CRuby treats `()` as nil -- `while ()` never enters
+ # the loop body. Without this arm, the catch-all `((expr),
+ # TRUE)` flipped the empty-parens condition to always-true and
+ # the loop hung. Issue #548.
+    if t == "void" || t == "nil"
       return "FALSE"
     end
     if is_nullable_type(t) == 1
@@ -24892,11 +24972,29 @@ class Compiler
         rt = infer_type(recv)
         if is_array_type(rt) == 1
           rc = compile_expr_gc_rooted(recv)
-          arg = compile_arg0(nid)
           pfx = array_c_prefix(rt)
-          tmp = new_temp
-          emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_" + pfx + "_length(" + arg + "); " + tmp + "++)")
-          emit("    sp_" + pfx + "_push(" + rc + ", sp_" + pfx + "_get(" + arg + ", " + tmp + "));")
+ # Walk every arg. Two prior bugs (issue #548): only the first
+ # arg was processed (multi-arg `a.concat(b, c)` silently dropped
+ # the tail), and the source-array length was queried inside the
+ # loop -- when arg aliased recv (`a.concat(a)`) every push grew
+ # the length and the loop never terminated. Snapshot the length
+ # before the inner loop so self-concat appends the original
+ # contents and stops.
+          args_id_cc = @nd_arguments[nid]
+          if args_id_cc >= 0
+            aargs_cc = get_args(args_id_cc)
+            ak_cc = 0
+            while ak_cc < aargs_cc.length
+              arg_tmp = new_temp
+              len_tmp = new_temp
+              it_tmp  = new_temp
+              emit("  " + c_type(rt) + " " + arg_tmp + " = " + compile_expr(aargs_cc[ak_cc]) + ";")
+              emit("  mrb_int " + len_tmp + " = sp_" + pfx + "_length(" + arg_tmp + ");")
+              emit("  for (mrb_int " + it_tmp + " = 0; " + it_tmp + " < " + len_tmp + "; " + it_tmp + "++)")
+              emit("    sp_" + pfx + "_push(" + rc + ", sp_" + pfx + "_get(" + arg_tmp + ", " + it_tmp + "));")
+              ak_cc = ak_cc + 1
+            end
+          end
           return 1
         end
         if rt == "mutable_str"
