@@ -21016,16 +21016,17 @@ class Compiler
                 next
               end
             end
- # Issue #542: param body-inferred as a hash variant
- # (str_poly_hash / sym_poly_hash / ...) but the caller's arg
- # is int/nil because the source (uninitialized ivar, untyped
- # registry getter, etc.) never got widened. Cast the int/nil
- # value to NULL of the param's hash pointer type. The matching
- # runtime NULL-guards in `sp_<X>Hash_get` return sp_box_nil()
- # so the body's `param["k"]` produces nil instead of
- # segfaulting -- closer to CRuby's NoMethodError (still wrong
- # but at least defined and unlike the silent emit-0).
-            if is_hash_type(ptypes[k]) == 1
+ # Issue #542 / #545: param body-inferred as a hash or array
+ # variant but the caller's arg is int/nil because the source
+ # (uninitialized ivar, untyped registry getter, etc.) never
+ # got widened. Cast the int/nil value to NULL of the param's
+ # pointer type. The matching runtime NULL-guards in
+ # `sp_<X>Hash_get` / `sp_PolyArray_length` etc. return the
+ # slot's default sentinel so the body's `param["k"]` /
+ # `param.length` produces 0 / nil instead of segfaulting --
+ # closer to CRuby's NoMethodError (still wrong but at least
+ # defined and unlike the silent emit-0).
+            if is_hash_type(ptypes[k]) == 1 || ptypes[k] == "poly_array"
               arg_at_h542 = infer_type(positional_ids[k])
               if arg_at_h542 == "int" || arg_at_h542 == "nil"
                 result = result + "(" + c_type(ptypes[k]) + ")NULL"

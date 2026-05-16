@@ -11813,6 +11813,126 @@ class Compiler
  # left `path` typed mrb_int because called_methods_only_on_
  # container_builtins filtered `split` out and no user class was
  # a perfect fit).
+ # Methods uniquely present on Array (not on Integer / String /
+ # Hash). Issue #545's conservative arm. Critically excludes
+ # `<<`, `&`, `|`, `*`, `+`, `-` -- those overload with Integer
+ # bitwise/arithmetic and the optcarrot probe shows
+ # `poke(data)` style int params would false-positive widen if
+ # included. The remaining list (push/pop/shift/unshift/
+ # concat/compact/flatten/transpose) is overlap-free.
+  def is_array_only_method(mname)
+    if mname == "push" || mname == "pop" || mname == "shift" || mname == "unshift"
+      return 1
+    end
+    if mname == "concat"
+      return 1
+    end
+    if mname == "compact" || mname == "compact!" || mname == "flatten" || mname == "flatten!"
+      return 1
+    end
+    if mname == "transpose"
+      return 1
+    end
+    0
+  end
+
+ # Body-usage array inference. Issue #545. Sibling of
+ # infer_hash_param_from_body. When a method's int/nil-defaulted
+ # param has its body call any of is_array_only_method's
+ # Array-unique methods, widen the slot to `poly_array`. Runs
+ # once AFTER the fixpoint converges -- not inside the iter loop
+ # -- so call-site inference has every iteration to pin params
+ # to narrower variants (int_array / float_array / etc.) before
+ # this fallback claims the rest at the catch-all poly_array.
+  def infer_array_param_from_body
+    mi = 0
+    while mi < @meth_names.length
+      bid = @meth_body_ids[mi]
+      if bid >= 0
+        pnames = @meth_param_names[mi].split(",")
+        ptypes = @meth_param_types[mi].split(",")
+        changed_top = 0
+        pk = 0
+        while pk < pnames.length
+          if pk < ptypes.length && (ptypes[pk] == "int" || ptypes[pk] == "nil")
+            called = "".split(",")
+            collect_param_methods(bid, pnames[pk], called)
+            sawa = 0
+            kk = 0
+            while kk < called.length
+              if is_array_only_method(called[kk]) == 1
+                sawa = 1
+              end
+              kk = kk + 1
+            end
+            if sawa == 1
+              @needs_rb_value = 1
+              @needs_gc = 1
+              ptypes[pk] = "poly_array"
+              changed_top = 1
+            end
+          end
+          pk = pk + 1
+        end
+        if changed_top == 1
+          @meth_param_types[mi] = ptypes.join(",")
+        end
+      end
+      mi = mi + 1
+    end
+    ci = 0
+    while ci < @cls_names.length
+      mnames = @cls_meth_names[ci].split(";")
+      bodies = @cls_meth_bodies[ci].split(";")
+      cls_changed = 0
+      mj = 0
+      while mj < mnames.length
+        if mnames[mj] != "initialize"
+          pnames_j = cls_meth_pnames_get(ci, mj)
+          ptypes_j = cls_meth_ptypes_get(ci, mj)
+          bid_j = -1
+          if mj < bodies.length
+            bid_j = bodies[mj].to_i
+          end
+          if bid_j >= 0
+            m_changed = 0
+            pk = 0
+            while pk < pnames_j.length
+              if pk < ptypes_j.length && (ptypes_j[pk] == "int" || ptypes_j[pk] == "nil")
+                called_c = "".split(",")
+                collect_param_methods(bid_j, pnames_j[pk], called_c)
+                sawc = 0
+                kk = 0
+                while kk < called_c.length
+                  if is_array_only_method(called_c[kk]) == 1
+                    sawc = 1
+                  end
+                  kk = kk + 1
+                end
+                if sawc == 1
+                  @needs_rb_value = 1
+                  @needs_gc = 1
+                  ptypes_j[pk] = "poly_array"
+                  m_changed = 1
+                end
+              end
+              pk = pk + 1
+            end
+            if m_changed == 1
+              cls_meth_ptypes_put(ci, mj, ptypes_j)
+              cls_changed = 1
+            end
+          end
+        end
+        mj = mj + 1
+      end
+      if cls_changed == 1
+        @cls_meth_ptypes_version = @cls_meth_ptypes_version + 1
+      end
+      ci = ci + 1
+    end
+  end
+
   def is_string_only_method(mname)
     if mname == "split" || mname == "start_with?" || mname == "end_with?"
       return 1
@@ -13266,6 +13386,46 @@ class Compiler
     ""
   end
 
+ # Issue #545 (Hash iteration path; the Array path lives in
+ # is_array_only_method). Scan a body for Hash-unambiguous methods
+ # called on pname: `.keys` / `.values` / `.each_pair` / `.merge`
+ # (Array doesn't have keys/values/each_pair/merge; String has
+ # none; Integer has none). `.each` is intentionally NOT here
+ # because Array#each + Range#each both exist; the iteration
+ # arity-2 disambiguation is hard to do without descending into
+ # the block param shape, so we keep this conservative.
+ # Returns 1 when the body uses pname as a hash via these
+ # iteration-style methods. The caller then widens to
+ # `str_poly_hash` (default key kind) when no literal-key signal
+ # has already pinned the more-specific variant.
+  def param_used_as_hash?(nid, pname)
+    if nid < 0
+      return 0
+    end
+    if @nd_type[nid] == "DefNode" || @nd_type[nid] == "ClassNode" || @nd_type[nid] == "ModuleNode"
+      return 0
+    end
+    if @nd_type[nid] == "CallNode"
+      recv_h = @nd_receiver[nid]
+      if recv_h >= 0 && @nd_type[recv_h] == "LocalVariableReadNode" && @nd_name[recv_h] == pname
+        mn_h = @nd_name[nid]
+        if mn_h == "keys" || mn_h == "values" || mn_h == "each_pair" || mn_h == "merge" || mn_h == "merge!" || mn_h == "has_key?" || mn_h == "key?" || mn_h == "fetch" || mn_h == "store" || mn_h == "delete" || mn_h == "transform_values" || mn_h == "transform_keys" || mn_h == "to_h"
+          return 1
+        end
+      end
+    end
+    cs_h = []
+    push_child_ids(nid, cs_h)
+    k = 0
+    while k < cs_h.length
+      if param_used_as_hash?(cs_h[k], pname) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
  # Body-usage hash inference for un-widened params. Issue #542:
  # when a method's param has no concretely-typed call site
  # (all callers untyped/RbVal), the analyzer defaulted the slot
@@ -13298,6 +13458,17 @@ class Compiler
             elsif kind == "symbol"
               @needs_rb_value = 1
               ptypes[pk] = "sym_poly_hash"
+              changed_top = 1
+            elsif param_used_as_hash?(bid, pnames[pk]) == 1
+ # No literal-key access but Hash-unambiguous method
+ # called (`.keys` / `.values` / `.merge` / etc.). Widen
+ # to str_poly_hash as the default key kind. Sam's
+ # roundhouse blog has 4 methods of this shape
+ # (SqliteAdapter#insert/update via `attrs.keys` then
+ # `attrs[k]`, Flash/Session#merge via `other.each do
+ # |k, v|`). Issue #545's iteration arm.
+              @needs_rb_value = 1
+              ptypes[pk] = "str_poly_hash"
               changed_top = 1
             end
           end
@@ -13335,6 +13506,10 @@ class Compiler
               elsif kind == "symbol"
                 @needs_rb_value = 1
                 ptypes_j[pk] = "sym_poly_hash"
+                m_changed = 1
+              elsif param_used_as_hash?(bid_j, pnames_j[pk]) == 1
+                @needs_rb_value = 1
+                ptypes_j[pk] = "str_poly_hash"
                 m_changed = 1
               end
             end
@@ -18014,6 +18189,19 @@ class Compiler
  # `def self.add(s); @items << s; end` whose return is now
  # `sp_StrArray *` rather than the placeholder `sp_IntArray *`).
     refine_all_module_ivar_types
+    infer_all_returns
+    infer_function_body_call_types
+    infer_class_body_call_types
+    infer_all_returns
+ # Body-usage array inference (#545). Runs ONCE post-fixpoint:
+ # by this point any param that has a typed call site has been
+ # widened to a concrete narrow variant (int_array, str_array,
+ # obj_<C>_ptr_array, etc.); only genuinely-untyped params
+ # remain at int/nil. Widening those to poly_array here is
+ # safe (the is_array_only_method classifier excludes
+ # `<<` / `&` / `|` and other Integer-overlapping ops, so
+ # bit-op-only params like optcarrot's poke(data) stay int).
+    infer_array_param_from_body
     infer_all_returns
     infer_function_body_call_types
     infer_class_body_call_types
