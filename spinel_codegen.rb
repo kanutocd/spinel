@@ -12855,8 +12855,15 @@ class Compiler
       return r
     end
 
- # map/select/reject/reduce as expression
-    r = compile_enumerable_expr(nid, mname)
+ # map/select/reject/reduce as expression. Pass through the
+ # already-compiled `rc` so compile_map_expr (etc.) doesn't
+ # re-emit the recv's side-effecting chain. Issue #540: `gets`
+ # in `n, m = gets.split.map &:to_i` was getting emitted twice --
+ # once via compile_call_expr's `rc = compile_expr_gc_rooted` and
+ # once via compile_map_expr's own `compile_expr(recv)`. With
+ # gets reading from stdin, the duplicate consumed two input
+ # lines and the loop dispatched on the wrong values.
+    r = compile_enumerable_expr(nid, mname, rc)
     if r != ""
       return r
     end
@@ -17425,11 +17432,11 @@ class Compiler
     emit("    if (" + acc + ".cls_id == " + cls_id + ") { " + cstruct + " *_dh = (" + cstruct + " *)" + acc + ".v.p; " + acc + " = " + cstruct + "_has_key(_dh, " + key_expr + ") ? " + box_fn + "(" + cstruct + "_get(_dh, " + key_expr + ")) : sp_box_nil(); } else")
   end
 
-  def compile_enumerable_expr(nid, mname)
+  def compile_enumerable_expr(nid, mname, precomputed_rc = "")
  # map as expression
     if mname == "map"
       if @nd_block[nid] >= 0
-        return compile_map_expr(nid)
+        return compile_map_expr(nid, precomputed_rc)
       end
     end
 
@@ -29408,7 +29415,7 @@ class Compiler
     end
   end
 
-  def compile_map_expr(nid)
+  def compile_map_expr(nid, precomputed_rc = "")
  # N.times.map { |i| ... } -> loop 0..N-1 building an array
     recv_n = @nd_receiver[nid]
     if recv_n >= 0 && @nd_type[recv_n] == "CallNode" && @nd_name[recv_n] == "times" && @nd_block[recv_n] < 0
@@ -29479,7 +29486,26 @@ class Compiler
       return tmp_arrn
     end
     rt = infer_type(@nd_receiver[nid])
-    rc_expr = compile_expr(@nd_receiver[nid])
+ # `precomputed_rc` comes from compile_call_expr's pre-compute
+ # (issue #540). When non-empty it's already a typed-and-rooted
+ # temp from compile_expr_gc_rooted; reusing it avoids a second
+ # compile_expr of the recv chain. When empty we're on the
+ # compile_body_return tail path (or another caller that hasn't
+ # pre-compiled) and have to compile the recv ourselves.
+    if precomputed_rc != ""
+ # compile_expr_gc_rooted only roots when the recv is a CallNode;
+ # an ArrayNode recv (e.g. `[10,20,30,40].map { ... }`) reaches
+ # us as an unrooted temp. Re-root here so a GC mid-loop (the
+ # block body's nested allocations cross the threshold) can't
+ # sweep the array literal. Idempotent for already-rooted temps.
+      rc_tmp = precomputed_rc
+      if type_needs_transient_root(rt) == 1
+        @needs_gc = 1
+        emit("  SP_GC_ROOT(" + rc_tmp + ");")
+      end
+      rc = rc_tmp
+    else
+      rc_expr = compile_expr(@nd_receiver[nid])
  # Store receiver in a temp to avoid re-evaluation, and root it
  # when the type is a GC-allocated pointer. Without the root, an
  # array-literal receiver (`[1,2,3].map { ... }`) is held only as
@@ -29487,13 +29513,14 @@ class Compiler
  # the block body itself does .map and grows allocations enough
  # to cross the threshold) frees the receiver mid-loop, and the
  # next `sp_*Array_length(rc)` reads a recycled IntArray's len.
-    rc_tmp = new_temp
-    emit("  " + c_type(rt) + " " + rc_tmp + " = " + rc_expr + ";")
-    if type_needs_transient_root(rt) == 1
-      @needs_gc = 1
-      emit("  SP_GC_ROOT(" + rc_tmp + ");")
+      rc_tmp = new_temp
+      emit("  " + c_type(rt) + " " + rc_tmp + " = " + rc_expr + ";")
+      if type_needs_transient_root(rt) == 1
+        @needs_gc = 1
+        emit("  SP_GC_ROOT(" + rc_tmp + ");")
+      end
+      rc = rc_tmp
     end
-    rc = rc_tmp
     bp1 = get_block_param(nid, 0)
     if bp1 == ""
       bp1 = "_x"
