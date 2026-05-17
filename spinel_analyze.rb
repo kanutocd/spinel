@@ -18455,13 +18455,14 @@ class Compiler
       infer_param_array_type_from_body
       narrow_param_types_from_body_method_calls
       infer_string_param_from_body
- # Body-usage hash inference (#542). Lifts int-defaulted params
- # to str_poly_hash / sym_poly_hash when the body keyed-accesses
- # the param. Runs after the string-param lift so the
- # is_string_only_method check fires first for plain-string
- # consumers and the hash-shape inference only claims the param
- # when the body actually treats it as a hash.
-      infer_hash_param_from_body
+ # Body-usage hash inference (#542) used to run here; moved to
+ # post-fixpoint below so call-site inference can pin a typed
+ # caller's hash variant (str_str_hash, sym_int_hash, etc.)
+ # first. Issue #556: when this fired inside the iterative
+ # loop, an int-defaulted param would widen to str_poly_hash
+ # in iter 0, then unify_call_types(str_poly_hash, str_str_hash)
+ # at the caller widens further to poly -- even though the
+ # caller was always typed.
       widen_nil_default_params_used_as_hash
       widen_params_from_ivar_hash_aset
       infer_param_type_from_callee_slot
@@ -18500,6 +18501,27 @@ class Compiler
  # `def self.add(s); @items << s; end` whose return is now
  # `sp_StrArray *` rather than the placeholder `sp_IntArray *`).
     refine_all_module_ivar_types
+    infer_all_returns
+    infer_function_body_call_types
+    infer_class_body_call_types
+    infer_all_returns
+ # Body-usage hash inference (#542) -- moved out of the
+ # iterative loop per #556. Same reasoning as the array
+ # pass below: by the time the fixpoint converges, any
+ # param with a typed caller has been pinned to a concrete
+ # variant (str_str_hash / sym_int_hash / etc.); only
+ # genuinely-untyped params (int / nil default) reach the
+ # widening here, so unify_call_types doesn't get a chance
+ # to widen the freshly-claimed str_poly_hash back to poly
+ # against a more-specific typed caller. Followup
+ # narrow_param_hash_types_from_body_writes refines the
+ # freshly-widened str_poly_hash / sym_poly_hash slot down
+ # to a more specific variant (str_int_hash / sym_int_hash
+ # / etc.) when body writes pin the value type; without
+ # this call, untyped-caller-only patterns lose the
+ # precision the in-loop narrow pass used to give them.
+    infer_hash_param_from_body
+    narrow_param_hash_types_from_body_writes
     infer_all_returns
     infer_function_body_call_types
     infer_class_body_call_types
