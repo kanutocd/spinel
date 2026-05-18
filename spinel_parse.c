@@ -1462,8 +1462,21 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
 }
 
 /* ---- Syntax sugar rewriting ---- */
+
+/* Ruby method-name char class: idents, digits, `?` / `!` / `=` suffixes,
+   operator-method chars (`+`, `-`, `*`, etc.), and `[` / `]` for the
+   index operators `[]` and `[]=`. Digits are allowed in the body but
+   the macro rejects digit-leading names (invalid Ruby method syntax). */
+static int sp_is_method_name_char(char c) {
+  return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '?' || c == '!' || c == '+' ||
+         c == '-' || c == '*' || c == '/' || c == '<' || c == '>' ||
+         c == '=' || c == '&' || c == '|' || c == '^' || c == '~' ||
+         c == '%' || c == '[' || c == ']';
+}
+
 static char *rewrite_syntax_sugar(char *source) {
-  /* Rewrite .send(:method, args) → .method(args) */
+  /* Rewrite .send(:foo, args) / .send("foo", args) → .foo(args) */
   /* Rewrite &:symbol → { |_spx| _spx.symbol } */
   size_t len = strlen(source);
   size_t cap = len * 2 + 256;
@@ -1474,42 +1487,68 @@ static char *rewrite_syntax_sugar(char *source) {
   #define OUT_CHAR(c) do { if (oi >= cap - 1) { cap *= 2; out = realloc(out, cap); } out[oi++] = (c); } while(0)
   #define OUT_STR(s) do { const char *_s = (s); while (*_s) { OUT_CHAR(*_s); _s++; } } while(0)
 
+  /* Rewrite one .send(:foo / .send("foo dispatch. `string_form` is 1
+     for the double-quoted variant (requires a closing `"`) and 0 for
+     the colon-symbol variant. On mismatch (empty / digit-leading
+     name, unclosed quote), emits the prefix verbatim and advances
+     past it so the outer loop resumes scanning. The args copy tracks
+     `"..."` and `'...'` state with `\` escape skipping so parens
+     inside string literals do not prematurely close the call. */
+  #define REWRITE_SEND_CALL(prefix_str, prefix_len, string_form) do {     \
+    size_t _save_i = i;                                                   \
+    i += (prefix_len);                                                    \
+    size_t _ns = i;                                                       \
+    while (i < len && sp_is_method_name_char(source[i])) i++;             \
+    size_t _name_len = i - _ns;                                           \
+    int _ok = (_name_len > 0);                                            \
+ /* Reject digit-leading names: `.123foo()` is not valid Ruby. */         \
+    if (_ok && source[_ns] >= '0' && source[_ns] <= '9') { _ok = 0; }     \
+    if (_ok && (string_form)) {                                           \
+      if (i >= len || source[i] != '"') { _ok = 0; }                      \
+      else { i++; /* skip closing quote */ }                              \
+    }                                                                     \
+    if (!_ok) { i = _save_i; OUT_STR(prefix_str); i += (prefix_len); }    \
+    else {                                                                \
+      OUT_CHAR('.');                                                      \
+      { size_t _k; for (_k = 0; _k < _name_len; _k++) OUT_CHAR(source[_ns + _k]); } \
+      if (i < len && source[i] == ')') {                                  \
+        i++; /* no args */                                                \
+      } else if (i < len && source[i] == ',') {                           \
+        i++;                                                              \
+        while (i < len && source[i] == ' ') i++;                          \
+        OUT_CHAR('(');                                                    \
+        { int _depth = 1; char _qc = 0;                                   \
+          while (i < len && _depth > 0) {                                 \
+            char _ac = source[i];                                         \
+            if (_qc != 0) {                                               \
+ /* Inside string: `\` escapes next char, skip it as a pair. */           \
+              if (_ac == '\\' && i + 1 < len) {                           \
+                OUT_CHAR(_ac); OUT_CHAR(source[i + 1]); i += 2; continue; \
+              }                                                            \
+              if (_ac == _qc) _qc = 0;                                    \
+              OUT_CHAR(_ac); i++; continue;                                \
+            }                                                              \
+            if (_ac == '"' || _ac == '\'') { _qc = _ac; OUT_CHAR(_ac); i++; continue; } \
+            if (_ac == '(') _depth++;                                     \
+            else if (_ac == ')') { _depth--; if (_depth == 0) { i++; break; } } \
+            OUT_CHAR(_ac); i++;                                           \
+          } }                                                             \
+        OUT_CHAR(')');                                                    \
+      }                                                                   \
+    }                                                                     \
+  } while(0)
+
   while (i < len) {
-    /* .send(:symbol ...) */
+    /* .send(:foo, args) → .foo(args) */
     if (i + 7 < len && strncmp(source + i, ".send(:", 7) == 0) {
-      i += 7; /* skip .send(: */
-      /* Extract method name */
-      size_t ns = i;
-      while (i < len && (source[i] == '_' || (source[i] >= 'a' && source[i] <= 'z') ||
-             (source[i] >= 'A' && source[i] <= 'Z') || (source[i] >= '0' && source[i] <= '9') ||
-             source[i] == '?' || source[i] == '!' || source[i] == '+' || source[i] == '-' ||
-             source[i] == '*' || source[i] == '/' || source[i] == '<' || source[i] == '>' ||
-             source[i] == '=' || source[i] == '&' || source[i] == '|' || source[i] == '^' ||
-             source[i] == '~' || source[i] == '%')) i++;
-      size_t name_len = i - ns;
-      if (name_len > 0) {
-        OUT_CHAR('.');
-        size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]);
-        /* Skip optional comma + space, then copy remaining args until ) */
-        if (i < len && source[i] == ')') {
-          i++; /* no args */
-        } else if (i < len && source[i] == ',') {
-          i++; /* skip comma */
-          while (i < len && source[i] == ' ') i++;
-          OUT_CHAR('(');
-          /* Copy args until matching ) */
-          int depth = 1;
-          while (i < len && depth > 0) {
-            if (source[i] == '(') depth++;
-            else if (source[i] == ')') { depth--; if (depth == 0) { i++; break; } }
-            OUT_CHAR(source[i]); i++;
-          }
-          OUT_CHAR(')');
-        }
-        continue;
-      }
-      /* Failed to parse, output original */
-      OUT_STR(".send(:");
+      REWRITE_SEND_CALL(".send(:", 7, 0);
+      continue;
+    }
+    /* .send("foo", args) → .foo(args). Plain string literal only;
+       interpolated strings parse as InterpolatedStringNode and are
+       left untouched (Spinel can't resolve the name statically). */
+    if (i + 7 < len && strncmp(source + i, ".send(\"", 7) == 0) {
+      REWRITE_SEND_CALL(".send(\"", 7, 1);
       continue;
     }
     /* (&:symbol) → { |_spx| _spx.symbol } — also remove enclosing parens */
