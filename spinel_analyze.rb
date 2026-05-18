@@ -3200,6 +3200,11 @@ class Compiler
     if mname == "system"
       return "bool"
     end
+ # trap / Signal.trap stub returns the previous-handler string;
+ # codegen emits SPL("DEFAULT") since per-signal state is not tracked.
+    if mname == "trap"
+      return "string"
+    end
 
  # Constructor .new
     r = infer_constructor_type(nid, mname, recv)

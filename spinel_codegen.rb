@@ -12671,6 +12671,13 @@ class Compiler
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
+ # Return CRuby's first-call default ("DEFAULT") since Spinel does
+ # not track per-signal state. Covers both implicit-self and
+ # explicit Signal / ::Signal receivers via trap_call_is_signal_stub.
+    if mname == "trap" && trap_call_is_signal_stub(nid) == 1
+      return "SPL(\"DEFAULT\")"
+    end
+
  # `recv.send(:method_name, args...)` with a SymbolNode method
  # name reduces to the direct call -- temporarily mutate the
  # outer CallNode's @nd_name and the inner ArgumentsNode's
@@ -26090,6 +26097,25 @@ class Compiler
   end
 
 
+ # Match the CRuby shapes that resolve to Kernel#trap. Spinel has
+ # no signal-handler runtime so all variants compile to a no-op.
+  def trap_call_is_signal_stub(nid)
+    rcv = @nd_receiver[nid]
+    if rcv < 0
+      return 1
+    end
+    rt = @nd_type[rcv]
+    if rt == "ConstantReadNode" && @nd_name[rcv] == "Signal"
+      return 1
+    end
+ # `::Signal.trap` parses as ConstantPathNode with parent < 0
+ # (toplevel). Reject `Foo::Signal.trap` -- that's a different module.
+    if rt == "ConstantPathNode" && @nd_name[rcv] == "Signal" && @nd_receiver[rcv] < 0
+      return 1
+    end
+    0
+  end
+
   def compile_call_stmt(nid)
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
@@ -27240,11 +27266,10 @@ class Compiler
       end
     end
 
- # trap (just ignore)
-    if mname == "trap"
-      if recv < 0
-        return 1
-      end
+ # trap / Signal.trap: no-op at every shape (implicit-self or
+ # explicit receiver, with or without block, stmt or expr position).
+    if mname == "trap" && trap_call_is_signal_stub(nid) == 1
+      return 1
     end
 
  # catch/throw
