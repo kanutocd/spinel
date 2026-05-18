@@ -15981,7 +15981,12 @@ class Compiler
       return "0"
     end
     if mname == "bytesize"
-      return "(mrb_int)strlen(" + rc + ")"
+ # `sp_str_byte_len` reads the heap-string header's length field
+ # for spinel-allocated buffers (preserving embedded NULs); falls
+ # through to strlen for raw C string literals. Issue #593: a
+ # `0.chr` buffer encodes \x00 + null terminator with header len=1
+ # but strlen() saw only the first NUL and reported bytesize=0.
+      return "(mrb_int)sp_str_byte_len(" + rc + ")"
     end
     if mname == "to_s"
       return rc
