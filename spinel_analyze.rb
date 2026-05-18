@@ -4338,7 +4338,14 @@ class Compiler
           @needs_rb_value = 1
           return "poly"
         end
-        if rt_idx == "int_array" || rt_idx == "str_array" || rt_idx == "float_array" || rt_idx == "sym_array" || rt_idx == "poly_array" || is_ptr_array_type(rt_idx) == 1
+ # Limited to int_array / str_array for now -- codegen has
+ # `_poly` wrappers only for these two array kinds.
+ # float_array / sym_array / poly_array / ptr_array fall
+ # through to the existing unresolved-call path (warn + emit 0)
+ # until their `_poly` wrappers land. Issue raised during the
+ # #585 follow-up; the subset-correctness fix here only covers
+ # the array kinds with existing emit routes.
+        if rt_idx == "int_array" || rt_idx == "str_array"
           @needs_rb_value = 1
           return "poly"
         end
