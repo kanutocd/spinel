@@ -5093,6 +5093,24 @@ class Compiler
               end
               bret = infer_type(bbs.last)
               pop_scope
+ # `recv.map { _1[:k] }` on a poly_array: the block body is
+ # an indexed read on the bp param itself. The bp is poly
+ # (elem type of poly_array), so the inner [] dispatches
+ # through the runtime hash-variant table and the produced
+ # value is sp_RbVal. infer_type's default "int" answer
+ # would let codegen pick an int_array accumulator, which
+ # then can't take the sp_RbVal push. Mark the result as
+ # poly_array so the downstream .sum / .each typing matches
+ # what codegen actually emits.
+              if (bret == "int" || bret == "bool") && recv_t == "poly_array" && bp1 != ""
+                last_bb = bbs.last
+                if @nd_type[last_bb] == "CallNode" && @nd_name[last_bb] == "[]" && @nd_receiver[last_bb] >= 0
+                  rcv_bb = @nd_receiver[last_bb]
+                  if @nd_type[rcv_bb] == "LocalVariableReadNode" && @nd_name[rcv_bb] == bp1
+                    bret = "poly"
+                  end
+                end
+              end
               if bret == "string"
                 return "str_array"
               end
@@ -25848,6 +25866,16 @@ class Compiler
       return "int"
     end
     if mname == "each" || mname == "map" || mname == "flat_map" || mname == "filter" || mname == "select" || mname == "reject" || mname == "find" || mname == "detect" || mname == "find_index" || mname == "find_all" || mname == "count" || mname == "all?" || mname == "any?" || mname == "none?" || mname == "min_by" || mname == "max_by" || mname == "sort_by" || mname == "group_by" || mname == "partition" || mname == "uniq" || mname == "tally" || mname == "drop_while" || mname == "take_while" || mname == "filter_map"
+ # `<arr>.group_by(blk).each do |k, rows|` -- the fused emit
+ # in codegen unboxes the per-key accumulator to a typed
+ # sp_PolyArray, so `rows` is poly_array, not the boxed-poly
+ # that a generic hash variant would suggest. Mirror that in
+ # block-param typing so the chain `.map { ... }.sum` picks
+ # the right dispatch arms.
+      if mname == "each" && recv >= 0 && @nd_type[recv] == "CallNode" && @nd_name[recv] == "group_by" && @nd_block[recv] >= 0
+        return "poly" if pi == 0
+        return "poly_array" if pi == 1
+      end
  # Hash#each yields |k, v|. elem_type_of_array on a hash type
  # falls back to "int" for both, which then types `puts k + ":"`
  # inside the block as int-arithmetic and lowers to printf("%lld")

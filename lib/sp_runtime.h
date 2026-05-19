@@ -1715,6 +1715,11 @@ static sp_PolyArray *sp_PolyArray_slice_bang(sp_PolyArray *a, mrb_int from, mrb_
   return r;
 }
 static sp_PolyArray *sp_PolyArray_dup(sp_PolyArray *a) { sp_PolyArray *b = sp_PolyArray_new(); for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(b, a->data[i]); return b; }
+/* Sum the integer-tagged elements of a poly_array. Used by
+   `Array#sum` on a poly_array whose runtime tags are uniform int
+   (e.g. the result of `arr.map { _1[:int_key] }`). Non-int tags
+   contribute zero. */
+static mrb_int sp_PolyArray_sum_int(sp_PolyArray *a) { if (!a) return 0; mrb_int s = 0; for (mrb_int i = 0; i < a->len; i++) { if (a->data[i].tag == SP_TAG_INT) s += a->data[i].v.i; } return s; }
 static void sp_PolyArray_shuffle_bang(sp_PolyArray *a) { for (mrb_int i = a->len - 1; i > 0; i--) { mrb_int j = (mrb_int)(rand() % (i + 1)); sp_RbVal t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t; } }
 static void sp_PolyArray_rotate_bang(sp_PolyArray*a,mrb_int n){if(a->len<=0)return;n=((n%a->len)+a->len)%a->len;if(n==0)return;sp_RbVal*tmp=(sp_RbVal*)malloc(sizeof(sp_RbVal)*a->len);for(mrb_int i=0;i<a->len;i++)tmp[i]=a->data[(i+n)%a->len];for(mrb_int i=0;i<a->len;i++)a->data[i]=tmp[i];free(tmp);}
 static sp_PolyArray *sp_PolyArray_shuffle(sp_PolyArray *a) { sp_PolyArray *b = sp_PolyArray_dup(a); sp_PolyArray_shuffle_bang(b); return b; }

@@ -12018,8 +12018,12 @@ class Compiler
                 arg_exprs.push("(long long)" + compile_expr(inner))
               else
                 if it == "float"
-                  fmt = fmt + "%g"
-                  arg_exprs.push(compile_expr(inner))
+ # CRuby's Float#to_s (which is what `"#{x}"` calls)
+ # always preserves the decimal point: `4.0` -> `"4.0"`,
+ # not `"4"`. printf %g drops the trailing zero. Route
+ # through sp_float_to_s for parity.
+                  fmt = fmt + "%s"
+                  arg_exprs.push("sp_float_to_s(" + compile_expr(inner) + ")")
                 else
                   if it == "string"
                     fmt = fmt + "%s"
@@ -17757,7 +17761,7 @@ class Compiler
 
  # PolyArray methods
     if recv_type == "poly_array"
-      if mname == "length"
+      if mname == "length" || mname == "size"
         return "sp_PolyArray_length(" + rc + ")"
       end
       if mname == "[]"
@@ -17789,6 +17793,15 @@ class Compiler
       end
       if mname == "empty?"
         return "(sp_PolyArray_length(" + rc + ") == 0)"
+      end
+ # `.sum` on a poly_array where elements happen to carry int
+ # tags at runtime (e.g. the result of `<poly_array>.map { _1[:k] }`
+ # over a hash-of-int values). Skips non-int tags rather than
+ # raising, matching CRuby's strict-typing behavior only on the
+ # subset spinel handles — broader element types belong to a
+ # follow-up.
+      if mname == "sum"
+        return "sp_PolyArray_sum_int(" + rc + ")"
       end
       if mname == "first"
         return "sp_PolyArray_get(" + rc + ", 0LL)"
@@ -30470,9 +30483,115 @@ class Compiler
     @in_loop = old
   end
 
+  def compile_group_by_each_fused(each_nid, gb_nid)
+    @needs_gc = 1
+    arr_nid = @nd_receiver[gb_nid]
+    arr_type = infer_type(arr_nid)
+    elem_type = elem_type_of_array(arr_type)
+    arr_pfx = array_c_prefix(arr_type)
+
+    bp_g = get_block_param(gb_nid, 0)
+    if bp_g == ""
+      bp_g = "_x"
+    end
+    bp_e0 = get_block_param(each_nid, 0)
+    bp_e1 = get_block_param(each_nid, 1)
+
+    rc = compile_expr_gc_rooted(arr_nid)
+
+    tmp_h = new_temp
+    tmp_o = new_temp
+    tmp_i = new_temp
+    tmp_k = new_temp
+    tmp_a = new_temp
+    tmp_j = new_temp
+
+    emit("  sp_PolyPolyHash *" + tmp_h + " = sp_PolyPolyHash_new();")
+    emit("  SP_GC_ROOT(" + tmp_h + ");")
+    emit("  sp_PolyArray *" + tmp_o + " = sp_PolyArray_new();")
+    emit("  SP_GC_ROOT(" + tmp_o + ");")
+
+ # Phase 1: walk the input array, run the group-by block on each
+ # element, append the element to the per-key accumulator.
+    emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_" + arr_pfx + "_length(" + rc + "); " + tmp_i + "++) {")
+    push_scope
+    declare_var(bp_g, elem_type)
+    emit("    " + c_type(elem_type) + " lv_" + bp_g + " = sp_" + arr_pfx + "_get(" + rc + ", " + tmp_i + ");")
+
+    blk_g = @nd_block[gb_nid]
+    body_g = @nd_body[blk_g]
+    key_expr_unboxed = "0"
+    key_type = "int"
+    if body_g >= 0
+      stmts_g = get_stmts(body_g)
+      if stmts_g.length > 0
+        k = 0
+        while k < stmts_g.length - 1
+          compile_stmt(stmts_g[k])
+          k = k + 1
+        end
+        key_expr_unboxed = compile_expr(stmts_g.last)
+        key_type = infer_type(stmts_g.last)
+      end
+    end
+    key_boxed = box_value_to_poly(key_type, key_expr_unboxed)
+    pop_scope
+
+    emit("    sp_RbVal " + tmp_k + " = " + key_boxed + ";")
+    emit("    sp_PolyArray *" + tmp_a + ";")
+    emit("    if (sp_PolyPolyHash_has_key(" + tmp_h + ", " + tmp_k + ")) {")
+    emit("      " + tmp_a + " = (sp_PolyArray *)sp_PolyPolyHash_get(" + tmp_h + ", " + tmp_k + ").v.p;")
+    emit("    } else {")
+    emit("      " + tmp_a + " = sp_PolyArray_new();")
+    emit("      sp_PolyPolyHash_set(" + tmp_h + ", " + tmp_k + ", sp_box_obj((void *)" + tmp_a + ", SP_BUILTIN_POLY_ARRAY));")
+    emit("      sp_PolyArray_push(" + tmp_o + ", " + tmp_k + ");")
+    emit("    }")
+    emit("    sp_PolyArray_push(" + tmp_a + ", " + box_value_to_poly(elem_type, "lv_" + bp_g) + ");")
+    emit("  }")
+
+ # Phase 2: iterate keys in insertion order, expose the per-key
+ # accumulator to the each-block as a typed sp_PolyArray *.
+    emit("  for (mrb_int " + tmp_j + " = 0; " + tmp_j + " < " + tmp_o + "->len; " + tmp_j + "++) {")
+    push_scope
+    if bp_e0 != ""
+      declare_var(bp_e0, "poly")
+      emit("    sp_RbVal lv_" + bp_e0 + " = sp_PolyArray_get(" + tmp_o + ", " + tmp_j + ");")
+    end
+    if bp_e1 != ""
+      declare_var(bp_e1, "poly_array")
+      emit("    sp_PolyArray *lv_" + bp_e1 + " = (sp_PolyArray *)sp_PolyPolyHash_get(" + tmp_h + ", lv_" + bp_e0 + ").v.p;")
+    end
+
+    blk_e = @nd_block[each_nid]
+    body_e = @nd_body[blk_e]
+    if body_e >= 0
+      stmts_e = get_stmts(body_e)
+      k = 0
+      while k < stmts_e.length
+        compile_stmt(stmts_e[k])
+        k = k + 1
+      end
+    end
+    pop_scope
+    emit("  }")
+  end
+
   def compile_each_block(nid)
     old = @in_loop
     @in_loop = 1
+ # Fuse `<arr>.group_by { ... }.each do |k, rows| ... end`. The
+ # natural codegen for these two calls would produce a Hash with
+ # poly-boxed sp_PolyArray values, which would then leave `rows`
+ # typed as `poly` in the each-body. Fusing into a single emit lets
+ # us type `rows` as `sp_PolyArray *` directly, so the inner block
+ # body can call existing poly_array dispatch arms (`.size`, `.sum`,
+ # `.map { ... }`) without going through poly-recv unbox arms.
+    recv_for_fuse = @nd_receiver[nid]
+    if recv_for_fuse >= 0 && @nd_type[recv_for_fuse] == "CallNode" && @nd_name[recv_for_fuse] == "group_by" && @nd_block[recv_for_fuse] >= 0 && @nd_receiver[recv_for_fuse] >= 0
+      compile_group_by_each_fused(nid, recv_for_fuse)
+      @in_loop = old
+      return
+    end
  # Fuse hash.keys.each → direct order-array loop to avoid intermediate sp_IntArray allocation
     recv_nid = @nd_receiver[nid]
     if recv_nid >= 0 && @nd_type[recv_nid] == "CallNode" && @nd_name[recv_nid] == "keys"
@@ -32408,6 +32527,31 @@ class Compiler
           stmts_p = get_stmts(body_p)
           if stmts_p.length > 0
             block_ret_p = infer_type(stmts_p.last)
+ # `_1[:k]` on a poly param infers to "int" via the generic
+ # poly-dispatch fallback, but the emit returns sp_RbVal
+ # (the hash-variant dispatch boxes results from
+ # `sp_SymIntHash_get` for type-uniformity). An IntArray
+ # accumulator would then take an sp_RbVal push — a hard
+ # type error. Switch to the PolyArray catch-all when the
+ # last stmt is a `[]` call on a poly receiver so the
+ # accumulator matches what compile_expr actually emits.
+            if block_ret_p == "int" || block_ret_p == "bool"
+              last_p = stmts_p.last
+              if @nd_type[last_p] == "CallNode" && @nd_name[last_p] == "[]" && @nd_receiver[last_p] >= 0
+                rcv_p = @nd_receiver[last_p]
+                rcv_is_bp = (@nd_type[rcv_p] == "LocalVariableReadNode" && @nd_name[rcv_p] == bp1)
+                rcv_t_check = infer_type(rcv_p)
+ # `_1[]` on the map block's own param: bp is poly here
+ # (it's the elem of a poly_array recv), but infer_type
+ # hasn't seen the not-yet-pushed scope entry, so the
+ # default "int" answer would let codegen pick an int_array
+ # accumulator that can't take the sp_RbVal push. Forcing
+ # poly here matches the analyzer's parallel heuristic.
+                if rcv_is_bp || rcv_t_check == "poly"
+                  block_ret_p = "poly"
+                end
+              end
+            end
           end
         end
       end
