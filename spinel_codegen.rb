@@ -3891,6 +3891,20 @@ class Compiler
     t
   end
 
+ # Scalar nullable types use a reserved sentinel value rather than
+ # the NULL pointer encoding of `is_nullable_pointer_type`. For int?
+ # the sentinel is SP_INT_NIL (INT64_MIN); future float?/sym?/bool?
+ # variants slot in here as the runtime helpers land. Keeps the two
+ # nullable encodings (NULL-for-pointer / sentinel-for-scalar) on
+ # separate predicates so call-site emit picks the right path.
+  def is_scalar_nullable_type(t)
+    bt = base_type(t)
+    if bt == "int"
+      return is_nullable_type(t)
+    end
+    0
+  end
+
   def is_nullable_pointer_type(t)
  # Pointer types that can represent nil as NULL
     bt = base_type(t)

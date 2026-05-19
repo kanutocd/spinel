@@ -63,6 +63,16 @@
 typedef int64_t mrb_int;
 typedef double mrb_float;
 typedef bool mrb_bool;
+
+/* Sentinel value reserved by the int? (scalar-nullable int) type. An
+   int? slot is bit-compatible with mrb_int; SP_INT_NIL marks the
+   "nil" inhabitant. The chosen pattern is INT64_MIN, which Ruby's
+   Integer would auto-promote to Bignum (#597 limitation), so the
+   reservation lines up with spinel's existing fast-path-only spec.
+   `sp_int_is_nil(v)` is the canonical predicate; treat any int? value
+   produced by runtime helpers as opaque outside this macro. */
+#define SP_INT_NIL ((mrb_int)INT64_MIN)
+#define sp_int_is_nil(v) ((v) == SP_INT_NIL)
 /* sp_sym is defined per-program in emit_sym_runtime, but poly helpers
    below need to reference it by forward declaration. */
 typedef mrb_int sp_sym;
