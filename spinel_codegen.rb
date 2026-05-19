@@ -11218,18 +11218,32 @@ class Compiler
     if t == "LocalVariableReadNode"
       vn_lvr = @nd_name[nid]
       base_lvr = fiber_var_ref(vn_lvr)
- # int-or-nil nil-guard narrow (issue #550): the local is
- # declared poly (e.g. h = s.index(...)) but a preceding
- # `return X if h.nil?` narrowed it to int. The base C ref
- # is the sp_RbVal slot; unbox via .v.i so arithmetic / int
- # consumers see mrb_int instead of the struct. Scoped to
- # the obvious poly->int case for now; obj_<C> narrows over
- # poly locals continue through the dispatch-level paths
- # that already handle them (#493).
+ # Poly local narrowed to a primitive via a preceding guard
+ # (`return X if h.nil?` for int-or-nil — #550; `if x.is_a?(C)`
+ # then-arm body — #612). The base C ref is the sp_RbVal slot;
+ # unbox via the matching union field so a typed callee
+ # (sp_re_escape's `const char *`, arithmetic operators on
+ # int, etc.) reads the unboxed value directly. obj_<C>
+ # narrows over poly locals continue through the dispatch-
+ # level paths that already handle them (#493).
       narrow_lvr = find_var_type(vn_lvr)
       declared_lvr = find_var_declared_type(vn_lvr)
-      if declared_lvr == "poly" && narrow_lvr == "int"
-        return "(" + base_lvr + ").v.i"
+      if declared_lvr == "poly"
+        if narrow_lvr == "int"
+          return "(" + base_lvr + ").v.i"
+        end
+        if narrow_lvr == "string" || narrow_lvr == "mutable_str"
+          return "(" + base_lvr + ").v.s"
+        end
+        if narrow_lvr == "float"
+          return "(" + base_lvr + ").v.f"
+        end
+        if narrow_lvr == "bool"
+          return "(" + base_lvr + ").v.b"
+        end
+        if narrow_lvr == "symbol"
+          return "(sp_sym)(" + base_lvr + ").v.i"
+        end
       end
       return base_lvr
     end
@@ -34966,6 +34980,20 @@ class Compiler
     end
     emit("  if (" + cond + ") {")
     @indent = @indent + 1
+ # Mirror compile_if_stmt's is_a? narrow push so the then-arm of
+ # a tail-position `if x.is_a?(C) ... end` sees `x` as the
+ # narrowed type. Without this, a poly-typed `x` flowing into a
+ # typed callee (sp_re_escape, sp_re_match_p's string arg,
+ # `%s` interpolation, ...) inside the body emits the raw
+ # sp_RbVal and trips a C compile -- the canonical #612 shape.
+ # The narrow is popped after the body so the else / fall-through
+ # emit sees the un-narrowed type.
+    isa_info_cr = is_unless == 0 ? parse_is_a_predicate(@nd_predicate[nid]) : ["", ""]
+    isa_pushed_cr = 0
+    if isa_info_cr[0] != ""
+      push_type_narrow(isa_info_cr[0], isa_info_cr[1])
+      isa_pushed_cr = 1
+    end
     body = @nd_body[nid]
     if body >= 0
       compile_body_return(body, rt)
@@ -34973,6 +35001,9 @@ class Compiler
       if rt != "void"
         emit("  return " + c_return_default(rt) + ";")
       end
+    end
+    if isa_pushed_cr == 1
+      pop_type_narrow
     end
     @indent = @indent - 1
     if is_unless == 1
