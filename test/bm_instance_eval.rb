@@ -127,10 +127,9 @@ puts boot.routes.entries[1]      # POST /ivar
 
 # ---- 9. Ivar receiver in tail position of a class method ----
 # Same lift but the instance_eval call is the method body's last
-# expression. The pre-existing v1 path always emitted the lift in
-# statement form; here it must round-trip through compile_ieval_call_expr
-# (the comma-expression form) so the enclosing method can still
-# return the receiver. Sister-class with a typed return signature.
+# expression. The block's last call (`get("/tail")`) returns the
+# entries array, so the lift's value would flow out; explicitly
+# return @routes to keep `setup` returning the receiver.
 class Configure
   attr_accessor :routes
 
@@ -140,6 +139,7 @@ class Configure
 
   def setup
     @routes.instance_eval { get("/tail") }
+    @routes
   end
 end
 
@@ -171,13 +171,14 @@ puts shared.entries.length  # 1
 puts shared.entries[0]      # GET /param
 
 # ---- 11. Param receiver in tail position ----
-# Same as §10 but the lift is the method body's last expression so
-# the wire_param signature has to match the comma-expression return
-# value. infer_call_type's synthetic-name early case (PR #15
-# follow-up landed in PR #158) handles this once the rewrite fires.
+# Same as §10 but the lift is the method body's last expression.
+# Block's last call (`get("/tail-param")`) returns the entries
+# array; explicitly return `r` to keep wire_param returning the
+# receiver.
 class WireTail
   def wire_param(r)
     r.instance_eval { get("/tail-param") }
+    r
   end
 end
 

@@ -578,9 +578,14 @@ class Compiler
  # instance_eval block hoisting: parallel arrays indexed by synthetic
  # function id N. Each lifted block becomes a file-scope static
  # function `sp_ieval_<N>` that takes a typed `self` parameter.
+ # @ieval_return_types is the inferred ctype of the lifted body's last
+ # expression ("void" when assignment-only); codegen reads it to pick
+ # the lifted function's signature and whether the call site emits a
+ # direct call or the receiver-comma-expr fallback.
     @ieval_counter = 0
     @ieval_class_idxs = []
     @ieval_body_ids = []
+    @ieval_return_types = "".split(",")
 
  # RBS-derived seed lines. Populated by load_rbs_seeds before
  # analyze_phase; consumed by apply_rbs_seeds after collect_all
@@ -2967,19 +2972,25 @@ class Compiler
  # `recv.__sp_ieval_<N>(...)`: the rewritten form of an
  # `recv.instance_eval { ... }` call. v1 only fired on top-level call
  # sites, where the call's value was always discarded — so its return
- # type didn't matter and the warn-fallback "int" was harmless. Now
- # that the rewrite can land inside a class method body whose tail
- # expression IS the instance_eval call, the enclosing method's
- # signature has to match the value the lift actually emits:
- # `compile_ieval_call_expr` returns the receiver via a comma
- # expression, so the type is recv's class. Read the synthetic id's
- # registered class directly from `@ieval_class_idxs` rather than
- # re-inferring recv — by the time this runs (compile-side type
- # iteration), recv's type may have been refined and the registered
- # class is the canonical answer.
+ # `recv.__sp_ieval_<N>(...)` is the rewritten form of an
+ # `recv.instance_eval { ... }` call. compile_ieval_call_expr emits
+ # a direct call to sp_ieval_<N> when the body's last expression has
+ # a non-void inferred type, or the comma-expression form yielding
+ # the receiver when void. Mirror that here: non-void return type
+ # from @ieval_return_types when known, else fall through to the
+ # receiver's registered class (obj_<C>).
     if is_ieval_call_name(mname) == 1
       suffix = mname[11, mname.length - 11]
       n = suffix.to_i
+ # Non-void lifted body: the call's value is the block's last
+ # expression. Void body: the comma-expr fallback yields the
+ # receiver, so the call types as obj_<C>.
+      if n >= 0 && n < @ieval_return_types.length
+        rt = @ieval_return_types[n]
+        if rt != "" && rt != "void"
+          return rt
+        end
+      end
       if n >= 0 && n < @ieval_class_idxs.length
         return "obj_" + @cls_names[@ieval_class_idxs[n]]
       end
@@ -6876,6 +6887,7 @@ class Compiler
  # from analyze get appended to instead of replaced.
     @ieval_class_idxs = []
     @ieval_body_ids = []
+    @ieval_return_types = "".split(",")
  # Widen class-method ptypes through obj-typed receivers before the
  # walk so a method-param receiver (e.g. `def configure(app);
  # app.instance_eval { } end` invoked as `cfg.configure(routes)`)
@@ -7154,6 +7166,10 @@ class Compiler
     @ieval_counter = @ieval_counter + 1
     @ieval_class_idxs.push(ci)
     @ieval_body_ids.push(body_id)
+ # Seed return type as "void"; infer_ieval_body_return_types runs
+ # after the main return-type fixpoint converges and overwrites with
+ # the body's last-expression ctype when non-void.
+    @ieval_return_types.push("void")
  # Mark the call site: the function name doubles as the synthetic id.
  # compile_call_expr / compile_call_stmt recognise the prefix and
  # emit a direct C call to `sp_ieval_<N>`.
@@ -7183,6 +7199,45 @@ class Compiler
       end
       n = n + 1
     end
+  end
+
+ # Last-expression return-type inference for each lifted ieval body.
+ # Runs after the main `infer_all_returns` fixpoint converges so
+ # receiverless calls inside the body see their final return types.
+ # When the body's last expression is assignment-only the result stays
+ # "void" -- compile_ieval_call_expr falls back to the comma-expr form
+ # yielding the receiver so truthy contexts still type-check. Only
+ # caches "simple" ctypes (scalars + obj_<C>); array / hash / poly
+ # bodies stay "void" so they take the comma-expr fallback, matching
+ # the pre-existing receiver-typed signature. Broader coverage belongs
+ # in a follow-up.
+  def infer_ieval_body_return_types
+    n = 0
+    while n < @ieval_class_idxs.length
+      ci = @ieval_class_idxs[n]
+      bid = @ieval_body_ids[n]
+      if bid >= 0
+        @current_class_idx = ci
+        push_scope
+        rt = infer_body_return(bid)
+        if ieval_return_type_is_simple(rt) == 1
+          @ieval_return_types[n] = rt
+        end
+        pop_scope
+        @current_class_idx = -1
+      end
+      n = n + 1
+    end
+  end
+
+  def ieval_return_type_is_simple(rt)
+    if rt == "int" || rt == "bool" || rt == "float" || rt == "string" || rt == "mutable_str" || rt == "nil"
+      return 1
+    end
+    if rt.length > 4 && rt[0, 4] == "obj_"
+      return 1
+    end
+    0
   end
 
   def is_ieval_call_name(mname)
@@ -19871,6 +19926,10 @@ class Compiler
     unify_imeth_override_returns
     infer_all_returns
     unify_imeth_override_returns
+ # Lifted ieval bodies: now that all method return types are stable,
+ # walk each block body once and cache the last-expression ctype per
+ # synthetic id. compile_ieval_call_expr consults the cache.
+    infer_ieval_body_return_types
  # Widen function return types to poly when explicit `return X`
  # and the implicit final-expression return disagree on the
  # value-vs-pointer axis. Runs post-fixpoint so the iterative
@@ -25190,6 +25249,7 @@ class Compiler
     buf = ir_emit_sa(buf, "@poly_param_types", @poly_param_types)
     buf = ir_emit_ia(buf, "@ieval_class_idxs", @ieval_class_idxs)
     buf = ir_emit_ia(buf, "@ieval_body_ids", @ieval_body_ids)
+    buf = ir_emit_sa(buf, "@ieval_return_types", @ieval_return_types)
     buf = ir_emit_ia(buf, "@pre_execution_blocks", @pre_execution_blocks)
     buf = ir_emit_ia(buf, "@post_execution_blocks", @post_execution_blocks)
     buf = ir_emit_sa(buf, "@toplevel_ivar_names", @toplevel_ivar_names)

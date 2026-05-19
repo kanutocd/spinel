@@ -596,9 +596,14 @@ class Compiler
  # instance_eval block hoisting: parallel arrays indexed by synthetic
  # function id N. Each lifted block becomes a file-scope static
  # function `sp_ieval_<N>` that takes a typed `self` parameter.
+ # @ieval_return_types is the inferred ctype of the lifted body's last
+ # expression ("void" when assignment-only); read by
+ # compile_ieval_call_expr to pick direct-call vs receiver-comma-expr
+ # and by emit_ieval_func to size the function signature.
     @ieval_counter = 0
     @ieval_class_idxs = []
     @ieval_body_ids = []
+    @ieval_return_types = "".split(",")
   end
 
  # Backslash-n for C string literals - bootstrap-safe (avoids escape level issues)
@@ -4710,29 +4715,90 @@ class Compiler
     "sp_ieval_" + suffix + "(" + compile_expr(@nd_receiver[nid]) + ")"
   end
 
- # v1 lifts blocks into void-returning functions (Ruby's
- # instance_eval-as-expression value isn't supported yet). When a
- # call appears in expression position, return the recv pointer as a
- # truthy default via a comma expression so callers like
- # `if obj.instance_eval { ... }` still type-check. Real expression
- # support — return the block's last expression — is a v2 follow-up.
+ # Non-void lifted body: the function returns the block's last
+ # expression (CRuby semantics), emit a direct call. Void body
+ # (assignment-only last statement): fall back to the comma-expr
+ # form yielding the receiver so `if obj.instance_eval { @f = 1 }`
+ # and other truthy contexts still type-check.
   def compile_ieval_call_expr(nid)
+    mname = @nd_name[nid]
+    suffix = mname[11, mname.length - 11]
+    n = suffix.to_i
+    is_void = 1
+    if n >= 0 && n < @ieval_return_types.length
+      rt = @ieval_return_types[n]
+      if rt != "" && rt != "void"
+        is_void = 0
+      end
+    end
+    if is_void == 0
+      return compile_ieval_call(nid)
+    end
     "(" + compile_ieval_call(nid) + ", " + compile_expr(@nd_receiver[nid]) + ")"
+  end
+
+ # Map a lifted body's inferred return type to its C signature
+ # spelling. Inlined to keep the analyzer's flow-typing narrow --
+ # routing through c_type widens the result variable into a union
+ # broad enough to cascade-widen unrelated parameters (specifically
+ # Compiler#type_is_pointer's `t`) via the @out_lines push chain.
+  def ieval_sig_ret(t)
+    if t == "" || t == "void"
+      return "void"
+    end
+    if t == "int"
+      return "mrb_int"
+    end
+    if t == "bool"
+      return "mrb_bool"
+    end
+    if t == "float"
+      return "mrb_float"
+    end
+    if t == "string"
+      return "const char *"
+    end
+    if t == "mutable_str"
+      return "sp_String *"
+    end
+    if t == "nil"
+      return "mrb_int"
+    end
+    if t == "poly"
+      return "sp_RbVal"
+    end
+    if t[0, 4] == "obj_"
+      return "sp_" + t[4, t.length - 4] + " *"
+    end
+ # Other narrow shapes (arrays / hashes / etc.) are not currently
+ # reachable as ieval body return types -- their inference returns
+ # one of the cases above, or "void". If a new shape appears here,
+ # extend the table rather than routing through c_type (see the WHY
+ # in this method's docstring).
+    "void"
   end
 
   def emit_ieval_func(n, ci, bid)
     cname = @cls_names[ci]
+    ret_type = "void"
+    if n < @ieval_return_types.length
+      rt = @ieval_return_types[n]
+      if rt != ""
+        ret_type = rt
+      end
+    end
+    sig_ret = ieval_sig_ret(ret_type)
     @current_class_idx = ci
     @current_method_name = "__sp_ieval_" + n.to_s
-    @current_method_return = "void"
+    @current_method_return = ret_type
     @indent = 1
     @in_gc_scope = 0
     @in_yield_method = 0
 
     if @cls_is_value_type[ci] == 1
-      emit_raw("static void sp_ieval_" + n.to_s + "(sp_" + cname + " self) {")
+      emit_raw("static " + sig_ret + " sp_ieval_" + n.to_s + "(sp_" + cname + " self) {")
     else
-      emit_raw("static void sp_ieval_" + n.to_s + "(sp_" + cname + " *self) {")
+      emit_raw("static " + sig_ret + " sp_ieval_" + n.to_s + "(sp_" + cname + " *self) {")
     end
 
     push_scope
@@ -4745,7 +4811,7 @@ class Compiler
           emit("  SP_GC_ROOT(self);")
         end
       end
-      compile_body_return(bid, "void")
+      compile_body_return(bid, ret_type)
     end
     pop_scope
 
@@ -8322,10 +8388,17 @@ class Compiler
     n = 0
     while n < @ieval_class_idxs.length
       icn = @cls_names[@ieval_class_idxs[n]]
+      proto_ret = "void"
+      if n < @ieval_return_types.length
+        rt_ie = @ieval_return_types[n]
+        if rt_ie != "" && rt_ie != "void"
+          proto_ret = ieval_sig_ret(rt_ie)
+        end
+      end
       if @cls_is_value_type[@ieval_class_idxs[n]] == 1
-        emit_raw("static void sp_ieval_" + n.to_s + "(sp_" + icn + " self);")
+        emit_raw("static " + proto_ret + " sp_ieval_" + n.to_s + "(sp_" + icn + " self);")
       else
-        emit_raw("static void sp_ieval_" + n.to_s + "(sp_" + icn + " *self);")
+        emit_raw("static " + proto_ret + " sp_ieval_" + n.to_s + "(sp_" + icn + " *self);")
       end
       n = n + 1
     end
@@ -35074,6 +35147,8 @@ class Compiler
       @lambda_var_ret_types = val
     elsif name == "@multi_const_inits"
       @multi_const_inits = val
+    elsif name == "@ieval_return_types"
+      @ieval_return_types = val
     end
   end
 
