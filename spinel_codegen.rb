@@ -11271,6 +11271,26 @@ class Compiler
  # level paths that already handle them (#493).
       narrow_lvr = find_var_type(vn_lvr)
       declared_lvr = find_var_declared_type(vn_lvr)
+ # Inlined yield-method body: declare_var pushes the renamed
+ # `<name>_y1` local into scope_names, but the LV-read still
+ # carries the original AST name (`content`). compile_if_stmt's
+ # is_a? narrow push uses the AST name too, so find_var_type
+ # picks up the narrow correctly, but find_var_declared_type
+ # falls through to "" because scope_names only has the renamed
+ # entry. Walk the inline rename map and retry under the
+ # renamed name so the unbox arm fires inside the y1
+ # specialization. Issue #624.
+      if declared_lvr == "" && @inline_rename_map_from != nil
+        ki = 0
+        while ki < @inline_rename_map_from.length
+          if @inline_rename_map_from[ki] == vn_lvr
+            declared_lvr = find_var_declared_type(@inline_rename_map_to[ki])
+            ki = @inline_rename_map_from.length
+          else
+            ki = ki + 1
+          end
+        end
+      end
       if declared_lvr == "poly"
         if narrow_lvr == "int"
           return "(" + base_lvr + ").v.i"
@@ -33929,6 +33949,18 @@ class Compiler
       cond = compile_expr_remap(@nd_predicate[nid], map_from, map_to)
       emit("  if (" + cond + ") {")
       @indent = @indent + 1
+ # Mirror compile_if_stmt's is_a? narrow push so the y1-inlined
+ # then-arm of `if x.is_a?(C) ... end` sees `x` as the narrowed
+ # type. Without this, the LV-read inside the inlined body
+ # emits the raw poly local where the typed callee
+ # (sp_re_escape, sp_re_match_p, %s interpolation) wants the
+ # unboxed primitive. Issue #624.
+      isa_info_wb = parse_is_a_predicate(@nd_predicate[nid])
+      isa_pushed_wb = 0
+      if isa_info_wb[0] != ""
+        push_type_narrow(isa_info_wb[0], isa_info_wb[1])
+        isa_pushed_wb = 1
+      end
       body = @nd_body[nid]
       if body >= 0
         stmts = get_stmts(body)
@@ -33937,6 +33969,9 @@ class Compiler
           compile_stmt_with_block(stmts[sk], blk, bp_names, map_from, map_to)
           sk = sk + 1
         end
+      end
+      if isa_pushed_wb == 1
+        pop_type_narrow
       end
       @indent = @indent - 1
       sub = @nd_subsequent[nid]
@@ -34051,6 +34086,35 @@ class Compiler
     t = @nd_type[nid]
     if t == "LocalVariableReadNode"
       rname = remap_local(@nd_name[nid], map_from, map_to)
+ # Mirror compile_expr's LocalVariableReadNode unbox arm so a
+ # poly-typed inlined local narrowed via `if x.is_a?(C) ... end`
+ # in the source body emits the matching `.v.s` / `.v.i` / ...
+ # unbox inside the y1 specialization. Without this, the inlined
+ # copy lands `lv_content_y1` raw where `const char *` is expected
+ # (sp_re_escape / sp_re_match_p / interpolation) and trips a C
+ # compile. Issue #624. The narrow stack uses the original AST
+ # name; the declared-type lookup needs the renamed local so it
+ # sees the y1 scope's poly slot.
+      orig_name = @nd_name[nid]
+      narrow_t = find_var_type(orig_name)
+      declared_t = find_var_declared_type(rname)
+      if declared_t == "poly"
+        if narrow_t == "int"
+          return "(lv_" + rname + ").v.i"
+        end
+        if narrow_t == "string" || narrow_t == "mutable_str"
+          return "(lv_" + rname + ").v.s"
+        end
+        if narrow_t == "float"
+          return "(lv_" + rname + ").v.f"
+        end
+        if narrow_t == "bool"
+          return "(lv_" + rname + ").v.b"
+        end
+        if narrow_t == "symbol"
+          return "(sp_sym)(lv_" + rname + ").v.i"
+        end
+      end
       return "lv_" + rname
     end
     if t == "InstanceVariableReadNode"
