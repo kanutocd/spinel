@@ -4915,6 +4915,28 @@ class Compiler
     if mname == "first" || mname == "last"
       if recv >= 0
         rt = infer_type(recv)
+ # Literal `[nil, ...].first` / `.last`: every element is nil so
+ # the result is nil. Without this, `.first` returns "int" via
+ # the int_array fallback and `.nil?` folds to false (the
+ # element-tag is lost the moment a nil literal lands in an
+ # int_array slot). Same shape as the codegen-side peephole.
+ # Issue #619 puzzle 5.
+        if @nd_type[recv] == "ArrayNode"
+          recv_elems = parse_id_list(@nd_elements[recv])
+          if recv_elems.length > 0
+            all_nil = 1
+            re_k = 0
+            while re_k < recv_elems.length
+              if @nd_type[recv_elems[re_k]] != "NilNode"
+                all_nil = 0
+              end
+              re_k = re_k + 1
+            end
+            if all_nil == 1
+              return "nil"
+            end
+          end
+        end
  # With arg → returns array of same type
         if @nd_arguments[nid] >= 0
           aargs = get_args(@nd_arguments[nid])
