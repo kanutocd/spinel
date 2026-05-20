@@ -11961,6 +11961,14 @@ class Compiler
                         @needs_class_table = 1
                         fmt = fmt + "%s"
                         arg_exprs.push("sp_class_to_s(" + compile_expr(inner) + ")")
+                      elsif it == "symbol"
+ # Symbol values carry the sp_sym int id;
+ # interpolation must render the registered
+ # name, mirroring Symbol#to_s. Without this
+ # arm the default int path printed the raw
+ # id. Issue #633.
+                        fmt = fmt + "%s"
+                        arg_exprs.push("sp_sym_to_s(" + compile_expr(inner) + ")")
                       else
                         fmt = fmt + "%lld"
                         arg_exprs.push("(long long)" + compile_expr(inner))
