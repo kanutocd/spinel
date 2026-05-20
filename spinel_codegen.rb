@@ -16059,6 +16059,12 @@ class Compiler
           if @nd_type[a[0]] == "NilNode"
             return "sp_str_split_ws(" + rc + ")"
           end
+ # Two-arg split(sep, limit) -- positive limit caps the result at
+ # that many elements with the last one holding the unsplit
+ # remainder. Issue #619 puzzle 2.
+          if a.length >= 2
+            return "sp_str_split_limit(" + rc + ", " + compile_expr(a[0]) + ", " + compile_expr_as_int(a[1]) + ")"
+          end
           return "sp_str_split(" + rc + ", " + compile_expr(a[0]) + ")"
         end
       end
