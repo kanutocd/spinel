@@ -1808,6 +1808,30 @@ class Compiler
     end
   end
 
+ # Wrap a narrower-hash RHS C expression to match a wider *_poly_hash
+ # slot. The set_var_type sticky guard above keeps the slot's tracked
+ # type at the wider variant; this helper produces the matching
+ # runtime conversion at the assignment site. Without it, the LV-write
+ # emit produces `lv_merged = sp_StrStrHash_dup(...)` against an
+ # `sp_StrPolyHash *` slot — different struct layouts (vals[] of
+ # `const char **` vs `sp_RbVal *`), so reads through the slot return
+ # garbage even when -Werror is off. Issue #614.
+  def widen_hash_assign(val, vt, rhs_t)
+    if vt == "str_poly_hash" && rhs_t == "str_str_hash"
+      @needs_str_poly_hash = 1
+      @needs_str_str_hash = 1
+      @needs_rb_value = 1
+      return "sp_StrPolyHash_from_str_str_hash(" + val + ")"
+    end
+    if vt == "str_poly_hash" && rhs_t == "str_int_hash"
+      @needs_str_poly_hash = 1
+      @needs_str_int_hash = 1
+      @needs_rb_value = 1
+      return "sp_StrPolyHash_from_str_int_hash(" + val + ")"
+    end
+    val
+  end
+
  # ---- Class/Method lookup (all parallel arrays) ----
   def find_regexp_index(nid)
     if @nd_type[nid] == "RegularExpressionNode"
@@ -24653,6 +24677,9 @@ class Compiler
         emit("  " + vref + " = NULL;")
       else
         val = compile_expr(@nd_expression[nid])
+ # Wrap narrower hash RHS to match a wider *_poly_hash slot.
+ # See widen_hash_assign / issue #614.
+        val = widen_hash_assign(val, vt, rhs_t)
  # Box scalar RHS into poly when the local slot is poly. Without
  # this, `lv = sp_IntArray_get(...)` (int RHS) into a sp_RbVal
  # slot fails C compile. Mirrors the InstanceVariableWriteNode
