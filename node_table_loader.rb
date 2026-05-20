@@ -32,12 +32,10 @@ class NodeTableLoader
       end
       i = i + 1
     end
- # Allocate nodes
-    j = 0
-    while j <= max_id
-      @table.alloc_node
-      j = j + 1
-    end
+ # Allocate all node slots in one bulk presize pass instead of
+ # max_id+1 separate alloc_node calls. The bulk path avoids ~46 * N
+ # Array#push operations (and their amortized realloc events).
+    @table.alloc_nodes(max_id + 1)
  # Pass 2: populate fields
     i = 0
     while i < lines.length

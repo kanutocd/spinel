@@ -396,4 +396,387 @@ class Compiler
     1
   end
 
+ # ---- AST id-list cache ----
+
+ # Parse comma-sep node IDs into IntArray. Manually walks bytes to avoid
+ # allocating the intermediate StrArray + substrings that `String#split`
+ # would produce -- this is called ~100 K times during bootstrap.
+ # Results are cached by input string: AST fields are immutable once
+ # parsed, so the same IntArray can be shared across callers. Callers
+ # must treat the result as read-only.
+  def parse_id_list(s)
+    if @parse_id_cache.key?(s)
+      return @parse_id_pool[@parse_id_cache[s]]
+    end
+    result = []
+    if s != ""
+      bs = s.bytes
+      i = 0
+      n = bs.length
+      num = 0
+      while i < n
+        b = bs[i]
+        if b == 44  # ','
+          result.push(num)
+          num = 0
+        else
+          num = num * 10 + (b - 48)
+        end
+        i = i + 1
+      end
+      result.push(num)
+    end
+    @parse_id_cache[s] = @parse_id_pool.length
+    @parse_id_pool.push(result)
+    result
+  end
+
+ # ---- AST node table storage (parallel arrays by node ID) ----
+ # The 46 @nd_* arrays are initialized in each host's `initialize`
+ # and operated on here. Fields are listed explicitly (not via
+ # ivar reflection) because the spinel-self type inferencer reads
+ # the literal `@nd_X.push(0)` vs `@nd_X.push("")` shape to pick
+ # IntArray vs StrArray storage per slot.
+
+  def alloc_node
+    nid = @nd_count
+    @nd_type.push("")
+    @nd_name.push("")
+    @nd_value.push(0)
+    @nd_content.push("")
+    @nd_flags.push(0)
+    @nd_operator.push("")
+    @nd_binop.push("")
+    @nd_callop.push("")
+    @nd_unescaped.push("")
+    @nd_receiver.push(-1)
+    @nd_arguments.push(-1)
+    @nd_body.push(-1)
+    @nd_block.push(-1)
+    @nd_parameters.push(-1)
+    @nd_predicate.push(-1)
+    @nd_subsequent.push(-1)
+    @nd_else_clause.push(-1)
+    @nd_left.push(-1)
+    @nd_right.push(-1)
+    @nd_constant_path.push(-1)
+    @nd_superclass.push(-1)
+    @nd_rest.push(-1)
+    @nd_keyword_rest.push(-1)
+    @nd_rescue_clause.push(-1)
+    @nd_ensure_clause.push(-1)
+    @nd_expression.push(-1)
+    @nd_target.push(-1)
+    @nd_pattern.push(-1)
+    @nd_key.push(-1)
+    @nd_reference.push(-1)
+    @nd_collection.push(-1)
+    @nd_stmts.push("")
+    @nd_args.push("")
+    @nd_requireds.push("")
+    @nd_optionals.push("")
+    @nd_keywords.push("")
+    @nd_elements.push("")
+    @nd_parts.push("")
+    @nd_conditions.push("")
+    @nd_exceptions.push("")
+    @nd_targets.push("")
+    @nd_rights.push("")
+    @nd_posts.push("")
+    @nd_new_name.push(-1)
+    @nd_old_name.push(-1)
+    @nd_names.push("")
+    @nd_inferred_type.push("")
+    @nd_scope_names.push("")
+    @nd_scope_types.push("")
+    @nd_count = @nd_count + 1
+    nid
+  end
+
+ # Bulk presize variant called by NodeTableLoader after Pass 1
+ # computes max node id. Allocates each parallel array to size `n`
+ # with its default fill value in one shot, avoiding ~46 * n
+ # individual Array#push calls (and the amortized realloc events
+ # that come with them). Field setters then write into preallocated
+ # slots by index.
+  def alloc_nodes(n)
+    @nd_type = Array.new(n, "")
+    @nd_name = Array.new(n, "")
+    @nd_value = Array.new(n, 0)
+    @nd_content = Array.new(n, "")
+    @nd_flags = Array.new(n, 0)
+    @nd_operator = Array.new(n, "")
+    @nd_binop = Array.new(n, "")
+    @nd_callop = Array.new(n, "")
+    @nd_unescaped = Array.new(n, "")
+    @nd_receiver = Array.new(n, -1)
+    @nd_arguments = Array.new(n, -1)
+    @nd_body = Array.new(n, -1)
+    @nd_block = Array.new(n, -1)
+    @nd_parameters = Array.new(n, -1)
+    @nd_predicate = Array.new(n, -1)
+    @nd_subsequent = Array.new(n, -1)
+    @nd_else_clause = Array.new(n, -1)
+    @nd_left = Array.new(n, -1)
+    @nd_right = Array.new(n, -1)
+    @nd_constant_path = Array.new(n, -1)
+    @nd_superclass = Array.new(n, -1)
+    @nd_rest = Array.new(n, -1)
+    @nd_keyword_rest = Array.new(n, -1)
+    @nd_rescue_clause = Array.new(n, -1)
+    @nd_ensure_clause = Array.new(n, -1)
+    @nd_expression = Array.new(n, -1)
+    @nd_target = Array.new(n, -1)
+    @nd_pattern = Array.new(n, -1)
+    @nd_key = Array.new(n, -1)
+    @nd_reference = Array.new(n, -1)
+    @nd_collection = Array.new(n, -1)
+    @nd_stmts = Array.new(n, "")
+    @nd_args = Array.new(n, "")
+    @nd_requireds = Array.new(n, "")
+    @nd_optionals = Array.new(n, "")
+    @nd_keywords = Array.new(n, "")
+    @nd_elements = Array.new(n, "")
+    @nd_parts = Array.new(n, "")
+    @nd_conditions = Array.new(n, "")
+    @nd_exceptions = Array.new(n, "")
+    @nd_targets = Array.new(n, "")
+    @nd_rights = Array.new(n, "")
+    @nd_posts = Array.new(n, "")
+    @nd_new_name = Array.new(n, -1)
+    @nd_old_name = Array.new(n, -1)
+    @nd_names = Array.new(n, "")
+    @nd_inferred_type = Array.new(n, "")
+    @nd_scope_names = Array.new(n, "")
+    @nd_scope_types = Array.new(n, "")
+    @nd_count = n
+  end
+
+  def read_text_ast(data)
+    loader = NodeTableLoader.new(self)
+    loader.read_text_ast(data)
+  end
+
+  def set_root_id(root_id)
+    @root_id = root_id
+  end
+
+  def set_node_type(nid, node_type)
+    @nd_type[nid] = node_type
+  end
+
+  def set_node_content(nid, content)
+    @nd_content[nid] = content
+  end
+
+ # `if`-chain (not `case`) — `case` over many string literals
+ # measured ~58% slower on the codegen self-compile workload.
+  def set_string_field(nid, field, val)
+    if field == "name"
+      @nd_name[nid] = val
+    end
+    if field == "content"
+      @nd_content[nid] = val
+    end
+    if field == "value"
+      @nd_content[nid] = val
+    end
+    if field == "operator"
+      @nd_operator[nid] = val
+    end
+    if field == "binary_operator"
+      @nd_binop[nid] = val
+    end
+    if field == "call_operator"
+      @nd_callop[nid] = val
+    end
+    if field == "unescaped"
+      @nd_unescaped[nid] = val
+    end
+    if field == "kind"
+ # UnsupportedNode carries the Prism node-type name here so
+ # codegen can surface a precise compile error.
+      @nd_content[nid] = val
+    end
+  end
+
+  def set_int_field(nid, field, val)
+    if field == "value"
+      @nd_value[nid] = val
+    end
+    if field == "flags"
+      @nd_flags[nid] = val
+    end
+    if field == "number"
+      @nd_value[nid] = val
+    end
+    if field == "maximum"
+      @nd_value[nid] = val
+    end
+    if field == "start_line"
+      @nd_value[nid] = val
+    end
+    if field == "source_line"
+ # UnsupportedNode carries the source line so codegen can cite
+ # location in the compile error.
+      @nd_value[nid] = val
+    end
+  end
+
+  def set_ref_field(nid, field, ref_id)
+    if field == "receiver"
+      @nd_receiver[nid] = ref_id
+    end
+    if field == "arguments"
+      @nd_arguments[nid] = ref_id
+    end
+    if field == "body"
+      @nd_body[nid] = ref_id
+    end
+    if field == "block"
+      @nd_block[nid] = ref_id
+    end
+    if field == "parameters"
+      @nd_parameters[nid] = ref_id
+    end
+    if field == "predicate"
+      @nd_predicate[nid] = ref_id
+    end
+    if field == "subsequent"
+      @nd_subsequent[nid] = ref_id
+    end
+    if field == "else_clause"
+      @nd_else_clause[nid] = ref_id
+    end
+    if field == "left"
+      @nd_left[nid] = ref_id
+    end
+    if field == "right"
+      @nd_right[nid] = ref_id
+    end
+    if field == "constant_path"
+      @nd_constant_path[nid] = ref_id
+    end
+    if field == "superclass"
+      @nd_superclass[nid] = ref_id
+    end
+    if field == "rest"
+      @nd_rest[nid] = ref_id
+    end
+    if field == "keyword_rest"
+      @nd_keyword_rest[nid] = ref_id
+    end
+    if field == "rescue_clause"
+      @nd_rescue_clause[nid] = ref_id
+    end
+    if field == "ensure_clause"
+      @nd_ensure_clause[nid] = ref_id
+    end
+    if field == "expression"
+      @nd_expression[nid] = ref_id
+    end
+    if field == "target"
+      @nd_target[nid] = ref_id
+    end
+    if field == "pattern"
+      @nd_pattern[nid] = ref_id
+    end
+    if field == "key"
+      @nd_key[nid] = ref_id
+    end
+    if field == "reference"
+      @nd_reference[nid] = ref_id
+    end
+    if field == "collection"
+      @nd_collection[nid] = ref_id
+    end
+    if field == "statements"
+      @nd_body[nid] = ref_id
+    end
+    if field == "value"
+      @nd_expression[nid] = ref_id
+    end
+    if field == "index"
+      @nd_target[nid] = ref_id
+    end
+    if field == "parent"
+      @nd_receiver[nid] = ref_id
+    end
+    if field == "rescue_expression"
+      @nd_else_clause[nid] = ref_id
+    end
+    if field == "call"
+      @nd_receiver[nid] = ref_id
+    end
+    if field == "new_name"
+ # AliasMethodNode / AliasGlobalVariableNode -- the new-name slot
+ # (a SymbolNode for methods, GlobalVariableReadNode for globals).
+      @nd_new_name[nid] = ref_id
+    end
+    if field == "old_name"
+      @nd_old_name[nid] = ref_id
+    end
+  end
+
+  def set_array_field(nid, field, ids_str)
+    if field == "body"
+      @nd_stmts[nid] = ids_str
+    end
+    if field == "arguments"
+      @nd_args[nid] = ids_str
+    end
+    if field == "requireds"
+      @nd_requireds[nid] = ids_str
+    end
+    if field == "optionals"
+      @nd_optionals[nid] = ids_str
+    end
+    if field == "keywords"
+      @nd_keywords[nid] = ids_str
+    end
+    if field == "elements"
+      @nd_elements[nid] = ids_str
+    end
+    if field == "parts"
+      @nd_parts[nid] = ids_str
+    end
+    if field == "conditions"
+      @nd_conditions[nid] = ids_str
+    end
+    if field == "exceptions"
+      @nd_exceptions[nid] = ids_str
+    end
+    if field == "lefts"
+      @nd_targets[nid] = ids_str
+    end
+    if field == "targets"
+      @nd_targets[nid] = ids_str
+    end
+    if field == "rights"
+      @nd_rights[nid] = ids_str
+    end
+    if field == "posts"
+      @nd_posts[nid] = ids_str
+    end
+    if field == "names"
+ # UndefNode -- list of SymbolNode names to undef.
+      @nd_names[nid] = ids_str
+    end
+  end
+
+ # ---- Convenience: get stmts of a body node ----
+  def get_stmts(nid)
+    if nid < 0
+      return []
+    end
+ # If it's a StatementsNode, return its stmts
+    if @nd_type[nid] == "StatementsNode"
+      return parse_id_list(@nd_stmts[nid])
+    end
+ # Otherwise return single-element array
+    result = []
+    result.push(nid)
+    result
+  end
+
 end
