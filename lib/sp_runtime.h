@@ -178,9 +178,14 @@ static inline mrb_bool sp_int_mul_overflow_p(mrb_int a, mrb_int b, mrb_int *r) {
 #undef SP_INT_OVERFLOW_MASK
 #endif
 
-#ifdef SP_NO_OVERFLOW_CHECK
-/* User opted out of overflow detection at compile time. Bare ops
-   with no helper call, no branch, same risk as pre-#638 spinel. */
+/* Three modes selected by `--int-overflow=raise|wrap|promote` on the
+   spinel wrapper, which passes -DSP_INT_OVERFLOW_MODE_{RAISE,WRAP,
+   PROMOTE}. WRAP skips the check entirely. PROMOTE still raises at
+   this layer -- the actual promotion semantics is implemented in the
+   analyzer by rewriting every int local as bigint, so the helpers
+   below are only reached on the few residual sites that stay int
+   even in promote mode (FFI argument coercion, etc.). */
+#ifdef SP_INT_OVERFLOW_MODE_WRAP
 #  define sp_int_add(a, b) ((a) + (b))
 #  define sp_int_sub(a, b) ((a) - (b))
 #  define sp_int_mul(a, b) ((a) * (b))

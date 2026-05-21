@@ -536,7 +536,7 @@ optcarrot: spinel_parse$(EXE) $(SP_RT_LIB) spinel_analyze$(EXE) spinel_codegen$(
 	  git clone --depth=1 --branch=$(OPTCARROT_BRANCH) $(OPTCARROT_REPO) $(OPTCARROT_DIR); \
 	fi
 	@ruby $(OPTCARROT_DIR)/tools/pack-for-spinel.rb > build/optcarrot-single.rb
-	@./spinel build/optcarrot-single.rb -o build/optcarrot-single
+	@./spinel --int-overflow=wrap build/optcarrot-single.rb -o build/optcarrot-single
 	@out=$$($(TIMEOUT60) ./build/optcarrot-single 2>&1); \
 	echo "$$out"; \
 	if echo "$$out" | grep -qE "^fps: [0-9.]+$$" && echo "$$out" | grep -q "^checksum: 59662$$"; then \

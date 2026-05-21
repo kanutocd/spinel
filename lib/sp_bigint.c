@@ -5377,8 +5377,16 @@ int64_t sp_bigint_to_int(sp_Bigint *b) {
 const char *sp_bigint_to_s(sp_Bigint *b) {
   sp_bigint_init_ctx();
   mpz_t *z = &b->mpz;
-  /* Small number fast path */
-  if (z->sz <= 2) {
+  /* Small number fast path. Two limbs (DIG_SIZE=32) hold up to 64
+     unsigned bits, so the int64 cast can wrap for magnitudes in
+     [INT64_MAX+1, UINT64_MAX]. Skip the fast path when the high
+     limb's top bit is set -- that value can't round-trip through
+     sp_bigint_to_int's int64 reassembly. Fall through to mpz_get_str
+     instead. (Before this guard, `1e19 = 10_000_000_000_000_000_000`
+     printed as `-8446744073709551616` -- the wrap of 1e19 mod 2^64
+     reinterpreted as signed int64. Surface for promote-mode runs
+     past 2^63.) */
+  if (z->sz <= 1 || (z->sz == 2 && (z->p[1] >> (DIG_SIZE - 1)) == 0)) {
     int64_t v = sp_bigint_to_int(b);
     char *s = (char*)malloc(24);
     snprintf(s, 24, "%lld", (long long)v);

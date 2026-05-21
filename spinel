@@ -56,7 +56,7 @@ EVAL_USED=0
 EVAL_TMP=""
 RBS_DIR=""
 SEED_TMP=""
-OVERFLOW_CHECK=1
+INT_OVERFLOW="raise"
 
 # Parse spinel-side flags. In `-E` (run) mode, the first positional
 # `.rb` arg marks the boundary between spinel flags and the script's
@@ -71,7 +71,8 @@ while [ $# -gt 0 ]; do
     --cc=*)     CC_CMD="${1#--cc=}"; shift ;;
     --rbs=*)    RBS_DIR="${1#--rbs=}"; shift ;;
     --rbs)      shift; RBS_DIR="$1"; shift ;;
-    --no-overflow-check) OVERFLOW_CHECK=0; shift ;;
+    --int-overflow=*) INT_OVERFLOW="${1#--int-overflow=}"; shift ;;
+    --int-overflow)   shift; INT_OVERFLOW="$1"; shift ;;
     -o)         shift; OUTPUT="$1"; shift ;;
     -O)         shift; OPT_LEVEL="$1"; shift ;;
     -e)         shift
@@ -152,7 +153,10 @@ if [ -z "$SOURCE" ]; then
   echo "  --cc=CMD    C compiler (default: cc)" >&2
   echo "  -e STR      Inline Ruby source (repeatable; joined with newlines)" >&2
   echo "  --rbs DIR   Seed analyzer with RBS signatures from DIR (advisory)" >&2
-  echo "  --no-overflow-check  Skip int +/-/* overflow checks (faster, silent wrap)" >&2
+  echo "  --int-overflow=MODE  Int +/-/* overflow handling (default: raise)" >&2
+  echo "              raise   raise RangeError on overflow (CRuby-incompatible but safe)" >&2
+  echo "              wrap    silent two's-complement wrap (fastest, no check)" >&2
+  echo "              promote escalate to arbitrary-precision Integer (CRuby-compatible)" >&2
   exit 1
 fi
 
@@ -204,7 +208,11 @@ if [ -n "$RBS_DIR" ] && [ -x "$RBS_EXTRACT_BIN" ] && [ -d "$RBS_DIR" ]; then
   fi
 fi
 
-# Step 2: Analyze (whole-program type inference; emits .ir)
+# Step 2: Analyze (whole-program type inference; emits .ir).
+# Export the int-overflow mode so analyze / codegen can rewrite all
+# int locals as bigint when mode == promote. Raise / wrap modes
+# only care about the cc-time preprocessor switch added below.
+export SPINEL_INT_OVERFLOW="$INT_OVERFLOW"
 if [ -x "$ANALYZE_BIN" ]; then
   "$ANALYZE_BIN" "$AST_TMP" "$IR_TMP" $SEED_TMP
 else
@@ -286,9 +294,12 @@ case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) EXTRA_FLAGS="$EXTRA_FLAGS -Wl,--stack,67108864" ;;
 esac
 
-if [ "$OVERFLOW_CHECK" -eq 0 ]; then
-  EXTRA_FLAGS="$EXTRA_FLAGS -DSP_NO_OVERFLOW_CHECK"
-fi
+case "$INT_OVERFLOW" in
+  raise)   EXTRA_FLAGS="$EXTRA_FLAGS -DSP_INT_OVERFLOW_MODE_RAISE" ;;
+  wrap)    EXTRA_FLAGS="$EXTRA_FLAGS -DSP_INT_OVERFLOW_MODE_WRAP" ;;
+  promote) EXTRA_FLAGS="$EXTRA_FLAGS -DSP_INT_OVERFLOW_MODE_PROMOTE" ;;
+  *) echo "spinel: --int-overflow expects raise|wrap|promote, got '$INT_OVERFLOW'" >&2; exit 2 ;;
+esac
 $CC_CMD -O${OPT_LEVEL} -Wno-all -ffunction-sections -fdata-sections $INCLUDE_FLAGS $FFI_CFLAGS "$C_FILE" -lm $EXTRA_FLAGS $FFI_LINKS $GC_FLAG -o "$BIN_FILE"
 if [ $? -ne 0 ]; then
   echo "spinel: C compilation failed" >&2

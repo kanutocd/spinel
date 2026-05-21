@@ -522,6 +522,12 @@ class Compiler
  # Fiber support
     @needs_fiber = 0
     @needs_bigint = 0
+ # `--int-overflow=raise|wrap|promote` selected via the spinel wrapper.
+ # The wrapper exports SPINEL_INT_OVERFLOW before invoking analyze/
+ # codegen so the rewrite of int → bigint locals (in promote mode)
+ # happens at analyze time. Raise / wrap need no analyzer change --
+ # they're cc-time preprocessor switches in sp_runtime.h.
+    @int_overflow_mode = ENV["SPINEL_INT_OVERFLOW"] || "raise"
     @fiber_counter = 0
     @fiber_funcs = ""
     @in_fiber_body = 0
@@ -27087,6 +27093,25 @@ class Compiler
  # Bigint promotion: vars with `*=` / `x = x * y` in while loops.
     if do_bigint_promote == 1
       detect_bigint_vars(stmts, lnames, ltypes)
+ # `--int-overflow=promote` widens the pattern detector to "every
+ # int local". The existing `detect_bigint_vars` only catches
+ # loop-multiplication and similar canonical shapes; promote mode
+ # treats any int local as a candidate so arithmetic that
+ # overflows in a non-multiplicative shape (linear sum chain,
+ # `Integer#pow`, etc.) still escapes mrb_int width via the
+ # bigint codegen path. Locals that genuinely fit in mrb_int pay
+ # the boxing cost -- the trade-off matz signed off on by
+ # picking `promote` over `raise` / `wrap`.
+      if @int_overflow_mode == "promote"
+        j = 0
+        while j < lnames.length
+          if ltypes[j] == "int"
+            ltypes[j] = "bigint"
+            @needs_bigint = 1
+          end
+          j = j + 1
+        end
+      end
       j = 0
       while j < lnames.length
         if ltypes[j] == "bigint"
