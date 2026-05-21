@@ -24792,8 +24792,15 @@ class Compiler
  # there (e.g. inside a class-method that pre-pass missed) we
  # register defensively.
       qname = cvar_qname(@current_class_idx, @nd_name[nid])
-      val = compile_expr(@nd_expression[nid])
-      val_t = infer_type(@nd_expression[nid])
+      ci_cv_pre = find_cvar_idx(qname)
+      cv_slot_t_pre = ci_cv_pre >= 0 ? @cvar_types[ci_cv_pre] : ""
+      if cv_slot_t_pre == "" || cv_slot_t_pre == ""
+        val = compile_expr(@nd_expression[nid])
+        val_t = infer_type(@nd_expression[nid])
+      else
+        val = compile_expr_for_expected_type(@nd_expression[nid], cv_slot_t_pre)
+        val_t = cv_slot_t_pre
+      end
       register_cvar(qname, val_t)
       emit("  cvar_" + qname + " = " + val + ";")
       return
