@@ -251,6 +251,19 @@ class Compiler
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
     @cls_cmeth_defaults = "".split(",")
+ # RBS shadow tables for method ptypes / returns (#626 sub-issue 2
+ # phase 2). Hash-keyed lookups -- RBS info is sparse compared to
+ # the dense per-class method tables, so we don't bother mirroring
+ # the parallel-array layout. Key format:
+ #   class methods: "<ci>|<midx>"   (instance) / "<ci>|<cmidx>"  (class)
+ #   toplevel methods: "<mi>"
+ # Value: the RBS-declared type string. "" or absent = no pin.
+    @cls_meth_rbs_ptypes = {}
+    @cls_meth_rbs_returns = {}
+    @cls_cmeth_rbs_ptypes = {}
+    @cls_cmeth_rbs_returns = {}
+    @meth_rbs_ptypes = {}
+    @meth_rbs_returns = {}
  # Per-(class, cmeth) local scope tables. @nd_scope_names is
  # keyed by AST body id only; an inherited class method's body
  # is shared across subclasses, so the per-bid table gets
@@ -20375,15 +20388,100 @@ class Compiler
     true
   end
 
+ # Method-level RBS arbitration (#626 sub-issue 2 phase 2). Same
+ # confidence model as the ivar pass: trust RBS silently for params
+ # / returns that inference widened off the pin (cross-class call-
+ # site signal mixing, body-driven widening, etc). The "definite
+ # conflict" detection for methods is harder than for ivars
+ # (there's no per-param init_definite flag), so we report a
+ # warning rather than erroring -- the user gets told there's a
+ # disagreement and that RBS won, and can fix the source or the
+ # RBS as needed. Restores the RBS-declared type as the final
+ # inferred type either way.
+  def arbitrate_rbs_vs_inferred_methods
+ # Class instance methods.
+    @cls_meth_rbs_ptypes.each_pair { |k, rbs_pt|
+      parts = k.split("|")
+      ci = parts[0].to_i
+      midx = parts[1].to_i
+      if ci < 0 || ci >= @cls_meth_ptypes.length
+        next
+      end
+      all_pt = @cls_meth_ptypes[ci].split("|")
+      if midx < all_pt.length && all_pt[midx] != rbs_pt
+        all_pt[midx] = rbs_pt
+        @cls_meth_ptypes[ci] = all_pt.join("|")
+        @cls_meth_ptypes_version = @cls_meth_ptypes_version + 1
+      end
+    }
+    @cls_meth_rbs_returns.each_pair { |k, rbs_ret|
+      parts = k.split("|")
+      ci = parts[0].to_i
+      midx = parts[1].to_i
+      if ci < 0 || ci >= @cls_meth_returns.length
+        next
+      end
+      rets = @cls_meth_returns[ci].split(";")
+      if midx < rets.length && rets[midx] != rbs_ret
+        rets[midx] = rbs_ret
+        @cls_meth_returns[ci] = rets.join(";")
+        @cls_meth_return_cache = {}
+      end
+    }
+ # Class methods (cmeth).
+    @cls_cmeth_rbs_ptypes.each_pair { |k, rbs_pt|
+      parts = k.split("|")
+      ci = parts[0].to_i
+      midx = parts[1].to_i
+      if ci < 0 || ci >= @cls_cmeth_ptypes.length
+        next
+      end
+      all_pt = @cls_cmeth_ptypes[ci].split("|")
+      if midx < all_pt.length && all_pt[midx] != rbs_pt
+        all_pt[midx] = rbs_pt
+        @cls_cmeth_ptypes[ci] = all_pt.join("|")
+        @cls_cmeth_ptypes_version = @cls_cmeth_ptypes_version + 1
+      end
+    }
+    @cls_cmeth_rbs_returns.each_pair { |k, rbs_ret|
+      parts = k.split("|")
+      ci = parts[0].to_i
+      midx = parts[1].to_i
+      if ci < 0 || ci >= @cls_cmeth_returns.length
+        next
+      end
+      rets = @cls_cmeth_returns[ci].split(";")
+      if midx < rets.length && rets[midx] != rbs_ret
+        rets[midx] = rbs_ret
+        @cls_cmeth_returns[ci] = rets.join(";")
+      end
+    }
+ # Top-level / module class methods (stored in @meth_*).
+    @meth_rbs_ptypes.each_pair { |k, rbs_pt|
+      mi = k.to_i
+      if mi >= 0 && mi < @meth_param_types.length && @meth_param_types[mi] != rbs_pt
+        @meth_param_types[mi] = rbs_pt
+      end
+    }
+    @meth_rbs_returns.each_pair { |k, rbs_ret|
+      mi = k.to_i
+      if mi >= 0 && mi < @meth_return_types.length && @meth_return_types[mi] != rbs_ret
+        @meth_return_types[mi] = rbs_ret
+      end
+    }
+  end
+
   def seed_class_method(ci, mname, ret, ptypes_token)
     midx = cls_find_method_direct(ci, mname)
     if midx < 0
       return
     end
+    key = ci.to_s + "|" + midx.to_s
     if ptypes_token != "-" && ptypes_token != ""
       ptypes = ptypes_token.split(",")
       cls_meth_ptypes_put(ci, midx, ptypes)
       rbs_mark_cls_meth_seeded(ci, midx)
+      @cls_meth_rbs_ptypes[key] = ptypes_token
     end
     if ret != "-" && ret != ""
       rets = @cls_meth_returns[ci].split(";")
@@ -20392,6 +20490,7 @@ class Compiler
         @cls_meth_returns[ci] = rets.join(";")
         @cls_meth_return_cache = {}
       end
+      @cls_meth_rbs_returns[key] = ret
     end
   end
 
@@ -20421,9 +20520,11 @@ class Compiler
     if midx < 0
       return false
     end
+    key = ci.to_s + "|" + midx.to_s
     if ptypes_token != "-" && ptypes_token != ""
       ptypes = ptypes_token.split(",")
       cls_cmeth_ptypes_put(ci, midx, ptypes)
+      @cls_cmeth_rbs_ptypes[key] = ptypes_token
     end
     if ret != "-" && ret != ""
       rets = @cls_cmeth_returns[ci].split(";")
@@ -20431,6 +20532,7 @@ class Compiler
         rets[midx] = ret
         @cls_cmeth_returns[ci] = rets.join(";")
       end
+      @cls_cmeth_rbs_returns[key] = ret
     end
     true
   end
@@ -20446,15 +20548,18 @@ class Compiler
     if mi < 0
       return
     end
+    key = mi.to_s
     if ptypes_token != "-" && ptypes_token != ""
       if mi < @meth_param_types.length
         @meth_param_types[mi] = ptypes_token
       end
+      @meth_rbs_ptypes[key] = ptypes_token
     end
     if ret != "-" && ret != ""
       if mi < @meth_return_types.length
         @meth_return_types[mi] = ret
       end
+      @meth_rbs_returns[key] = ret
     end
   end
 
@@ -20714,6 +20819,7 @@ class Compiler
  # the user can resolve that disagreement. Runs after every type-
  # inference pass so the slot we're comparing against is final.
     arbitrate_rbs_vs_inferred_ivars
+    arbitrate_rbs_vs_inferred_methods
  # Pre-detect bigint variables before feature detection
     pre_detect_bigint
     detect_features
