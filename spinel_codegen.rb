@@ -26831,6 +26831,17 @@ class Compiler
         if rt == "poly" && @current_method_return != "poly" && @current_method_return != "void" && @current_method_return != ""
           ret_val = compile_expr_for_expected_type(arg_ids[0], @current_method_return)
           ret_ctype = c_type(@current_method_return)
+ # `--int-overflow=promote` widens return slots to bigint; an
+ # explicit `return <int_expr>` needs sp_bigint_new_int wrap.
+ # Reverse covers callers that still want mrb_int.
+        elsif base_type(@current_method_return) == "bigint" && rt == "int"
+          @needs_bigint = 1
+          ret_val = "sp_bigint_new_int(" + ret_val + ")"
+          ret_ctype = c_type(@current_method_return)
+        elsif base_type(@current_method_return) == "int" && rt == "bigint"
+          @needs_bigint = 1
+          ret_val = "sp_bigint_to_int((sp_Bigint *)" + ret_val + ")"
+          ret_ctype = c_type(@current_method_return)
         end
         if @in_gc_scope == 1
  # Save return value, run ensure replays (which may mutate
@@ -35315,7 +35326,19 @@ class Compiler
           end
         end
       else
-        emit("  return " + val + ";")
+ # `--int-overflow=promote` promotes int slots (incl. return
+ # type) to bigint at analyze time, so a literal/int-typed
+ # fall-through last expression must be wrapped before return.
+ # The reverse direction covers callers that still want mrb_int.
+        if base_type(return_type) == "bigint" && expr_type == "int"
+          @needs_bigint = 1
+          emit("  return sp_bigint_new_int(" + val + ");")
+        elsif base_type(return_type) == "int" && expr_type == "bigint"
+          @needs_bigint = 1
+          emit("  return sp_bigint_to_int((sp_Bigint *)" + val + ");")
+        else
+          emit("  return " + val + ";")
+        end
       end
     else
       compile_stmt(last)
