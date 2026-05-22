@@ -29111,9 +29111,17 @@ class Compiler
             a1 = "0"
             if arg_ids.length >= 1
               a0 = compile_expr(arg_ids[0])
+              if infer_type(arg_ids[0]) == "poly"
+                @needs_rb_value = 1
+                a0 = "(" + a0 + ").v.s"
+              end
             end
             if arg_ids.length >= 2
               a1 = compile_expr(arg_ids[1])
+              if infer_type(arg_ids[1]) == "poly"
+                @needs_rb_value = 1
+                a1 = "(" + a1 + ").v.s"
+              end
             end
             emit("  sp_file_write(" + a0 + ", " + a1 + ");")
             return 1
