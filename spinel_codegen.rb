@@ -14872,7 +14872,11 @@ class Compiler
             ref_mname = @method_ref_names[ri]
             mi = find_method_idx(ref_mname)
             if mi >= 0
-              return "sp_" + sanitize_name(ref_mname) + "(" + compile_call_args(nid) + ")"
+ # Use compile_call_args_with_defaults so the call routes
+ # each arg through compile_expr_for_expected_type — picks
+ # up promote-mode bigint coerce for an int literal flowing
+ # into a sp_Bigint * param slot.
+              return "sp_" + sanitize_name(ref_mname) + "(" + compile_call_args_with_defaults(nid, mi) + ")"
             end
           end
           ri = ri + 1
