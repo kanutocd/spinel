@@ -20390,6 +20390,12 @@ class Compiler
     if base_type(rbs_t) == base_type(inf_t)
       return false
     end
+ # Issue #638: a declared nullable return (`String?` = `String |
+ # nil`) is satisfied by a literal `nil` return. Accept the nil
+ # arm rather than flagging conflict.
+    if is_nullable_type(rbs_t) == 1 && inf_t == "nil"
+      return false
+    end
  # Container variant refinements where one is the other's poly form.
     if (rbs_t == "int_array" && inf_t == "poly_array") ||
        (rbs_t == "poly_array" && inf_t == "int_array")
