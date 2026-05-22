@@ -22769,6 +22769,16 @@ class Compiler
     if at == "int"
       return "sp_box_int(" + val + ")"
     end
+    if at == "bigint"
+ # No dedicated SP_BUILTIN_BIGINT slot in the box helpers; unbox
+ # to mrb_int and route through sp_box_int. The value fits when
+ # it does (the canonical promote-mode scenario where the bigint
+ # is just an int-sized integer wearing the bigint suit); larger
+ # values truncate, which is the same trade-off as any other
+ # bigint -> mrb_int coerce in this codegen.
+      @needs_bigint = 1
+      return "sp_box_int(sp_bigint_to_int((sp_Bigint *)" + val + "))"
+    end
     if at == "string"
       return "sp_box_str(" + val + ")"
     end
