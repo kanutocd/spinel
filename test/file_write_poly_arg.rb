@@ -28,7 +28,9 @@ results = workers.map { |w| w.run(42) }
 
 # results is poly_array; result of [0] dispatch is poly. File.write
 # call site must unbox before the sp_file_write boundary.
-path = "/tmp/spinel_i643_test.txt"
+# Use cwd-relative path so Windows MinGW (no `/tmp`) passes —
+# memory: feedback_windows_tmp_path.
+path = "spinel_i643_test.txt"
 File.write(path, results[0])
 puts File.read(path)
 File.delete(path)
