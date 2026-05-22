@@ -3152,7 +3152,7 @@ class Compiler
             end
             return "str_str_hash"
           end
-          if all_sym_keys == 1 && (first_vt == "int" || first_vt == "bool" || first_vt == "nil")
+          if all_sym_keys == 1 && (first_vt == "int" || first_vt == "bigint" || first_vt == "bool" || first_vt == "nil")
             return "sym_int_hash"
           end
  # Symbol values get sym_poly_hash storage so dig / lookup
