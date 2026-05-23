@@ -34568,6 +34568,14 @@ class Compiler
       end
     end
     rt = infer_type(@nd_receiver[nid])
+ # Strip the nullable `?` suffix so int_array? / str_array? /
+ # etc. map through the same per-container arms. The nil case
+ # is left to the caller (the unconditional iteration would
+ # deref NULL); in practice the recv is non-nil here because
+ # a typical map call site already nil-guards above.
+    if is_nullable_type(rt) == 1
+      rt = rt[0, rt.length - 1]
+    end
  # `precomputed_rc` comes from compile_call_expr's pre-compute
  # (issue #540). When non-empty it's already a typed-and-rooted
  # temp from compile_expr_gc_rooted; reusing it avoids a second
@@ -35039,11 +35047,97 @@ class Compiler
       pop_scope
       return tmp_arr
     end
- # poly_array recv #map: iterate sp_PolyArray_get (sp_RbVal
- # elements) and build a fresh container based on the block's
- # return type. Without this branch the call falls through to
- # `"0"`, the result is assigned as `lv_out = 0`, and any
- # `.length` / `[i]` on the typed accumulator dereferences NULL.
+ # poly recv #map: arr typed sp_RbVal (e.g. `def f(arr = nil)`
+ # widens the param to poly). At runtime arr is a PolyArray /
+ # IntArray / StrArray / etc. Without this branch the call
+ # falls through to `"0"` and the join on the resulting NULL
+ # StrArray segfaults (issue #654). Multi-tag dispatch: peek
+ # cls_id and route through the matching `_get`. We always
+ # build a PolyArray accumulator so the result is poly-shaped;
+ # downstream emits unbox via .v.s / .v.i as needed.
+    if rt == "poly"
+      @needs_gc = 1
+      @needs_rb_value = 1
+      block_ret_pp = ""
+      blk_pp = @nd_block[nid]
+      bp1_pp = get_block_param(nid, 0)
+      if bp1_pp == ""
+        bp1_pp = "_x"
+      end
+      tmp_arr_pp = new_temp
+      tmp_i_pp = new_temp
+      tmp_len_pp = new_temp
+      tmp_elem_pp = new_temp
+      if blk_pp >= 0
+        body_pp = @nd_body[blk_pp]
+        if body_pp >= 0
+          stmts_pp = get_stmts(body_pp)
+          if stmts_pp.length > 0
+            block_ret_pp = infer_type(stmts_pp.last)
+          end
+        end
+      end
+      push_scope
+ # Build a StrArray accumulator when the block returns string
+ # (matches the common `.map { ... }.join(",")` shape); else
+ # PolyArray.
+      if block_ret_pp == "string"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + tmp_arr_pp + " = sp_StrArray_new();")
+      elsif block_ret_pp == "int" || block_ret_pp == "bool" || block_ret_pp == "bigint"
+        @needs_int_array = 1
+        emit("  sp_IntArray *" + tmp_arr_pp + " = sp_IntArray_new();")
+      elsif block_ret_pp == "float"
+        @needs_float_array = 1
+        emit("  sp_FloatArray *" + tmp_arr_pp + " = sp_FloatArray_new();")
+      else
+        emit("  sp_PolyArray *" + tmp_arr_pp + " = sp_PolyArray_new();")
+      end
+      emit("  SP_GC_ROOT(" + tmp_arr_pp + ");")
+ # Runtime length + per-tag elem fetch.
+      emit("  mrb_int " + tmp_len_pp + " = 0;")
+      emit("  if ((" + rc + ").cls_id == SP_BUILTIN_POLY_ARRAY) " + tmp_len_pp + " = sp_PolyArray_length((sp_PolyArray *)(" + rc + ").v.p);")
+      emit("  else if ((" + rc + ").cls_id == SP_BUILTIN_INT_ARRAY) " + tmp_len_pp + " = sp_IntArray_length((sp_IntArray *)(" + rc + ").v.p);")
+      emit("  else if ((" + rc + ").cls_id == SP_BUILTIN_STR_ARRAY) " + tmp_len_pp + " = sp_StrArray_length((sp_StrArray *)(" + rc + ").v.p);")
+      emit("  else if ((" + rc + ").cls_id == SP_BUILTIN_FLT_ARRAY) " + tmp_len_pp + " = sp_FloatArray_length((sp_FloatArray *)(" + rc + ").v.p);")
+      emit("  for (mrb_int " + tmp_i_pp + " = 0; " + tmp_i_pp + " < " + tmp_len_pp + "; " + tmp_i_pp + "++) {")
+      declare_var(bp1_pp, "poly")
+      emit("    sp_RbVal lv_" + bp1_pp + ";")
+      emit("    if ((" + rc + ").cls_id == SP_BUILTIN_POLY_ARRAY) lv_" + bp1_pp + " = sp_PolyArray_get((sp_PolyArray *)(" + rc + ").v.p, " + tmp_i_pp + ");")
+      emit("    else if ((" + rc + ").cls_id == SP_BUILTIN_INT_ARRAY) lv_" + bp1_pp + " = sp_box_int(sp_IntArray_get((sp_IntArray *)(" + rc + ").v.p, " + tmp_i_pp + "));")
+      emit("    else if ((" + rc + ").cls_id == SP_BUILTIN_STR_ARRAY) lv_" + bp1_pp + " = sp_box_str(sp_StrArray_get((sp_StrArray *)(" + rc + ").v.p, " + tmp_i_pp + "));")
+      emit("    else if ((" + rc + ").cls_id == SP_BUILTIN_FLT_ARRAY) lv_" + bp1_pp + " = sp_box_float(sp_FloatArray_get((sp_FloatArray *)(" + rc + ").v.p, " + tmp_i_pp + "));")
+      emit("    else lv_" + bp1_pp + " = sp_box_nil();")
+      @indent = @indent + 1
+      if blk_pp >= 0
+        body_pp = @nd_body[blk_pp]
+        stmts_pp = body_pp >= 0 ? get_stmts(body_pp) : []
+        k_pp = 0
+        while k_pp < stmts_pp.length - 1
+          compile_stmt(stmts_pp[k_pp])
+          k_pp = k_pp + 1
+        end
+        if stmts_pp.length > 0
+          lastv_pp = compile_expr(stmts_pp.last)
+          if block_ret_pp == "string"
+            emit("  sp_StrArray_push(" + tmp_arr_pp + ", " + lastv_pp + ");")
+          elsif block_ret_pp == "int" || block_ret_pp == "bool"
+            emit("  sp_IntArray_push(" + tmp_arr_pp + ", " + lastv_pp + ");")
+          elsif block_ret_pp == "bigint"
+            @needs_bigint = 1
+            emit("  sp_IntArray_push(" + tmp_arr_pp + ", sp_bigint_to_int((sp_Bigint *)" + lastv_pp + "));")
+          elsif block_ret_pp == "float"
+            emit("  sp_FloatArray_push(" + tmp_arr_pp + ", " + lastv_pp + ");")
+          else
+            emit("  sp_PolyArray_push(" + tmp_arr_pp + ", " + box_value_to_poly(block_ret_pp, lastv_pp) + ");")
+          end
+        end
+      end
+      @indent = @indent - 1
+      emit("  }")
+      pop_scope
+      return tmp_arr_pp
+    end
     if rt == "poly_array"
       @needs_gc = 1
  # Empty / missing block leaves block_ret_p as "" so the
