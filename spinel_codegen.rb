@@ -28402,6 +28402,16 @@ class Compiler
       if pinned_type == "string" && pred_type == "string"
         return "strcmp(" + tmp + ", " + pinned + ") == 0"
       end
+ # bigint-typed pinned value (`case x in ^bigint_ivar`): compare
+ # via sp_bigint_cmp rather than C `==` (which would compare
+ # pointer identity, not value equality).
+      if base_type(pinned_type) == "bigint"
+        @needs_bigint = 1
+        if pred_type == "bigint"
+          return "(sp_bigint_cmp((sp_Bigint *)" + tmp + ", (sp_Bigint *)" + pinned + ") == 0)"
+        end
+        return "(sp_bigint_cmp(sp_bigint_new_int(" + tmp + "), (sp_Bigint *)" + pinned + ") == 0)"
+      end
       return "(" + tmp + ") == (" + pinned + ")"
     end
     "1"
