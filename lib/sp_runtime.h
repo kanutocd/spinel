@@ -502,19 +502,21 @@ static size_t sp_utf8_byte_offset(const char*s,mrb_int char_idx){
       return off > sp_str_lcache[h].byte_len ? sp_str_lcache[h].byte_len : off;
     }
   }
-  /* Walk char_idx code points or stop at the NUL terminator, whichever comes
-     first. The loop body is safe at any *p != 0: sp_utf8_advance only reads
-     past p[0] when the continuation-byte mask matches, and NUL doesn't match,
-     so a truncated multibyte sequence near end-of-string still terminates. By
-     bounding on char_idx instead of byte_len, sp_str_sub_range's second
-     byte_offset call (on a mid-string pointer that doesn't sit in the cache)
-     no longer pays the strlen that sp_str_byte_len would otherwise charge for
-     a 0xff literal. */
+  /* Walk char_idx code points or stop at byte_len, whichever comes first.
+     Bounding on byte_len (instead of "*p != 0") keeps the walk correct
+     past an embedded NUL byte -- a heap string with the 0xfe/0xfc marker
+     carries its real length in the sp_str_hdr, so a NUL byte inside the
+     payload no longer terminates the walk prematurely. For an external
+     0xff literal sp_str_byte_len falls back to strlen which legitimately
+     stops at NUL, matching the prior behaviour. */
+  size_t blen = sp_str_byte_len(s);
   const char *p = s;
-  while (char_idx > 0 && *p) {
+  const char *end = s + blen;
+  while (char_idx > 0 && p < end) {
     p += sp_utf8_advance(p);
     char_idx--;
   }
+  if (p > end) p = end;
   return (size_t)(p - s);
 }
 static uint32_t*sp_utf8_decode_all(const char*s,size_t*out_n){size_t cap=8,n=0;uint32_t*cps=(uint32_t*)malloc(cap*sizeof(uint32_t));const char*p=s;while(*p){if(n>=cap){cap*=2;cps=(uint32_t*)realloc(cps,cap*sizeof(uint32_t));}uint32_t cp;p+=sp_utf8_decode(p,&cp);cps[n++]=cp;}*out_n=n;return cps;}
@@ -1216,7 +1218,7 @@ static mrb_int sp_str_rindex(const char*s,const char*sub){if(!sub)return -1;size
 static char sp_char_cache[256][3];
 static int sp_char_cache_init = 0;
 /* start/len are codepoint indices/counts. */
-static const char*sp_str_sub_range(const char*s,mrb_int start,mrb_int len){mrb_int cl=sp_str_length(s);if(start<0)start+=cl;if(start<0)start=0;if(start>=cl||len<=0){return &("\xff" "")[1];}if(start+len>cl)len=cl-start;size_t boff=sp_utf8_byte_offset(s,start);size_t bend=sp_utf8_byte_offset(s+boff,len)+boff;size_t blen=bend-boff;if(len==1&&blen==1){unsigned char c=(unsigned char)s[boff];if(!sp_char_cache_init){for(int i=0;i<256;i++){sp_char_cache[i][0]=(char)0xff;sp_char_cache[i][1]=(char)i;sp_char_cache[i][2]=0;}sp_char_cache_init=1;}return &sp_char_cache[c][1];}char*r=sp_str_alloc_raw(blen+1);memcpy(r,s+boff,blen);r[blen]=0;return r;}
+static const char*sp_str_sub_range(const char*s,mrb_int start,mrb_int len){mrb_int cl=sp_str_length(s);if(start<0)start+=cl;if(start<0)start=0;if(start>=cl||len<=0){return &("\xff" "")[1];}if(start+len>cl)len=cl-start;size_t boff=sp_utf8_byte_offset(s,start);size_t blen_total=sp_str_byte_len(s);size_t bp=boff;mrb_int rem=len;while(rem>0&&bp<blen_total){bp+=sp_utf8_advance(s+bp);rem--;}if(bp>blen_total)bp=blen_total;size_t bend=bp;size_t blen=bend-boff;if(len==1&&blen==1){unsigned char c=(unsigned char)s[boff];if(!sp_char_cache_init){for(int i=0;i<256;i++){sp_char_cache[i][0]=(char)0xff;sp_char_cache[i][1]=(char)i;sp_char_cache[i][2]=0;}sp_char_cache_init=1;}return &sp_char_cache[c][1];}char*r=sp_str_alloc_raw(blen+1);memcpy(r,s+boff,blen);r[blen]=0;return r;}
 /* Single-character form of `s[i]`. Returns NULL on out-of-bounds to
    match CRuby's `"hello"[20] -> nil`. The two-arg `s[i, len]` /
    range forms keep returning "" on OOB via sp_str_sub_range; only
@@ -1225,7 +1227,7 @@ static const char*sp_str_char_at_or_nil(const char*s,mrb_int i){mrb_int cl=sp_st
 /* Char-indexed variant; the second arg used to be a hoisted byte length, now a
    hoisted codepoint count.  We don't need it for correctness, but keeping the
    ABI lets callers pass it without a wrapper. */
-static const char*sp_str_sub_range_len(const char*s,mrb_int cl,mrb_int start,mrb_int len){if(start<0)start+=cl;if(start<0)start=0;if(start>=cl||len<=0){return &("\xff" "")[1];}if(start+len>cl)len=cl-start;size_t boff=sp_utf8_byte_offset(s,start);size_t bend=sp_utf8_byte_offset(s+boff,len)+boff;size_t blen=bend-boff;if(len==1&&blen==1){unsigned char c=(unsigned char)s[boff];if(!sp_char_cache_init){for(int i=0;i<256;i++){sp_char_cache[i][0]=(char)0xff;sp_char_cache[i][1]=(char)i;sp_char_cache[i][2]=0;}sp_char_cache_init=1;}return &sp_char_cache[c][1];}char*r=sp_str_alloc_raw(blen+1);memcpy(r,s+boff,blen);r[blen]=0;return r;}
+static const char*sp_str_sub_range_len(const char*s,mrb_int cl,mrb_int start,mrb_int len){if(start<0)start+=cl;if(start<0)start=0;if(start>=cl||len<=0){return &("\xff" "")[1];}if(start+len>cl)len=cl-start;size_t boff=sp_utf8_byte_offset(s,start);size_t blen_total=sp_str_byte_len(s);size_t bp=boff;mrb_int rem=len;while(rem>0&&bp<blen_total){bp+=sp_utf8_advance(s+bp);rem--;}if(bp>blen_total)bp=blen_total;size_t bend=bp;size_t blen=bend-boff;if(len==1&&blen==1){unsigned char c=(unsigned char)s[boff];if(!sp_char_cache_init){for(int i=0;i<256;i++){sp_char_cache[i][0]=(char)0xff;sp_char_cache[i][1]=(char)i;sp_char_cache[i][2]=0;}sp_char_cache_init=1;}return &sp_char_cache[c][1];}char*r=sp_str_alloc_raw(blen+1);memcpy(r,s+boff,blen);r[blen]=0;return r;}
 /* String s[start..end] / s[start...end] with possibly negative
    endpoints. Mirrors sp_IntArray_slice_range; issue #496. */
 static const char*sp_str_sub_range_r(const char*s,mrb_int start,mrb_int end_,mrb_int excl){mrb_int cl=sp_str_length(s);if(end_<0)end_+=cl;mrb_int n=end_-start+(excl?0:1);if(n<0)n=0;return sp_str_sub_range_len(s,cl,start,n);}
@@ -1240,7 +1242,7 @@ static const char*sp_str_sub(const char*s,const char*pat,const char*rep){const c
 static const char*sp_str_capitalize(const char*s){size_t l=strlen(s);char*r=sp_str_alloc_raw(l+1);for(size_t i=0;i<=l;i++)r[i]=tolower((unsigned char)s[i]);if(l>0)r[0]=toupper((unsigned char)r[0]);return r;}
 static mrb_int sp_str_count(const char*s,const char*chars){if(!chars)return 0;size_t setn;uint32_t*set=sp_utf8_decode_all(chars,&setn);mrb_int c=0;const char*p=s;while(*p){uint32_t cp;p+=sp_utf8_decode(p,&cp);if(sp_utf8_set_has(set,setn,cp))c++;}free(set);return c;}
 static const char*sp_str_repeat(const char*s,mrb_int n){if(n<=0)return sp_str_empty;size_t l=strlen(s);char*r=sp_str_alloc_raw(l*n+1);for(mrb_int i=0;i<n;i++)memcpy(r+l*i,s,l);r[l*n]=0;return r;}
-static sp_IntArray*sp_str_bytes(const char*s){sp_IntArray*a=sp_IntArray_new();for(size_t i=0;s[i];i++)sp_IntArray_push(a,(mrb_int)(unsigned char)s[i]);return a;}
+static sp_IntArray*sp_str_bytes(const char*s){sp_IntArray*a=sp_IntArray_new();if(!s)return a;size_t n=sp_str_byte_len(s);for(size_t i=0;i<n;i++)sp_IntArray_push(a,(mrb_int)(unsigned char)s[i]);return a;}
 static const char*sp_str_tr(const char*s,const char*from,const char*to){size_t fn,tn;uint32_t*fcps=sp_utf8_decode_all(from,&fn);uint32_t*tcps=sp_utf8_decode_all(to,&tn);size_t bl=strlen(s);size_t cap=bl*4+1;char*buf=(char*)malloc(cap);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);size_t mi=fn;for(size_t j=0;j<fn;j++)if(fcps[j]==cp){mi=j;break;}if(mi<fn&&tn>0){uint32_t rep=mi<tn?tcps[mi]:tcps[tn-1];n+=sp_utf8_encode(rep,buf+n);}else{memcpy(buf+n,p,cn);n+=cn;}p+=cn;}buf[n]=0;char*r=sp_str_alloc(n);memcpy(r,buf,n+1);free(buf);free(fcps);free(tcps);return r;}
 static const char*sp_str_delete(const char*s,const char*chars){if(!chars)return s;size_t setn;uint32_t*set=sp_utf8_decode_all(chars,&setn);size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(!sp_utf8_set_has(set,setn,cp)){memcpy(r+n,p,cn);n+=cn;}p+=cn;}r[n]=0;free(set);return r;}
 static const char*sp_str_squeeze(const char*s){size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;uint32_t prev=0xFFFFFFFFu;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(cp!=prev){memcpy(r+n,p,cn);n+=cn;prev=cp;}p+=cn;}r[n]=0;return r;}
