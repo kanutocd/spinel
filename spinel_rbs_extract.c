@@ -83,6 +83,53 @@ static void sbuf_set(sbuf_t *s, const char *src, size_t n) {
     sbuf_append(s, src, n);
 }
 
+/* ---- known-name set (issue #656) ---------------------------- */
+
+/* Set of qualified class/module names defined across all .rbs files
+ * traversed. Populated by collect_decl_names in a pre-pass before
+ * the emit pass; consulted by resolve_unqualified_name so a bare
+ * `Article` written inside `module Views; module Articles` walks
+ * the lexical chain (Views_Articles_Article, Views_Article,
+ * Article) and picks the first match. Without the set we either
+ * always prepend the enclosing scope (wrong when the referent is
+ * top-level) or never prepend (wrong for the sibling-in-module
+ * case). Issue #656. */
+static char **known_names = NULL;
+static size_t known_names_len = 0;
+static size_t known_names_cap = 0;
+
+static void known_names_add(const char *name, size_t n) {
+    /* dedupe (linear; n is small in practice) */
+    for (size_t i = 0; i < known_names_len; i++) {
+        if (strlen(known_names[i]) == n && memcmp(known_names[i], name, n) == 0) return;
+    }
+    if (known_names_len >= known_names_cap) {
+        size_t ncap = known_names_cap == 0 ? 32 : known_names_cap * 2;
+        char **nbuf = (char **) realloc(known_names, ncap * sizeof(char *));
+        if (nbuf == NULL) {
+            fprintf(stderr, "spinel_rbs_extract: out of memory\n");
+            exit(1);
+        }
+        known_names = nbuf;
+        known_names_cap = ncap;
+    }
+    char *copy = (char *) malloc(n + 1);
+    if (copy == NULL) {
+        fprintf(stderr, "spinel_rbs_extract: out of memory\n");
+        exit(1);
+    }
+    memcpy(copy, name, n);
+    copy[n] = '\0';
+    known_names[known_names_len++] = copy;
+}
+
+static bool known_names_has(const char *name) {
+    for (size_t i = 0; i < known_names_len; i++) {
+        if (strcmp(known_names[i], name) == 0) return true;
+    }
+    return false;
+}
+
 /* ---- name lookup via rbs constant pool --------------------- */
 
 /* Read the bytes for a constant_id out of the parser's pool into a sbuf.
@@ -290,22 +337,55 @@ static bool map_class_instance(rbs_parser_t *p, rbs_types_class_instance_t *ci,
         return false;
     }
 
-    /* Nominal class instance: emit obj_<QualifiedName>. If the source
-     * wrote the name unqualified AND we're inside a class/module scope,
-     * resolve relative to that scope so e.g. `Base` inside
-     * `module ActiveRecord; class RecordInvalid` becomes
-     * `obj_ActiveRecord_Base`. Heuristic: spinel will silently drop
-     * seeds for types it doesn't recognize, so a wrong guess (e.g.
-     * `StandardError` inside `ActiveRecord`) is a no-op rather than a
-     * miscompile. Full lexical-scope walk would require a symbol
-     * table; this single-level prefix covers the common case. */
+    /* Nominal class instance: emit obj_<QualifiedName>. Three cases:
+     *
+     * 1. Source wrote `::Const` (absolute): use the bare name as-is,
+     *    never prepend the enclosing scope (issue #656).
+     * 2. Source wrote unqualified `Const` and we're inside a class/
+     *    module scope: walk the lexical chain from innermost outward
+     *    and pick the first qualified name present in known_names.
+     *    Fall back to bare when no candidate matches (matches Ruby's
+     *    `::Const` resolution at top-level).
+     * 3. Source wrote qualified `A::B::C`: use as-is (name already
+     *    contains the full path via name_of_type_name).
+     */
     sbuf_set(out, "obj_", 4);
-    if (enclosing_scope != NULL && enclosing_scope[0] != '\0'
+    bool absolute = (ci->name != NULL && ci->name->rbs_namespace != NULL
+                     && ci->name->rbs_namespace->absolute);
+    if (!absolute && enclosing_scope != NULL && enclosing_scope[0] != '\0'
         && type_name_is_unqualified(ci->name)) {
-        sbuf_append_cstr(out, enclosing_scope);
-        sbuf_append_cstr(out, "_");
+        /* Walk the lexical chain: try `<chain>_<name>` for each suffix
+         * of enclosing_scope (innermost outward), then top-level. */
+        sbuf_t candidate;
+        sbuf_init(&candidate);
+        const char *scope_end = enclosing_scope + strlen(enclosing_scope);
+        const char *cur = enclosing_scope;
+        bool resolved = false;
+        while (cur != NULL && cur < scope_end) {
+            candidate.len = 0;
+            sbuf_append(&candidate, cur, scope_end - cur);
+            sbuf_append_cstr(&candidate, "_");
+            sbuf_append(&candidate, name.buf, name.len);
+            if (known_names_has(candidate.buf)) {
+                sbuf_append(out, candidate.buf, candidate.len);
+                resolved = true;
+                break;
+            }
+            /* Step to the next inner namespace by skipping past the
+             * next "_". `Views_Articles_Helpers` -> `Articles_Helpers`
+             * -> `Helpers` -> done. */
+            const char *next = (const char *) memchr(cur, '_', scope_end - cur);
+            if (next == NULL) break;
+            cur = next + 1;
+        }
+        if (!resolved) {
+            /* Top-level fallback: emit bare name. */
+            sbuf_append(out, name.buf, name.len);
+        }
+        sbuf_free(&candidate);
+    } else {
+        sbuf_append(out, name.buf, name.len);
     }
-    sbuf_append(out, name.buf, name.len);
     sbuf_free(&name);
     return true;
 }
@@ -581,6 +661,54 @@ static void traverse_members(rbs_parser_t *p, rbs_node_list_t *members,
     }
 }
 
+/* Pre-pass: collect every Class/Module declaration's qualified name
+ * (with "_" separators) into known_names. Recurses through members so
+ * `module A; module B; class C` registers all of A, A_B, A_B_C. The
+ * later emit pass uses the set to disambiguate unqualified type
+ * references (issue #656). */
+static void collect_decl_names(rbs_parser_t *p, rbs_node_t *node,
+                                const char *parent_scope) {
+    sbuf_t leaf;
+    sbuf_init(&leaf);
+    rbs_node_list_t *members = NULL;
+
+    if (node->type == RBS_AST_DECLARATIONS_CLASS) {
+        rbs_ast_declarations_class_t *c = (rbs_ast_declarations_class_t *) node;
+        name_of_type_name(p, c->name, &leaf);
+        members = c->members;
+    } else if (node->type == RBS_AST_DECLARATIONS_MODULE) {
+        rbs_ast_declarations_module_t *m = (rbs_ast_declarations_module_t *) node;
+        name_of_type_name(p, m->name, &leaf);
+        members = m->members;
+    } else {
+        sbuf_free(&leaf);
+        return;
+    }
+
+    sbuf_t qualified;
+    sbuf_init(&qualified);
+    if (parent_scope != NULL && parent_scope[0] != '\0') {
+        sbuf_append_cstr(&qualified, parent_scope);
+        sbuf_append_cstr(&qualified, "_");
+    }
+    sbuf_append(&qualified, leaf.buf, leaf.len);
+    known_names_add(qualified.buf, qualified.len);
+
+    if (members != NULL) {
+        rbs_node_list_node_t *cur = members->head;
+        while (cur != NULL) {
+            if (cur->node->type == RBS_AST_DECLARATIONS_CLASS
+                || cur->node->type == RBS_AST_DECLARATIONS_MODULE) {
+                collect_decl_names(p, cur->node, qualified.buf);
+            }
+            cur = cur->next;
+        }
+    }
+
+    sbuf_free(&qualified);
+    sbuf_free(&leaf);
+}
+
 /* Recurse into a declaration. For Class/Module: extend the scope path
  * with the declaration's leaf name, emit members, then recurse into
  * any nested Class/Module members so e.g. `module Foo; class Bar; end;
@@ -674,6 +802,14 @@ static void process_file(const char *path, FILE *out) {
         rbs_parser_free(p);
         free(src);
         return;
+    }
+    /* Pre-pass: register every Class/Module's qualified name so the
+     * emit pass can disambiguate unqualified type references via
+     * lexical-chain walk (issue #656). */
+    rbs_node_list_node_t *pre = sig->declarations->head;
+    while (pre != NULL) {
+        collect_decl_names(p, pre->node, "");
+        pre = pre->next;
     }
     rbs_node_list_node_t *cur = sig->declarations->head;
     while (cur != NULL) {
