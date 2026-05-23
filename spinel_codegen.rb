@@ -11417,6 +11417,14 @@ class Compiler
                 @current_lexical_scope = ""
                 val_b = compile_expr(eid_b)
                 @current_lexical_scope = old_scope_b
+ # promote-mode: rhs may be bigint but const slot is int.
+ # Unbox via sp_bigint_to_int so the static int slot stays
+ # consistent.
+                ct_def = @const_types[cwn_idx]
+                if ct_def == "int" && (infer_type(eid_b) == "bigint" || expr_emit_is_bigint(eid_b) == 1)
+                  @needs_bigint = 1
+                  val_b = "sp_bigint_to_int((sp_Bigint *)" + val_b + ")"
+                end
                 emit("  cst_" + cwn_name + " = " + val_b + ";")
                 if type_is_pointer(@const_types[cwn_idx]) == 1
                   emit("  SP_GC_ROOT(cst_" + cwn_name + ");")
