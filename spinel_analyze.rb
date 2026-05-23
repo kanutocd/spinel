@@ -5001,6 +5001,15 @@ class Compiler
               if bret == "int"
                 return "int_array"
               end
+ # Promote-mode bigint block return: there's no bigint_array
+ # variant. The codegen builds a sp_PtrArray that stores each
+ # bigint pointer; mirror that here so the LV / function return
+ # slot is typed ptr_array (poly_array, etc.) instead of the
+ # default int_array.
+              if bret == "bigint"
+                @needs_gc = 1
+                return "poly_array"
+              end
               if is_obj_type(bret) == 1
                 return bret + "_ptr_array"
               end
@@ -20548,6 +20557,91 @@ class Compiler
  # explicit bigint local crosses one of those boundaries.
  #
  # No-op when mode != promote.
+ # Post-promote: re-infer method return types whose body's last
+ # expression is a `.map` block. promote_int_to_bigint_globally
+ # widens param / ivar / scope LV types but not container-shaped
+ # method returns. A `def f; @items.map { |b| b.v * 2 } end`
+ # whose @items is an obj_ptr_array used to return int_array
+ # (block was int); under promote the block now returns bigint
+ # and the codegen builds a PolyArray. Without this sweep the
+ # function signature stays sp_IntArray * and the return-site
+ # type mismatch trips -Wincompatible-pointer-types.
+  def promote_reinfer_array_returns
+    if @int_overflow_mode != "promote"
+      return
+    end
+ # Top-level methods.
+    mi = 0
+    while mi < @meth_return_types.length
+      cur_rt = @meth_return_types[mi]
+      if cur_rt == "int_array" || cur_rt == "str_array" || cur_rt == "float_array" || cur_rt == "sym_array"
+        bid = mi < @meth_body_ids.length ? @meth_body_ids[mi] : -1
+        new_rt = reinfer_method_array_return(bid)
+        if new_rt != "" && new_rt != cur_rt
+          @meth_return_types[mi] = new_rt
+        end
+      end
+      mi = mi + 1
+    end
+ # Per-class instance methods + class methods.
+    ci = 0
+    while ci < @cls_names.length
+      promote_reinfer_array_returns_table(ci, @cls_meth_returns, @cls_meth_bodies)
+      if ci < @cls_cmeth_returns.length
+        promote_reinfer_array_returns_table(ci, @cls_cmeth_returns, @cls_cmeth_bodies)
+      end
+      ci = ci + 1
+    end
+  end
+
+  def promote_reinfer_array_returns_table(ci, ret_tbl, body_tbl)
+    if ci >= ret_tbl.length
+      return
+    end
+    rets = ret_tbl[ci].split(";")
+    bodies = ci < body_tbl.length ? body_tbl[ci].split(";") : "".split(",")
+    changed = 0
+    mj = 0
+    while mj < rets.length
+      cur_rt = rets[mj]
+      if cur_rt == "int_array" || cur_rt == "str_array" || cur_rt == "float_array" || cur_rt == "sym_array"
+        bid = mj < bodies.length ? bodies[mj].to_i : -1
+        new_rt = reinfer_method_array_return(bid)
+        if new_rt != "" && new_rt != cur_rt
+          rets[mj] = new_rt
+          changed = 1
+        end
+      end
+      mj = mj + 1
+    end
+    if changed == 1
+      ret_tbl[ci] = rets.join(";")
+    end
+  end
+
+ # Re-infer the return type of a method whose body is `bid`. Returns
+ # "" when the body doesn't end with a recognized shape, or when the
+ # re-inference matches the old type. Currently handles the
+ # `.map { ... }` tail (the canonical shape that goes
+ # int_array -> poly_array under promote).
+  def reinfer_method_array_return(bid)
+    if bid < 0
+      return ""
+    end
+    stmts = get_stmts(bid)
+    if stmts.length == 0
+      return ""
+    end
+    last = stmts.last
+    if @nd_type[last] != "CallNode"
+      return ""
+    end
+    if @nd_name[last] != "map" || @nd_block[last] < 0
+      return ""
+    end
+    infer_type(last)
+  end
+
   def promote_int_to_bigint_globally
     if @int_overflow_mode != "promote"
       return
@@ -21632,6 +21726,12 @@ class Compiler
  # n + huge; end` because the param `n` stays mrb_int and the
  # call site can't widen across the function boundary.
     promote_int_to_bigint_globally
+ # Re-infer method return types whose body's tail is a `.map`
+ # block now returning bigint (or some other shape that widens
+ # past int_array under promote). promote_meth_returns_table only
+ # handles scalar int->bigint and tuples; an int_array return
+ # that should become poly_array stays stale otherwise.
+    promote_reinfer_array_returns
  # Pre-detect bigint variables before feature detection
     pre_detect_bigint
     detect_features

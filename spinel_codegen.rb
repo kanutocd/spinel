@@ -35978,6 +35978,16 @@ class Compiler
         @needs_int_array = 1
         emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
         p_container = "int_array"
+      elsif block_ret_p == "bigint"
+ # Promote-mode bigint block return: mirror the analyzer's
+ # poly_array result type. PolyArray boxes each bigint pointer
+ # via sp_box_int(sp_bigint_to_int(...)) so downstream reads
+ # see ints (matching default-mode int_array semantics for the
+ # same source code).
+        @needs_rb_value = 1
+        @needs_bigint = 1
+        emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
+        p_container = "poly_array"
       else
  # obj/ptr/poly block return: keep a PtrArray of the result.
         emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
@@ -36007,6 +36017,9 @@ class Compiler
             emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_p + ");")
           elsif block_ret_p == "int" || block_ret_p == "bool"
             emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_p + ");")
+          elsif block_ret_p == "bigint"
+            @needs_bigint = 1
+            emit("  sp_PolyArray_push(" + tmp_arr + ", sp_box_int(sp_bigint_to_int((sp_Bigint *)" + lastv_p + ")));")
           else
             emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)(" + lastv_p + "));")
           end
