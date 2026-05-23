@@ -13899,25 +13899,37 @@ class Compiler
         emit("  sp_Method *" + bm_tmp + " = " + rc + ";")
         args_id = @nd_arguments[nid]
         joined = ""
+ # In promote mode all int slots widened to bigint, so the
+ # uniform Method ABI's int args / int return become sp_Bigint*.
+ # The fn_ptr is cast accordingly; downstream consumers expecting
+ # mrb_int unbox via sp_bigint_to_int.
+        bm_promote = (@int_overflow_mode == "promote") ? 1 : 0
+        ret_ct_bm = bm_promote == 1 ? "sp_Bigint *" : "mrb_int"
+        arg_ct_bm = bm_promote == 1 ? "sp_Bigint *" : "mrb_int"
         sig_args = "void *"
         if args_id >= 0
           aargs = get_args(args_id)
           k = 0
           while k < aargs.length
- # Method's bound C function has the fixed `(void *self,
- # mrb_int...)` ABI; promote-widened bigint args need
- # unbox before being passed through.
             arg_v_bm = compile_expr(aargs[k])
-            if infer_type(aargs[k]) == "bigint"
+            at_bm = infer_type(aargs[k])
+            if bm_promote == 1
               @needs_bigint = 1
-              arg_v_bm = "sp_bigint_to_int((sp_Bigint *)" + arg_v_bm + ")"
+              if base_type(at_bm) == "int"
+                arg_v_bm = "sp_bigint_new_int(" + arg_v_bm + ")"
+              end
+            else
+              if at_bm == "bigint"
+                @needs_bigint = 1
+                arg_v_bm = "sp_bigint_to_int((sp_Bigint *)" + arg_v_bm + ")"
+              end
             end
             joined = joined + ", " + arg_v_bm
-            sig_args = sig_args + ", mrb_int"
+            sig_args = sig_args + ", " + arg_ct_bm
             k = k + 1
           end
         end
-        return "((mrb_int (*)(" + sig_args + "))(uintptr_t)" + bm_tmp + "->iv_fn_ptr)((void *)" + bm_tmp + "->iv_self_obj" + joined + ")"
+        return "((" + ret_ct_bm + " (*)(" + sig_args + "))(uintptr_t)" + bm_tmp + "->iv_fn_ptr)((void *)" + bm_tmp + "->iv_self_obj" + joined + ")"
       end
     end
 
@@ -15708,6 +15720,17 @@ class Compiler
       return 0
     end
     mn_eb = @nd_name[nid]
+ # `bm.call(x)` / `bm[x]` on a Method recv in promote mode: the
+ # fn_ptr cast returns sp_Bigint * (uniform ABI widening). The
+ # cached at/return for this CallNode lags reality so the
+ # caller's int-expected slot path mis-wraps with
+ # sp_bigint_new_int. Detect directly.
+    if (mn_eb == "call" || mn_eb == "[]") && @int_overflow_mode == "promote"
+      rcv_bm_eb = @nd_receiver[nid]
+      if rcv_bm_eb >= 0 && base_type(infer_type(rcv_bm_eb)) == "obj_Method"
+        return 1
+      end
+    end
  # CallNode dispatch to a user method whose return slot has been
  # promoted to bigint: infer_type can be stale (the cls_method
  # _return / @meth_return_types tables get rewritten by
@@ -22931,30 +22954,48 @@ class Compiler
  # any that came in as poly.
       method_idx = find_class_idx("Method")
       if method_idx >= 0 && @needs_method == 1
+        bm2_promote = (@int_overflow_mode == "promote") ? 1 : 0
+        ret_ct_bm2 = bm2_promote == 1 ? "sp_Bigint *" : "mrb_int"
+        arg_ct_bm2 = bm2_promote == 1 ? "sp_Bigint *" : "mrb_int"
+        null_default_bm2 = bm2_promote == 1 ? "sp_bigint_new_int(0)" : "0"
         mp = "((sp_Method *)" + recv_tmp + ".v.p)"
         sig_args = "void *"
         call_args = "(void *)" + mp + "->iv_self_obj"
         mi = 0
         while mi < arg_compiled.length
-          sig_args = sig_args + ", mrb_int"
+          sig_args = sig_args + ", " + arg_ct_bm2
           ai_val = arg_compiled[mi]
-          if mi < arg_types.length && arg_types[mi] == "poly"
-            ai_val = "(" + ai_val + ").v.i"
-          elsif mi < arg_types.length && arg_types[mi] == "bigint"
+          if bm2_promote == 1
             @needs_bigint = 1
-            ai_val = "sp_bigint_to_int((sp_Bigint *)" + ai_val + ")"
-          elsif ai_val.start_with?("sp_bigint_") || ai_val.start_with?("(sp_Bigint *)")
+            if mi < arg_types.length && arg_types[mi] == "poly"
+              @needs_rb_value = 1
+              ai_val = "sp_bigint_new_int((" + ai_val + ").v.i)"
+            elsif mi < arg_types.length && base_type(arg_types[mi]) == "int"
+              ai_val = "sp_bigint_new_int(" + ai_val + ")"
+            end
+          else
+            if mi < arg_types.length && arg_types[mi] == "poly"
+              ai_val = "(" + ai_val + ").v.i"
+            elsif mi < arg_types.length && arg_types[mi] == "bigint"
+              @needs_bigint = 1
+              ai_val = "sp_bigint_to_int((sp_Bigint *)" + ai_val + ")"
+            elsif ai_val.start_with?("sp_bigint_") || ai_val.start_with?("(sp_Bigint *)")
  # Stale-int cache hiding a bigint emit (canonical arith /
  # bitop CallNode whose operands include a promote-widened
  # local). Method's fn_ptr ABI is fixed mrb_int — unbox.
-            @needs_bigint = 1
-            ai_val = "sp_bigint_to_int((sp_Bigint *)" + ai_val + ")"
+              @needs_bigint = 1
+              ai_val = "sp_bigint_to_int((sp_Bigint *)" + ai_val + ")"
+            end
           end
           call_args = call_args + ", " + ai_val
           mi = mi + 1
         end
-        mc = "(" + mp + " && " + mp + "->iv_fn_ptr ? ((mrb_int (*)(" + sig_args + "))(uintptr_t)" + mp + "->iv_fn_ptr)(" + call_args + ") : 0)"
-        mrhs = is_poly_ret == 1 ? "sp_box_int(" + mc + ")" : mc
+        mc = "(" + mp + " && " + mp + "->iv_fn_ptr ? ((" + ret_ct_bm2 + " (*)(" + sig_args + "))(uintptr_t)" + mp + "->iv_fn_ptr)(" + call_args + ") : " + null_default_bm2 + ")"
+        if bm2_promote == 1
+          mrhs = is_poly_ret == 1 ? "sp_box_int(sp_bigint_to_int((sp_Bigint *)" + mc + "))" : "sp_bigint_to_int((sp_Bigint *)" + mc + ")"
+        else
+          mrhs = is_poly_ret == 1 ? "sp_box_int(" + mc + ")" : mc
+        end
         emit("    if (" + recv_tmp + ".cls_id == " + cls_id_for_user_internal(method_idx).to_s + ") " + result_tmp + " = " + mrhs + ";")
       end
     end
