@@ -37749,6 +37749,14 @@ class Compiler
         @needs_rb_value = 1
         @needs_bigint = 1
         emit("  return sp_bigint_new_int((" + val + ").v.i);")
+      elsif expr_type == "poly" && (base_type(return_type) == "string" || base_type(return_type) == "mutable_str")
+ # Issue #655: RBS-declared `-> String` return where body
+ # produces a poly value (e.g. `@hash[k] || ""` where @hash's
+ # value type defaulted to Int because no writes were
+ # observed). Unbox the poly through `.v.s` so the
+ # const-char-*-typed return signature matches.
+        @needs_rb_value = 1
+        emit("  return (" + val + ").v.s;")
       else
  # `--int-overflow=promote` promotes int slots (incl. return
  # type) to bigint at analyze time, so a literal/int-typed
