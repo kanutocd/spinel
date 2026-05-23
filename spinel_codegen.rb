@@ -32235,7 +32235,12 @@ class Compiler
     tg = new_temp
     arr_c = "sp_PolyArray"
     emit("  " + arr_c + " *" + tt + " = " + rc + ";")
-    emit("  mrb_int " + ti + " = " + compile_expr(arg_ids[0]) + ";")
+    idx_taio = compile_expr(arg_ids[0])
+    if arg_ids[0] >= 0 && (infer_type(arg_ids[0]) == "bigint" || expr_emit_is_bigint(arg_ids[0]) == 1)
+      @needs_bigint = 1
+      idx_taio = "sp_bigint_to_int((sp_Bigint *)" + idx_taio + ")"
+    end
+    emit("  mrb_int " + ti + " = " + idx_taio + ";")
     emit("  sp_RbVal " + tg + " = sp_box_nil();")
     emit("  if (" + ti + " >= 0 && " + ti + " < sp_" + arr_c.sub("sp_", "") + "_length(" + tt + ")) {")
     emit("    " + tg + " = " + arr_c + "_get(" + tt + ", " + ti + ");")
@@ -32269,7 +32274,12 @@ class Compiler
     arg0 = args_id >= 0 ? get_args(args_id)[0] : -1
     emit("  sp_RbVal " + tr + " = " + rc + ";")
     emit("  sp_PolyArray *" + tp + " = (" + tr + ".tag == SP_TAG_OBJ && " + tr + ".cls_id == SP_BUILTIN_POLY_ARRAY) ? (sp_PolyArray *)" + tr + ".v.p : NULL;")
-    emit("  mrb_int " + ti + " = " + compile_expr(arg0) + ";")
+    idx_pvi = compile_expr(arg0)
+    if arg0 >= 0 && (infer_type(arg0) == "bigint" || expr_emit_is_bigint(arg0) == 1)
+      @needs_bigint = 1
+      idx_pvi = "sp_bigint_to_int((sp_Bigint *)" + idx_pvi + ")"
+    end
+    emit("  mrb_int " + ti + " = " + idx_pvi + ";")
     emit("  sp_RbVal " + tg + " = sp_box_nil();")
     emit("  if (" + tp + " && " + ti + " >= 0 && " + ti + " < sp_PolyArray_length(" + tp + ")) {")
     emit("    " + tg + " = sp_PolyArray_get(" + tp + ", " + ti + ");")
