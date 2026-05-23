@@ -12963,8 +12963,17 @@ class Compiler
       arg_ids = get_args(args_id)
       if arg_ids.length > 0
         ce = compile_expr(arg_ids[0])
-        if infer_type(arg_ids[0]) == "poly"
+        at_a0f = infer_type(arg_ids[0])
+        if at_a0f == "poly"
           return "sp_poly_to_f(" + ce + ")"
+        end
+ # `--int-overflow=promote` widens int to sp_Bigint *; a float
+ # context (FFI :float arg, Math.sin operand, etc.) needs the
+ # mrb_float scalar. Unbox via sp_bigint_to_int and let the
+ # implicit int -> double conversion finish the cast.
+        if at_a0f == "bigint" || expr_emit_is_bigint(arg_ids[0]) == 1
+          @needs_bigint = 1
+          return "(mrb_float)sp_bigint_to_int((sp_Bigint *)" + ce + ")"
         end
         return ce
       end
@@ -15440,6 +15449,14 @@ class Compiler
  # which take plain `sp_Bigint *` — doesn't warn. Pre-existing
  # latent issue triggered by bigint inside begin/rescue.
           return "(sp_Bigint *)" + val
+        end
+        if at == "poly"
+ # poly-typed source whose payload is an int (SP_TAG_INT). Unbox
+ # via .v.i then re-box into sp_Bigint *. Common in optcarrot
+ # where Mixer/Noise/Pulse `sample` methods end up with a "poly"
+ # return slot because their bodies have heterogeneous tails.
+          @needs_rb_value = 1
+          return "sp_bigint_new_int((" + val + ").v.i)"
         end
         return "sp_bigint_new_int(" + val + ")"
       end
@@ -20300,13 +20317,21 @@ class Compiler
             if aargs_cp.length >= 2
               a0_e = compile_expr(aargs_cp[0])
               a1_e = compile_expr(aargs_cp[1])
-              if infer_type(aargs_cp[0]) == "poly"
+              a0_t_cp = infer_type(aargs_cp[0])
+              if a0_t_cp == "poly"
                 a0_e = "sp_poly_to_f(" + a0_e + ")"
+              elsif a0_t_cp == "bigint" || expr_emit_is_bigint(aargs_cp[0]) == 1
+                @needs_bigint = 1
+                a0_e = "(mrb_float)sp_bigint_to_int((sp_Bigint *)" + a0_e + ")"
               else
                 a0_e = "(mrb_float)(" + a0_e + ")"
               end
-              if infer_type(aargs_cp[1]) == "poly"
+              a1_t_cp = infer_type(aargs_cp[1])
+              if a1_t_cp == "poly"
                 a1_e = "sp_poly_to_f(" + a1_e + ")"
+              elsif a1_t_cp == "bigint" || expr_emit_is_bigint(aargs_cp[1]) == 1
+                @needs_bigint = 1
+                a1_e = "(mrb_float)sp_bigint_to_int((sp_Bigint *)" + a1_e + ")"
               else
                 a1_e = "(mrb_float)(" + a1_e + ")"
               end
