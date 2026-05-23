@@ -4361,6 +4361,34 @@ class Compiler
   end
 
  # ---- Array type helpers ----
+ # Box a per-element get expression into an sp_RbVal for the
+ # heterogeneous Array#+ path. The element type comes from the
+ # source array's static type. poly_array elements already are
+ # sp_RbVal; primitive families need sp_box_*; ptr_array uses
+ # the element's runtime cls_id (sp_obj_cls_id_of).
+  def elem_to_poly_box(arr_t, elem_expr)
+    bt = base_type(arr_t)
+    if bt == "poly_array"
+      return elem_expr
+    end
+    if bt == "int_array"
+      return "sp_box_int(" + elem_expr + ")"
+    end
+    if bt == "str_array"
+      return "sp_box_str(" + elem_expr + ")"
+    end
+    if bt == "float_array"
+      return "sp_box_float(" + elem_expr + ")"
+    end
+    if bt == "sym_array"
+      return "sp_box_sym((sp_sym)(" + elem_expr + "))"
+    end
+    if is_ptr_array_type(bt) == 1
+      return "({ void *_p = (void *)(" + elem_expr + "); sp_box_obj(_p, sp_obj_cls_id_of(_p)); })"
+    end
+    elem_expr
+  end
+
   def array_c_prefix(t)
     if t == "str_array"
       return "StrArray"
@@ -16312,6 +16340,30 @@ class Compiler
         return "sp_poly_add(" + compile_expr(recv) + ", " + box_expr_to_poly(@nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1) + ")"
       end
       if is_array_type(lt) == 1
+        rhs_id_arr = @nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1
+        rhs_t_arr = rhs_id_arr >= 0 ? infer_type(rhs_id_arr) : ""
+ # Heterogeneous Array#+ (issue #662). When the two arrays have
+ # different element types, build a sp_PolyArray that boxes each
+ # source element. Both ptr_array variants and the typed array
+ # families fall into this path when the element types differ.
+        if is_array_type(rhs_t_arr) == 1 && base_type(lt) != base_type(rhs_t_arr)
+          @needs_rb_value = 1
+          @needs_poly_array = 1
+          @needs_gc = 1
+          rc = compile_expr_gc_rooted(recv)
+          arg = compile_arg0(nid)
+          lt_pfx_p = array_c_prefix(lt)
+          rt_pfx_p = array_c_prefix(rhs_t_arr)
+          lt_elem_get = "sp_" + lt_pfx_p + "_get(" + rc + ", _i)"
+          rt_elem_get = "sp_" + rt_pfx_p + "_get(" + arg + ", _i)"
+          lt_box = elem_to_poly_box(lt, lt_elem_get)
+          rt_box = elem_to_poly_box(rhs_t_arr, rt_elem_get)
+          tmp = new_temp
+          emit("  sp_PolyArray *" + tmp + " = sp_PolyArray_new();")
+          emit("  { for (mrb_int _i = 0; _i < sp_" + lt_pfx_p + "_length(" + rc + "); _i++) sp_PolyArray_push(" + tmp + ", " + lt_box + "); }")
+          emit("  { for (mrb_int _i = 0; _i < sp_" + rt_pfx_p + "_length(" + arg + "); _i++) sp_PolyArray_push(" + tmp + ", " + rt_box + "); }")
+          return tmp
+        end
         rc = compile_expr_gc_rooted(recv)
         arg = compile_arg0(nid)
         pfx = array_c_prefix(lt)

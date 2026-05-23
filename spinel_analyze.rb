@@ -3260,6 +3260,21 @@ class Compiler
           return "poly"
         end
         if is_array_type(lt) == 1
+ # Heterogeneous Array#+ (issue #662): when the rhs is also an
+ # Array but of a different element type, the result widens to
+ # poly_array. The codegen builds an sp_PolyArray that boxes each
+ # source element; reflect that here so the LV slot inferred from
+ # this expression carries through as poly_array too.
+          args_id_arr_plus = @nd_arguments[nid]
+          if args_id_arr_plus >= 0
+            aargs_arr_plus = get_args(args_id_arr_plus)
+            if aargs_arr_plus.length > 0
+              rt_arr_plus = infer_type(aargs_arr_plus[0])
+              if is_array_type(rt_arr_plus) == 1 && base_type(lt) != base_type(rt_arr_plus)
+                return "poly_array"
+              end
+            end
+          end
           return lt
         end
         if lt == "float"
@@ -24505,6 +24520,10 @@ class Compiler
                   end
                 end
               end
+ # Type-vs-current-slot widening table. The first push out of
+ # int_array (the empty-literal default) lands on the matching
+ # concrete variant below. A subsequent push of an incompatible
+ # type widens to poly_array. Issue #663.
               if is_obj_type(arg_type) == 1
                 target_type = arg_type + "_ptr_array"
                 @needs_gc = 1
@@ -24513,6 +24532,10 @@ class Compiler
                   if names[ki] == arr_name
                     if types[ki] == "int_array"
                       types[ki] = target_type
+                    elsif types[ki] != target_type && is_array_type(types[ki]) == 1
+                      @needs_rb_value = 1
+                      @needs_gc = 1
+                      types[ki] = "poly_array"
                     end
                   end
                   ki = ki + 1
@@ -24524,6 +24547,10 @@ class Compiler
                   if names[ki] == arr_name
                     if types[ki] == "int_array"
                       types[ki] = "str_array"
+                    elsif types[ki] != "str_array" && is_array_type(types[ki]) == 1
+                      @needs_rb_value = 1
+                      @needs_gc = 1
+                      types[ki] = "poly_array"
                     end
                   end
                   ki = ki + 1
@@ -24535,6 +24562,10 @@ class Compiler
                   if names[ki] == arr_name
                     if types[ki] == "int_array"
                       types[ki] = "float_array"
+                    elsif types[ki] != "float_array" && is_array_type(types[ki]) == 1
+                      @needs_rb_value = 1
+                      @needs_gc = 1
+                      types[ki] = "poly_array"
                     end
                   end
                   ki = ki + 1
@@ -24548,6 +24579,10 @@ class Compiler
                   if names[ki] == arr_name
                     if types[ki] == "int_array"
                       types[ki] = "sym_array"
+                    elsif types[ki] != "sym_array" && is_array_type(types[ki]) == 1
+                      @needs_rb_value = 1
+                      @needs_gc = 1
+                      types[ki] = "poly_array"
                     end
                   end
                   ki = ki + 1
