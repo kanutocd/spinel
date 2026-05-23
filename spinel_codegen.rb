@@ -15724,6 +15724,20 @@ class Compiler
           end
         end
       end
+ # Class-method call: `CounterClass.count` lowers to
+ # sp_CounterClass_cls_count whose return slot may have been
+ # promoted to bigint. Detect via the recv's ConstantReadNode
+ # (or ConstantPathNode) and the cls_cmeth_return.
+      if @nd_type[rcv_eb_user] == "ConstantReadNode" || @nd_type[rcv_eb_user] == "ConstantPathNode"
+        rname_eb = resolve_const_read_name(@nd_name[rcv_eb_user])
+        cidx_eb = find_class_idx(rname_eb)
+        if cidx_eb >= 0
+          cret_eb = cls_method_return(cidx_eb, mn_eb, "cmeth")
+          if base_type(cret_eb) == "bigint"
+            return 1
+          end
+        end
+      end
     end
     if mn_eb != "+" && mn_eb != "-" && mn_eb != "*" && mn_eb != "/" && mn_eb != "%" && mn_eb != "**" &&
        mn_eb != "&" && mn_eb != "|" && mn_eb != "^" && mn_eb != "<<" && mn_eb != ">>" &&
@@ -32535,6 +32549,11 @@ class Compiler
     end
     if at == "mutable_str"
       emit("  { const char *_ps = (const char *)(" + val + "->data); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+      return
+    end
+    if at == "bigint"
+      @needs_bigint = 1
+      emit("  { const char *_bs = sp_bigint_to_s((sp_Bigint *)" + val + "); fputs(_bs, stdout); putchar('" + bsl_n + "'); }")
       return
     end
     if at == "int"
