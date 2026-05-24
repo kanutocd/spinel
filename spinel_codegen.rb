@@ -20163,13 +20163,6 @@ class Compiler
             if def_at_f == "string" || def_at_f == "mutable_str"
               return "(sp_SymIntHash_has_key(" + rc + ", " + key + ") ? sp_int_to_s(sp_SymIntHash_get(" + rc + ", " + key + ")) : " + defval + ")"
             end
- # Sibling of the str_int_hash coerce below (#671). Int-leaf
- # hash + nil default in an RBS-pinned nullable-pointer return
- # collapses to NULL — the int values can't satisfy the
- # declared pointer return type.
-            if def_at_f == "nil" && is_nullable_pointer_type(@current_method_return) == 1
-              return "((" + c_type(@current_method_return) + ")NULL)"
-            end
             return "(sp_SymIntHash_has_key(" + rc + ", " + key + ") ? sp_SymIntHash_get(" + rc + ", " + key + ") : " + defval + ")"
           end
           return "sp_SymIntHash_get((sp_SymIntHash *)(" + rc + "), " + key + ")"
@@ -20698,17 +20691,6 @@ class Compiler
               @needs_rb_value = 1
               boxed_def = box_value_to_poly(def_at_f, defval)
               return "(sp_StrIntHash_has_key(" + rc + ", " + key + ") ? sp_box_int(sp_StrIntHash_get(" + rc + ", " + key + ")) : " + boxed_def + ")"
-            end
- # int-leaf + nil default inside a method whose RBS-declared
- # return is a nullable pointer (e.g. `-> String?`): the int
- # hash can never carry pointer values, so the only
- # RBS-consistent outcome is nil (NULL). The literal empty
- # `@slots = {}` shape that motivated this issue has no
- # observed string writes, so we never reach a get that would
- # need to surface a real value. Emit NULL. Sibling of the
- # `hash[k] || rhs` coerce added by #660. Issue #671.
-            if def_at_f == "nil" && is_nullable_pointer_type(@current_method_return) == 1
-              return "((" + c_type(@current_method_return) + ")NULL)"
             end
             return "(sp_StrIntHash_has_key(" + rc + ", " + key + ") ? sp_StrIntHash_get(" + rc + ", " + key + ") : " + defval + ")"
           end
@@ -39035,6 +39017,28 @@ class Compiler
     c_expr
   end
 
+ # Returns 1 if `nid` is a `<typed_hash>.fetch(k, nil)` CallNode --
+ # the shape that motivates the issue #671 return-site coerce. Only
+ # fires for int-leaf hash variants (str_int_hash / sym_int_hash):
+ # for those, the ternary's get arm returns mrb_int and a nil default
+ # also lowers to 0, so the whole expression is "int" but the
+ # surrounding method may have an RBS-pinned nullable-pointer return.
+  def fetch_with_nil_default?(nid)
+    if nid < 0 || @nd_type[nid] != "CallNode"
+      return 0
+    end
+    return 0 if @nd_name[nid] != "fetch"
+    recv_fn = @nd_receiver[nid]
+    return 0 if recv_fn < 0
+    rt_fn = infer_type(recv_fn)
+    return 0 if rt_fn != "str_int_hash" && rt_fn != "sym_int_hash"
+    args_id_fn = @nd_arguments[nid]
+    return 0 if args_id_fn < 0
+    aargs_fn = get_args(args_id_fn)
+    return 0 if aargs_fn.length < 2
+    @nd_type[aargs_fn[1]] == "NilNode" ? 1 : 0
+  end
+
   def compile_body_return_inner(body_id, return_type)
     if body_id < 0
       if return_type != "void"
@@ -39464,6 +39468,16 @@ class Compiler
  # const-char-*-typed return signature matches.
         @needs_rb_value = 1
         emit("  return (" + val + ").v.s;")
+      elsif (expr_type == "int" || expr_type == "nil") && is_nullable_pointer_type(return_type) == 1 && fetch_with_nil_default?(last) == 1
+ # Issue #671: `hash.fetch(k, nil)` against an int-leaf hash
+ # (typically empty `@slots = {}`) returns int but the
+ # surrounding method's RBS-pinned return type is a nullable
+ # pointer (`String?`). The int hash can't carry pointer
+ # values, so the only RBS-consistent outcome is NULL. Limit to
+ # the actual return site (not every assignment site) so an
+ # int-typed LV using the same fetch doesn't get the pointer
+ # NULL emit -- the #674 regression.
+        emit("  return NULL;")
       else
  # `--int-overflow=promote` promotes int slots (incl. return
  # type) to bigint at analyze time, so a literal/int-typed
