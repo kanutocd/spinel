@@ -37161,6 +37161,18 @@ class Compiler
       emit("  if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {")
       @indent = @indent + 1
       compile_stmts_body(@nd_body[nid])
+ # `begin..rescue..else..end`: the else body runs only when the
+ # body completed without exception. Place it inside the
+ # setjmp-success branch, after the body. The exception path
+ # (`else { ... rescue ... }` below) doesn't run else. Phase 1B
+ # of the exception handling gap fixes.
+      else_id_b = @nd_else_clause[nid]
+      if else_id_b >= 0
+        else_body_b = @nd_body[else_id_b]
+        if else_body_b >= 0
+          compile_stmts_body(else_body_b)
+        end
+      end
       @indent = @indent - 1
       emit("    sp_exc_top--;")
       if has_retry == 1
@@ -39162,7 +39174,21 @@ class Compiler
       emit("  sp_exc_top++;")
       emit("  if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {")
       @indent = @indent + 1
-      compile_body_into(@nd_body[last], ret_tmp, return_type)
+ # Method-level begin..rescue..else: when else is present, the
+ # begin body's value is discarded -- Ruby semantics says the
+ # else body's last expression becomes the method's return.
+ # Run begin body as a void-shaped block, then else body with
+ # ret_tmp capture. Phase 1B of the exception handling gap fixes.
+      else_id_bri = @nd_else_clause[last]
+      if else_id_bri >= 0
+        compile_stmts_body(@nd_body[last])
+        else_body_bri = @nd_body[else_id_bri]
+        if else_body_bri >= 0
+          compile_body_into(else_body_bri, ret_tmp, return_type)
+        end
+      else
+        compile_body_into(@nd_body[last], ret_tmp, return_type)
+      end
       emit("  sp_exc_top--;")
       @indent = @indent - 1
       emit("  } else {")
