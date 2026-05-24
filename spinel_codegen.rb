@@ -27004,6 +27004,7 @@ class Compiler
       @needs_str_array = 1
       tmp = new_temp
       emit("  sp_StrArray *" + tmp + " = sp_StrArray_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       k = 0
       while k < elems.length
         emit("  sp_StrArray_push(" + tmp + ", " + compile_expr(elems[k]) + ");")
@@ -27015,6 +27016,7 @@ class Compiler
       @needs_rb_value = 1
       tmp = new_temp
       emit("  sp_PolyArray *" + tmp + " = sp_PolyArray_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       k = 0
       while k < elems.length
         et = infer_type(elems[k])
@@ -27085,6 +27087,7 @@ class Compiler
       @needs_float_array = 1
       tmp = new_temp
       emit("  sp_FloatArray *" + tmp + " = sp_FloatArray_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       k = 0
       while k < elems.length
         emit("  sp_FloatArray_push(" + tmp + ", " + compile_expr(elems[k]) + ");")
@@ -27228,6 +27231,7 @@ class Compiler
       @needs_int_str_hash = 1
       tmp = new_temp
       emit("  sp_IntStrHash *" + tmp + " = sp_IntStrHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_IntStrHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + compile_expr(@nd_expression[el]) + ");")
@@ -27239,6 +27243,7 @@ class Compiler
       @needs_str_str_hash = 1
       tmp = new_temp
       emit("  sp_StrStrHash *" + tmp + " = sp_StrStrHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           vt = infer_type(@nd_expression[el])
@@ -27263,6 +27268,7 @@ class Compiler
       @needs_sym_int_hash = 1
       tmp = new_temp
       emit("  sp_SymIntHash *" + tmp + " = sp_SymIntHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           v_syh = compile_expr(@nd_expression[el])
@@ -27279,6 +27285,7 @@ class Compiler
       @needs_sym_str_hash = 1
       tmp = new_temp
       emit("  sp_SymStrHash *" + tmp + " = sp_SymStrHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_SymStrHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + compile_expr(@nd_expression[el]) + ");")
@@ -27290,6 +27297,7 @@ class Compiler
       @needs_rb_value = 1
       tmp = new_temp
       emit("  sp_SymPolyHash *" + tmp + " = sp_SymPolyHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_SymPolyHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + box_expr_to_poly(@nd_expression[el]) + ");")
@@ -27301,6 +27309,7 @@ class Compiler
       @needs_rb_value = 1
       tmp = new_temp
       emit("  sp_StrPolyHash *" + tmp + " = sp_StrPolyHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_StrPolyHash_set(" + tmp + ", " + compile_expr_as_string(@nd_key[el]) + ", " + box_expr_to_poly(@nd_expression[el]) + ");")
@@ -27316,6 +27325,7 @@ class Compiler
       @needs_poly_poly_hash = 1
       tmp = new_temp
       emit("  sp_PolyPolyHash *" + tmp + " = sp_PolyPolyHash_new();")
+      emit("  SP_GC_ROOT(" + tmp + ");")
       elems.each { |el|
         if @nd_type[el] == "AssocNode"
           emit("  sp_PolyPolyHash_set(" + tmp + ", " + box_expr_to_poly(@nd_key[el]) + ", " + box_expr_to_poly(@nd_expression[el]) + ");")
@@ -27326,6 +27336,7 @@ class Compiler
     @needs_str_int_hash = 1
     tmp = new_temp
     emit("  sp_StrIntHash *" + tmp + " = sp_StrIntHash_new();")
+    emit("  SP_GC_ROOT(" + tmp + ");")
     elems.each { |el|
       if @nd_type[el] == "AssocNode"
         v_sih = compile_expr(@nd_expression[el])
