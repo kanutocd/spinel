@@ -5893,6 +5893,15 @@ class Compiler
         end
       end
       if rt == "int" && recv_is_unresolved_local == 0
+ # Cross-class fan-out: when an int (unresolved) recv calls
+ # `mname`, multiple classes may define the same accessor /
+ # method. Pre-fix #684 returned the FIRST match, which picked
+ # an unrelated class's attr_reader type and widened the call's
+ # static type to a wrong shape (Bag#payload=Hash being returned
+ # for what is actually Wire#payload=String). Collect candidate
+ # return types across all classes; only commit when they agree.
+        cand_rt_cross = ""
+        cand_div_cross = 0
         ci = 0
         while ci < @cls_names.length
  # Check zero-arg methods (getters)
@@ -5906,10 +5915,13 @@ class Compiler
                 mp2 = ci2_mparams[mi2]
               end
               if mp2 == ""
- # Found zero-arg method match
-                mr = cls_method_return(ci, mname)
-                if mr != "int"
-                  return mr
+                mr_cross = cls_method_return(ci, mname)
+                if mr_cross != "int" && mr_cross != ""
+                  if cand_rt_cross == ""
+                    cand_rt_cross = mr_cross
+                  elsif cand_rt_cross != mr_cross
+                    cand_div_cross = 1
+                  end
                 end
               end
             end
@@ -5918,19 +5930,30 @@ class Compiler
  # Check attr_readers (walks parent chain — issue #508).
           if cls_has_attr_reader(ci, mname) == 1
             ivt = cls_ivar_type(ci, "@" + mname)
-            if ivt != "int"
-              return ivt
+            if ivt != "int" && ivt != ""
+              if cand_rt_cross == ""
+                cand_rt_cross = ivt
+              elsif cand_rt_cross != ivt
+                cand_div_cross = 1
+              end
             end
           end
  # Check methods with args
           midx = cls_find_method_direct(ci, mname)
           if midx >= 0
-            mr = cls_method_return(ci, mname)
-            if mr != "int"
-              return mr
+            mr_arg_cross = cls_method_return(ci, mname)
+            if mr_arg_cross != "int" && mr_arg_cross != ""
+              if cand_rt_cross == ""
+                cand_rt_cross = mr_arg_cross
+              elsif cand_rt_cross != mr_arg_cross
+                cand_div_cross = 1
+              end
             end
           end
           ci = ci + 1
+        end
+        if cand_div_cross == 0 && cand_rt_cross != ""
+          return cand_rt_cross
         end
       end
       if is_obj_type(rt) == 1
@@ -12876,15 +12899,22 @@ class Compiler
                       ptypes[pk] = default_obj_t
                       cls_meth_ptypes_put(oci, j, ptypes)
                     else
+ # See the top-level-method twin below: commit only when
+ # exactly one class has the called surface. Multi-match
+ # ambiguity (same-named attr_accessor on unrelated
+ # classes) used to silently pick the first hit, mis-typing
+ # the param and cascading to poly downstream. Issue #684.
                       ci2 = 0
+                      match_count_cm = 0
                       best = -1
                       while ci2 < @cls_names.length
-                        if best < 0 && class_has_all_methods(ci2, called) == 1
+                        if class_has_all_methods(ci2, called) == 1
+                          match_count_cm = match_count_cm + 1
                           best = ci2
                         end
                         ci2 = ci2 + 1
                       end
-                      if best >= 0
+                      if best >= 0 && match_count_cm == 1
                         ptypes[pk] = "obj_" + @cls_names[best]
                         cls_meth_ptypes_put(oci, j, ptypes)
                       end
@@ -12940,15 +12970,23 @@ class Compiler
                   ptypes[pk] = default_obj_t
                   @meth_param_types[mi] = ptypes.join(",")
                 else
+ # Collect EVERY user class that has all the methods called on
+ # this param; commit only when the set has a single member.
+ # The pre-fix "first class wins" rule picked an arbitrary
+ # class when multiple shared the same attr name, mis-typing
+ # the param and polluting downstream call-site widening
+ # (#684).
                   ci2 = 0
+                  match_count_param = 0
                   best = -1
                   while ci2 < @cls_names.length
-                    if best < 0 && class_has_all_methods(ci2, called) == 1
+                    if class_has_all_methods(ci2, called) == 1
+                      match_count_param = match_count_param + 1
                       best = ci2
                     end
                     ci2 = ci2 + 1
                   end
-                  if best >= 0
+                  if best >= 0 && match_count_param == 1
                     ptypes[pk] = "obj_" + @cls_names[best]
                     @meth_param_types[mi] = ptypes.join(",")
                   end
@@ -16991,15 +17029,45 @@ class Compiler
                   at_p = infer_type(arg_ids_p[0])
                   if at_p != "int" && at_p != "nil"
                     iname_p = "@" + bname
+ # Narrow the fan-out: when the receiver has a closed
+ # observed-class set, restrict the writer-widening to
+ # those classes only. Without this guard, every class
+ # that happens to define the same attr_writer (e.g.
+ # unrelated `Bag#payload=` and `Wire#payload=`) gets
+ # its ivar widened to the call-site arg's type, then
+ # `widen_uninit_attr_ivars_to_poly` cascades that to
+ # poly across the program. Issue #684.
+                    obs_ids_pw = observed_class_ids_for_recv(@nd_receiver[nid], @current_class_idx)
+                    obs_filter_pw = (obs_ids_pw != "")
+                    obs_list_pw = "".split(",")
+                    if obs_filter_pw
+                      obs_list_pw = obs_ids_pw.split(",")
+                    end
                     ci_p = 0
                     while ci_p < @cls_names.length
-                      writers_p = @cls_attr_writers[ci_p].split(";")
-                      wk_p = 0
-                      while wk_p < writers_p.length
-                        if writers_p[wk_p] == bname
-                          update_ivar_type(ci_p, iname_p, at_p)
+                      skip_pw = 0
+                      if obs_filter_pw
+                        in_set_pw = 0
+                        ol_pw = 0
+                        while ol_pw < obs_list_pw.length
+                          if obs_list_pw[ol_pw].to_i == ci_p
+                            in_set_pw = 1
+                          end
+                          ol_pw = ol_pw + 1
                         end
-                        wk_p = wk_p + 1
+                        if in_set_pw == 0
+                          skip_pw = 1
+                        end
+                      end
+                      if skip_pw == 0
+                        writers_p = @cls_attr_writers[ci_p].split(";")
+                        wk_p = 0
+                        while wk_p < writers_p.length
+                          if writers_p[wk_p] == bname
+                            update_ivar_type(ci_p, iname_p, at_p)
+                          end
+                          wk_p = wk_p + 1
+                        end
                       end
                       ci_p = ci_p + 1
                     end
