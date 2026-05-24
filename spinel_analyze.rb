@@ -3411,7 +3411,16 @@ class Compiler
           return "poly"
         end
         if is_array_type(lt) == 1
- # Array#* (repeat) yields another array of the same element type.
+ # Array#* has two shapes: `arr * n` (Integer) repeats and yields
+ # another array of the same element type; `arr * sep` (String)
+ # joins and yields a string.
+          args_id_am = @nd_arguments[nid]
+          if args_id_am >= 0
+            aargs_am = get_args(args_id_am)
+            if aargs_am.length > 0 && infer_type(aargs_am.first) == "string"
+              return "string"
+            end
+          end
           return lt
         end
         if lt == "complex"

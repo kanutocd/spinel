@@ -17013,6 +17013,21 @@ class Compiler
         return "sp_poly_mul(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
       end
       if is_array_type(lt) == 1
+ # `Array * String` is join, not repeat. Without this dispatch the
+ # int-count repeat path below treats the string pointer as a loop
+ # count and either blows out memory or emits garbage.
+        args_id_am = @nd_arguments[nid]
+        if args_id_am >= 0
+          aa_am = get_args(args_id_am)
+          if aa_am.length > 0 && infer_type(aa_am[0]) == "string"
+            if lt == "int_array"
+              return "sp_IntArray_join(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+            end
+            if lt == "str_array"
+              return "sp_StrArray_join(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+            end
+          end
+        end
  # All array kinds expose `_new` / `_length` / `_get` / `_push` with
  # the same shape, so the repeat loop is a single template
  # parameterized by the C prefix.
