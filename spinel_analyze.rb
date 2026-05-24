@@ -20726,6 +20726,17 @@ class Compiler
               psj[ppj] = new_t
               @needs_rb_value = 1
               chj = 1
+ # Refresh @nd_inferred_type entries for `pnj[ppj]` reads /
+ # writes / receiver-uses + the RHS expressions of LV writes
+ # to the widened type. Without this:
+ # - codegen-side compile_array_method_expr dispatches on the
+ #   pre-widen cached recv type (sp_IntArray_length on a
+ #   PolyArray slot)
+ # - the LV write's `set_var_type(lname, rhs_t)` reverts the
+ #   scope widening when rhs_t is the cached narrower type
+ # `new_t` (typically "poly_array") matches what compile_map_expr's
+ # bigint arm actually builds.
+              refresh_inferred_type_for_lv_walk(sj, pnj[ppj], new_t)
             end
           end
           ppj = ppj + 1
@@ -20735,6 +20746,87 @@ class Compiler
         end
       end
       sj = sj + 1
+    end
+  end
+
+ # True (1) if the block body contains any CallNode whose method
+ # is an arith op (`+ - * / % **`). Used by walk_reinfer_lv_writes
+ # to recognize the canonical `N.times.map { |i| ...; i + 1 }`
+ # shape under promote -- the cached "int" classification of the
+ # tail's `+` lags behind codegen, which actually widens to bigint
+ # and builds a PolyArray accumulator. Only checks the top-level
+ # stmts list (block bodies are flat StatementsNode); a deeper
+ # walk isn't needed because the promote-widening signal we care
+ # about is the tail expression, and arith there is enough to
+ # confirm the bigint path.
+  def block_body_has_promote_widening_arith(body_nid)
+    if body_nid < 0
+      return 0
+    end
+    stmts = parse_id_list(@nd_stmts[body_nid])
+    k = 0
+    while k < stmts.length
+      sid = stmts[k]
+      if @nd_type[sid] == "CallNode"
+        mn_arith = @nd_name[sid]
+        if mn_arith == "+" || mn_arith == "-" || mn_arith == "*" || mn_arith == "/" || mn_arith == "%" || mn_arith == "**"
+          return 1
+        end
+      end
+      k = k + 1
+    end
+    0
+  end
+
+ # Clear cached @nd_inferred_type entries for every LV read / write
+ # of `lv_name` (and any CallNode whose receiver is that LV) inside
+ # the scope's body subtree. Pairs with promote_reinfer_lv_scope_types:
+ # when a scope-types entry widens from int_array to poly_array
+ # post-annotate, downstream call sites like `r4.length` keep the
+ # cached "int_array" classification and codegen dispatches the
+ # wrong array helper. Clearing forces codegen's infer_type to fall
+ # back to find_var_type, which reads the widened scope_types.
+  def refresh_inferred_type_for_lv_walk(nid, lv_name, new_t)
+    if nid < 0
+      return
+    end
+    nt_rfr = @nd_type[nid]
+    if (nt_rfr == "LocalVariableReadNode" || nt_rfr == "LocalVariableWriteNode" || nt_rfr == "LocalVariableOrWriteNode" || nt_rfr == "LocalVariableAndWriteNode" || nt_rfr == "LocalVariableOperatorWriteNode" || nt_rfr == "LocalVariableTargetNode") && @nd_name[nid] == lv_name
+      if nid < @nd_inferred_type.length
+        @nd_inferred_type[nid] = new_t
+      end
+ # Also refresh the LV write's RHS-expression cache. The codegen
+ # LV write path reads `rhs_t = infer_type(@nd_expression[nid])`
+ # and calls `set_var_type(lname, rhs_t)`; if rhs_t is the stale
+ # narrower type, set_var_type undoes the scope-widening and
+ # downstream `r4.length` dispatches the wrong array helper.
+      if nt_rfr == "LocalVariableWriteNode"
+        ex_rfr = @nd_expression[nid]
+        if ex_rfr >= 0 && ex_rfr < @nd_inferred_type.length
+          @nd_inferred_type[ex_rfr] = new_t
+        end
+      end
+    end
+    if nt_rfr == "CallNode"
+ # A CallNode whose recv is the widened LV: clear its own cached
+ # return type so codegen recomputes the dispatch based on the
+ # widened recv. We don't overwrite to `new_t` here because the
+ # call's RETURN type (e.g. length → int) is unrelated to the
+ # array variant; clearing makes infer_type fall back to a fresh
+ # compute that consults the refreshed recv.
+      rcv_rfr = @nd_receiver[nid]
+      if rcv_rfr >= 0 && @nd_type[rcv_rfr] == "LocalVariableReadNode" && @nd_name[rcv_rfr] == lv_name
+        if nid < @nd_inferred_type.length
+          @nd_inferred_type[nid] = ""
+        end
+      end
+    end
+    cs_rfr = []
+    push_child_ids(nid, cs_rfr)
+    k_rfr = 0
+    while k_rfr < cs_rfr.length
+      refresh_inferred_type_for_lv_walk(cs_rfr[k_rfr], lv_name, new_t)
+      k_rfr = k_rfr + 1
     end
   end
 
@@ -20781,6 +20873,21 @@ class Compiler
                 bret_late = infer_type(map_stmts.last)
                 if bret_late == "bigint"
                   @reinfer_lv_found = "poly_array"
+                end
+ # `N.times.map { |i| ...; i + 1 }` under promote: the block tail
+ # caches as "int" because walk_and_cache declared `i` as int (the
+ # block_param_type_at fallback for times.map). The codegen path
+ # widens `i` to bigint and builds a PolyArray. Walk the block body
+ # for arith CallNodes -- under promote those always emit bigint,
+ # so the LV slot must widen too. Issue: bundle_misc_b's
+ # t_gc_root_range_and_times_map.
+                if @reinfer_lv_found == "" && @int_overflow_mode == "promote" && bret_late == "int"
+                  recv_chk = @nd_receiver[expr]
+                  if recv_chk >= 0 && @nd_type[recv_chk] == "CallNode" && @nd_name[recv_chk] == "times" && @nd_block[recv_chk] < 0
+                    if block_body_has_promote_widening_arith(map_body) == 1
+                      @reinfer_lv_found = "poly_array"
+                    end
+                  end
                 end
               end
             end
