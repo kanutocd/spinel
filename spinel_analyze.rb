@@ -14648,6 +14648,105 @@ class Compiler
     end
   end
 
+ # Project a yield-arg node's type to the small set that affects
+ # the `_block(<sig>, void *)` C signature: "bigint" forces
+ # `sp_Bigint *`; everything else fits `mrb_int` (the pointer-
+ # reinterpret convention used by str / array / obj args).
+ #
+ # In promote mode, `walk_and_cache` may have cached an arith
+ # CallNode arg as "int" before the int -> bigint sweep landed
+ # (block params declared via block_param_type_at's "int"
+ # fallback for no-recv user-yield-method blocks). The yield
+ # codegen's actual emit lowers `x * 2` (x: bigint) to
+ # sp_bigint_mul -> sp_Bigint *, so the sig has to widen too.
+ # Cross-check syntactic shape on top of infer_type: IntegerNode
+ # and arith CallNode are always bigint at promote-mode emit
+ # time, regardless of cache.
+  def project_yield_arg_t(arg_id)
+    t = infer_type(arg_id)
+    return "bigint" if base_type(t) == "bigint"
+    if @int_overflow_mode == "promote"
+      nt = @nd_type[arg_id]
+      if nt == "IntegerNode"
+        return "bigint"
+      end
+      if nt == "CallNode"
+        mn = @nd_name[arg_id]
+        if mn == "+" || mn == "-" || mn == "*" || mn == "/" || mn == "%" || mn == "**"
+          return "bigint"
+        end
+      end
+    end
+    "int"
+  end
+
+ # Mirror of body_yield_arg_types but each per-position slot is
+ # projected via `project_yield_arg_t` -- captures both
+ # cache-correct bigint inferences and the promote-mode syntactic
+ # signal that the cache may have missed.
+  def project_yield_arg_types(nid, types)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "YieldNode"
+      if @nd_arguments[nid] >= 0
+        args = get_args(@nd_arguments[nid])
+        k = 0
+        while k < args.length
+          if k < types.length
+            at = project_yield_arg_t(args[k])
+            if types[k] == ""
+              types[k] = at
+            elsif types[k] != at && at == "bigint"
+ # Any bigint slot wins -- once we've seen a bigint at this
+ # position, the sig has to accommodate.
+              types[k] = "bigint"
+            end
+          end
+          k = k + 1
+        end
+      end
+      return
+    end
+    if @nd_type[nid] == "DefNode"
+      return
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      project_yield_arg_types(cs[k], types)
+      k = k + 1
+    end
+  end
+
+ # Walk the yield-using method's body and return per-position
+ # projected yield arg types joined with "|" for storage in
+ # @meth_blk_param_types. Empty arity returns "".
+  def infer_yield_blk_param_types_for_body(body_id, ptypes_str)
+    arity = body_max_yield_arity(body_id, 0)
+    return "" if arity == 0 || body_id < 0
+    types = "".split(",")
+    k = 0
+    while k < arity
+      types.push("")
+      k = k + 1
+    end
+    project_yield_arg_types(body_id, types)
+    proj = "".split(",")
+    j = 0
+    while j < types.length
+      t = types[j]
+      if t == ""
+        proj.push("int")
+      else
+        proj.push(t)
+      end
+      j = j + 1
+    end
+    proj.join("|")
+  end
+
   def infer_proc_blk_param_types
     @meth_blk_param_types = "".split(",")
     mi = 0
@@ -14658,6 +14757,12 @@ class Compiler
         acc = "".split(",")
         collect_blk_call_arg_types(@meth_body_ids[mi], bpname, acc, @meth_body_ids[mi])
         @meth_blk_param_types.push(acc.join("|"))
+      elsif @meth_has_yield[mi] == 1
+ # Yield-using top-level method: project yield arg types so the
+ # codegen-side `_block` C signature can pick `sp_Bigint *` over
+ # the default `mrb_int` when every yield site passes bigint.
+ # Issue #664 (promote-mode tail).
+        @meth_blk_param_types.push(infer_yield_blk_param_types_for_body(@meth_body_ids[mi], @meth_param_types[mi]))
       else
         @meth_blk_param_types.push("")
       end
@@ -14682,7 +14787,18 @@ class Compiler
               collect_blk_call_arg_types(body_id, bpname, acc, body_id)
               @cls_cmeth_blk_param_types.push(acc.join("|"))
             else
-              @cls_cmeth_blk_param_types.push("")
+ # Class methods (def self.X) don't have a per-method yield-
+ # tracking table -- syntactic yield in a cmeth body is rare in
+ # practice. body_max_yield_arity returns 0 for non-yielding
+ # bodies so infer_yield_blk_param_types_for_body short-circuits
+ # to "". Pre-check arity to skip the (cheap) walk + projection
+ # when no yield is present.
+              body_id = cm_bodies[cmidx].to_i
+              if body_max_yield_arity(body_id, 0) > 0
+                @cls_cmeth_blk_param_types.push(infer_yield_blk_param_types_for_body(body_id, cm_ptypes[cmidx]))
+              else
+                @cls_cmeth_blk_param_types.push("")
+              end
             end
           else
             @cls_cmeth_blk_param_types.push("")
