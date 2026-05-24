@@ -33876,6 +33876,12 @@ class Compiler
       emit("  { const char *_ps = sp_exc_message(" + val + "); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
       return
     end
+ # `puts <cls>` on a value-type sp_Class -- render the name.
+    if at == "class"
+      @needs_class_table = 1
+      emit("  puts(sp_class_to_s(" + val + "));")
+      return
+    end
     if at == "time"
       emit("  { const char *_ts = sp_time_inspect_v(" + val + "); fputs(_ts, stdout); putchar('" + bsl_n + "'); }")
       return
@@ -33976,6 +33982,14 @@ class Compiler
       end
       if at == "symbol"
         emit("  puts(sp_sym_to_s(" + val + "));")
+        k = k + 1
+        next
+      end
+ # `puts <cls>` on a value-type sp_Class -- render the name via
+ # the sp_class_names[] table (mirrors `"#{cls}"` interpolation).
+      if at == "class"
+        @needs_class_table = 1
+        emit("  puts(sp_class_to_s(" + val + "));")
         k = k + 1
         next
       end
