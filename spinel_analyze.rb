@@ -148,6 +148,10 @@ class Compiler
     @meth_body_ids = []
     @meth_has_defaults = "".split(",")
     @meth_rest_index = []
+ # Position of the **kwrest param in @meth_param_names (-1 if no
+ # kwrest). Lets call-site arg-packing detect the slot that should
+ # receive a packed sym_poly_hash of unmatched keyword args.
+    @meth_kwrest_index = []
 
  # ---- Classes (parallel arrays) ----
     @cls_names = "".split(",")
@@ -7697,6 +7701,7 @@ class Compiler
             @meth_has_yield.push(0)
             @meth_has_defaults.push("0")
             @meth_rest_index.push(collect_rest_index(sid))
+            @meth_kwrest_index.push(collect_kwrest_index(sid))
           end
         }
       end
@@ -8384,6 +8389,30 @@ class Compiler
     idx = idx + parse_id_list(@nd_requireds[params]).length
     idx = idx + parse_id_list(@nd_optionals[params]).length
     idx = idx + parse_id_list(@nd_keywords[params]).length
+    idx
+  end
+
+ # Position of the `**kwrest` slot in the param name list, or -1
+ # if no kwrest. Slot order matches collect_params_str: reqs, opts,
+ # kws, rest, posts, kwrest, block.
+  def collect_kwrest_index(nid)
+    params = @nd_parameters[nid]
+    if params < 0
+      return -1
+    end
+    kwrest = @nd_keyword_rest[params]
+    if kwrest < 0 || @nd_type[kwrest] != "KeywordRestParameterNode"
+      return -1
+    end
+    idx = 0
+    idx = idx + parse_id_list(@nd_requireds[params]).length
+    idx = idx + parse_id_list(@nd_optionals[params]).length
+    idx = idx + parse_id_list(@nd_keywords[params]).length
+    rest = @nd_rest[params]
+    if rest >= 0 && @nd_type[rest] == "RestParameterNode"
+      idx = idx + 1
+    end
+    idx = idx + parse_id_list(@nd_posts[params]).length
     idx
   end
 
@@ -10016,6 +10045,7 @@ class Compiler
           @meth_has_defaults.push(@meth_has_defaults[si])
           @meth_has_yield.push(@meth_has_yield[si])
           @meth_rest_index.push(@meth_rest_index[si])
+          @meth_kwrest_index.push(@meth_kwrest_index[si])
           @toplevel_include_alias[bare] = 1
           name_to_idx[bare] = @meth_names.length - 1
         elsif @toplevel_include_alias.key?(bare)
@@ -10027,6 +10057,7 @@ class Compiler
           @meth_has_defaults[existing] = @meth_has_defaults[si]
           @meth_has_yield[existing] = @meth_has_yield[si]
           @meth_rest_index[existing] = @meth_rest_index[si]
+          @meth_kwrest_index[existing] = @meth_kwrest_index[si]
         end
       end
       si = si + 1
@@ -10057,6 +10088,7 @@ class Compiler
     @meth_has_defaults.push(defaults_str)
     @meth_has_yield.push(body_has_yield(body_id))
     @meth_rest_index.push(collect_rest_index(nid))
+    @meth_kwrest_index.push(collect_kwrest_index(nid))
     0
   end
 
@@ -10108,6 +10140,7 @@ class Compiler
     @meth_has_defaults.push("")
     @meth_has_yield.push(0)
     @meth_rest_index.push(-1)
+    @meth_kwrest_index.push(-1)
   end
 
   def collect_module(nid)
@@ -10236,6 +10269,7 @@ class Compiler
             @meth_has_yield[existing_dn] = 0
             @meth_has_defaults[existing_dn] = collect_defaults_str(sid)
             @meth_rest_index[existing_dn] = collect_rest_index(sid)
+            @meth_kwrest_index[existing_dn] = collect_kwrest_index(sid)
           else
  # Create as top-level method with module prefix for dispatch
             @meth_names.push(full_dn)
@@ -10252,6 +10286,7 @@ class Compiler
  # default args etc.
             @meth_has_defaults.push(collect_defaults_str(sid))
             @meth_rest_index.push(collect_rest_index(sid))
+            @meth_kwrest_index.push(collect_kwrest_index(sid))
           end
         end
       end
@@ -27904,6 +27939,7 @@ class Compiler
     buf = ir_emit_ia(buf, "@meth_body_ids", @meth_body_ids)
     buf = ir_emit_sa(buf, "@meth_has_defaults", @meth_has_defaults)
     buf = ir_emit_ia(buf, "@meth_rest_index", @meth_rest_index)
+    buf = ir_emit_ia(buf, "@meth_kwrest_index", @meth_kwrest_index)
     buf = ir_emit_ia(buf, "@meth_has_yield", @meth_has_yield)
 
  # Class tables

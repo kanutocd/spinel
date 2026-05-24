@@ -156,6 +156,7 @@ class Compiler
     @meth_body_ids = []
     @meth_has_defaults = "".split(",")
     @meth_rest_index = []
+    @meth_kwrest_index = []
 
  # ---- Classes (parallel arrays) ----
     @cls_names = "".split(",")
@@ -2104,6 +2105,13 @@ class Compiler
   def method_rest_index(mi)
     if mi >= 0 && mi < @meth_rest_index.length
       return @meth_rest_index[mi]
+    end
+    -1
+  end
+
+  def method_kwrest_index(mi)
+    if mi >= 0 && mi < @meth_kwrest_index.length
+      return @meth_kwrest_index[mi]
     end
     -1
   end
@@ -20610,6 +20618,9 @@ class Compiler
       if mname == "[]"
         return "sp_SymPolyHash_get((sp_SymPolyHash *)(" + rc + "), " + compile_arg0_as_sym(nid) + ")"
       end
+      if mname == "inspect" || mname == "to_s"
+        return "sp_SymPolyHash_inspect((sp_SymPolyHash *)(" + rc + "))"
+      end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
         return "sp_SymPolyHash_has_key((sp_SymPolyHash *)(" + rc + "), " + compile_arg0_as_sym(nid) + ")"
       end
@@ -25560,11 +25571,49 @@ class Compiler
       return compile_call_args_splat(nid, mi, pnames, ptypes, defaults, kw_names, kw_vals, kw_arg_ids, positional_ids, splat_idx, rest_param_idx)
     end
 
+ # Pre-compute the kwrest slot index so we can route unmatched kw
+ # args into the packed `**kwargs` hash below.
+    kwrest_param_idx = method_kwrest_index(mi)
+    if kwrest_param_idx >= pnames.length
+      kwrest_param_idx = -1
+    end
+
     result = ""
     k = 0
     while k < pnames.length
       if k > 0
         result = result + ", "
+      end
+ # `**kwargs` slot: pack every kw arg whose name doesn't match an
+ # explicit keyword param into a sym_poly_hash. Done before the per-
+ # pname kw_names check below so the kwrest slot doesn't try to find
+ # itself in kw_names.
+      if k == kwrest_param_idx
+        @needs_sym_poly_hash = 1
+        @needs_gc = 1
+        tmp_kw = new_temp
+        emit("  sp_SymPolyHash *" + tmp_kw + " = sp_SymPolyHash_new();")
+        ki_kw = 0
+        while ki_kw < kw_names.length
+ # Skip kw_names that match an explicit (non-kwrest) param of
+ # the callee; those were already bound to their own slot.
+          consumed = 0
+          pj = 0
+          while pj < pnames.length
+            if pj != kwrest_param_idx && pnames[pj] == kw_names[ki_kw]
+              consumed = 1
+            end
+            pj = pj + 1
+          end
+          if consumed == 0
+            sym_id = compile_symbol_literal(kw_names[ki_kw])
+            emit("  sp_SymPolyHash_set(" + tmp_kw + ", " + sym_id + ", " + box_expr_to_poly(kw_arg_ids[ki_kw]) + ");")
+          end
+          ki_kw = ki_kw + 1
+        end
+        result = result + tmp_kw
+        k = k + 1
+        next
       end
  # Check keyword args first
       kw_found = 0
@@ -40488,6 +40537,8 @@ class Compiler
       @meth_body_ids = val
     elsif name == "@meth_rest_index"
       @meth_rest_index = val
+    elsif name == "@meth_kwrest_index"
+      @meth_kwrest_index = val
     elsif name == "@meth_has_yield"
       @meth_has_yield = val
     elsif name == "@cls_is_value_type"
