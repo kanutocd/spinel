@@ -15649,8 +15649,28 @@ class Compiler
       args_id = @nd_arguments[nid]
       if args_id >= 0
         arg_ids = get_args(args_id)
-        if arg_ids.length >= 1
-          emit("  sp_raise(" + compile_expr(arg_ids[0]) + ");")
+ # `raise ClassName, "msg"` (2-arg form): emit sp_raise_cls with
+ # the class name + message. Mirrors compile_control_call_stmt's
+ # 2-arg arm. Pre-fix the expr-form emitted only the first arg
+ # (the class), which sp_raise accepted as `(const char *)` and
+ # blew up at C compile when the class lowered to an sp_Class
+ # compound literal. Issue: bare-raise re-raise (#A in exception
+ # handling gaps) surfaced this because compile_body_into routes
+ # the body's last raise stmt through compile_expr.
+        if arg_ids.length >= 2
+          if @nd_type[arg_ids[0]] == "ConstantReadNode"
+            emit("  sp_raise_cls(\"" + @nd_name[arg_ids[0]] + "\", " + compile_expr(arg_ids[1]) + ");")
+          else
+            emit("  sp_raise(" + compile_expr(arg_ids[1]) + ");")
+          end
+        elsif arg_ids.length == 1
+          if @nd_type[arg_ids[0]] == "ConstantReadNode"
+            emit("  sp_raise(\"" + @nd_name[arg_ids[0]] + "\");")
+          else
+            emit("  sp_raise(" + compile_expr(arg_ids[0]) + ");")
+          end
+        else
+          emit_bare_raise
         end
       else
         emit_bare_raise
