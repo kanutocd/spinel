@@ -5992,6 +5992,15 @@ class Compiler
         return val
       end
     end
+ # Empty `{}` literal against a typed hash slot: emit the variant's
+ # own _new() rather than the default sp_StrIntHash_new() so the
+ # value's static type matches the destination (avoids -Wincompatible-
+ # pointer-types when the expected slot is sp_StrPolyHash * /
+ # sp_SymStrHash * / etc.).
+    eh_val = empty_hash_coerce(nid, expected_base)
+    if eh_val != ""
+      return eh_val
+    end
  # `[nil] * N` / `[0] * N` against a pointer-array LHS: build a
  # fresh ptr_array pre-filled with N NULLs so subsequent
  # `arr[i] = obj` writes via sp_PtrArray_set land in valid slots.
