@@ -23136,6 +23136,36 @@ class Compiler
       cname = bt[4, bt.length - 4]
       ci = find_class_idx(cname)
       if ci >= 0
+ # `undef <m>` recorded in @undef_*: raise NoMethodError at
+ # the call site so the rescue block sees it. The slot was
+ # already pruned from @cls_meth_names by
+ # collect_class_method_undef; this check fires before any
+ # other dispatch arm. Issue #717.
+        u_chk = 0
+        u_ci = ci
+        while u_ci >= 0 && u_chk == 0
+          ui = 0
+          while ui < @undef_class_idx.length
+            if @undef_class_idx[ui] == u_ci && @undef_method[ui] == mname
+              u_chk = 1
+              ui = @undef_class_idx.length
+            else
+              ui = ui + 1
+            end
+          end
+          if u_chk == 0
+            if @cls_parents[u_ci] != ""
+              u_ci = find_class_idx(@cls_parents[u_ci])
+            else
+              u_ci = -1
+            end
+          end
+        end
+        if u_chk == 1
+          @needs_setjmp = 1
+          rt_u = infer_type(nid)
+          return "(sp_raise_cls(\"NoMethodError\", \"undefined method '" + mname + "' for " + cname + "\"), " + c_default_val(rt_u) + ")"
+        end
         arrow = "->"
         if @cls_is_value_type[ci] == 1
           arrow = "."

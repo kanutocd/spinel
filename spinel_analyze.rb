@@ -8213,6 +8213,64 @@ class Compiler
   def collect_class_method_undef(ci, name)
     @undef_class_idx.push(ci)
     @undef_method.push(name)
+ # Remove the method from this class's method tables so the
+ # compile-time dispatch path stops finding it. cls_find_method
+ # then walks to the parent (or returns -1), so `c.meth` after
+ # `undef meth` raises NoMethodError just like CRuby. Issue #717.
+    if @cls_meth_names[ci] != ""
+      cur_names_u = @cls_meth_names[ci].split(";")
+      hit_u = -1
+      ki_u = 0
+      while ki_u < cur_names_u.length
+        if cur_names_u[ki_u] == name
+          hit_u = ki_u
+          ki_u = cur_names_u.length
+        else
+          ki_u = ki_u + 1
+        end
+      end
+      if hit_u >= 0
+        cur_params_u = @cls_meth_params[ci].split("|")
+        cur_ptypes_u = @cls_meth_ptypes[ci].split("|")
+        cur_returns_u = @cls_meth_returns[ci].split(";")
+        cur_bodies_u = @cls_meth_bodies[ci].split(";")
+        cur_defaults_u = @cls_meth_defaults[ci].split("|")
+        cur_pempty_u = @cls_meth_ptypes_empty[ci].split("|")
+        while cur_pempty_u.length < cur_names_u.length
+          cur_pempty_u.push("")
+        end
+        cur_names_u.delete_at(hit_u)
+        if hit_u < cur_params_u.length
+          cur_params_u.delete_at(hit_u)
+        end
+        if hit_u < cur_ptypes_u.length
+          cur_ptypes_u.delete_at(hit_u)
+        end
+        if hit_u < cur_returns_u.length
+          cur_returns_u.delete_at(hit_u)
+        end
+        if hit_u < cur_bodies_u.length
+          cur_bodies_u.delete_at(hit_u)
+        end
+        if hit_u < cur_defaults_u.length
+          cur_defaults_u.delete_at(hit_u)
+        end
+        if hit_u < cur_pempty_u.length
+          cur_pempty_u.delete_at(hit_u)
+        end
+        @cls_meth_names[ci] = cur_names_u.join(";")
+        @cls_meth_params[ci] = cur_params_u.join("|")
+        @cls_meth_params_version = @cls_meth_params_version + 1
+        @cls_meth_ptypes[ci] = cur_ptypes_u.join("|")
+        @cls_meth_ptypes_version = @cls_meth_ptypes_version + 1
+        @cls_meth_returns[ci] = cur_returns_u.join(";")
+        @cls_meth_bodies[ci] = cur_bodies_u.join(";")
+        @cls_meth_defaults[ci] = cur_defaults_u.join("|")
+        @cls_meth_ptypes_empty[ci] = cur_pempty_u.join("|")
+        @cls_meth_idx_cache = {}
+        @cls_meth_return_cache = {}
+      end
+    end
   end
 
 
