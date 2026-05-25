@@ -235,22 +235,84 @@ Phase 3 widens analyze's `[]` return type for string-valued hashes
 (no real change since `string` is already nullable at the C level —
 mostly tightens up call-site emit where it assumed non-NULL).
 
-## Phase 4 Scope
+## Phase 4 Scope — DEFERRED (2026-05-25)
 
-Implement `*IntHash` → SP_INT_NIL:
+Implementing `*IntHash` → SP_INT_NIL is significantly more invasive
+than initially scoped. First attempt (16:00-16:40 JST) hit three
+cascading issues, all reverted before commit:
 
-1. `lib/sp_runtime.h` `sp_StrIntHash_get`: `return h->default_v;` →
-   `return SP_INT_NIL;` (drop `h->default_v` for the `[]` path —
-   `fetch(k, def)` already handles user default)
-2. Similar for `SymIntHash`
-3. Analyze: `str_int_hash[]` returns `int?` instead of `int`
-4. Codegen: widen LV slot to `int?` when assigned from typed-int
-   hash `[]`
+### Cascade 1: Self-host bootstrap breaks via inferred-LV typing
 
-Caveat: `default_v` is currently used by both `[]` AND `fetch(k)`
-(no-arg `fetch`). Need to distinguish. Likely: keep `default_v`
-field, but `_get` (which lowers `[]`) returns SP_INT_NIL always;
-add `_fetch_default` or pass-through. Determined in Phase 4.
+Changing `analyze`'s `[]` return for `str_int_hash` from `"int"` to
+`"int?"` propagates "int?" through spinel_analyze.rb's OWN type
+inference. Specifically `unify_return_type` and `unify_call_types`
+treat `"int?"` as a distinct type from `"int"`, widening many
+internal calls (like `not_in(name, arr)`) to poly. Mitigations
+attempted:
+
+- `unify_hash_value_types`: treat `int?` as `int` (added)
+- `unify_return_type`: treat `int?` as `int` for fallback (added)
+
+These alone aren't enough — `unify_call_types`'s
+`base_type(old_pt) == base_type(at)` check at line 11568 still
+diverges for `("string", "int?")` pairs, which then fall through
+to the trailing "incompatible → poly" branch. The bootstrap fails
+with `lv_kt = sp_box_nil()` typing (poly) on locals that should
+be `const char *` (the result of `infer_type(...)`).
+
+### Cascade 2: `&&=` / `||=` codegen treats `SP_INT_NIL` as truthy
+
+The compound-assignment codegen lowers `counts[k] &&= v` to:
+
+```c
+if (sp_StrIntHash_get(counts, k)) {
+  sp_StrIntHash_set(counts, k, v);
+}
+```
+
+The `if (...)` is C-truthy on the raw mrb_int. After Phase 4,
+missing-key returns `SP_INT_NIL = INT64_MIN`, which is **non-zero**
+and therefore C-truthy. Ruby says nil is falsy. The fix requires
+the codegen to emit `if (!sp_int_is_nil(...))` for typed-int-hash
+sources — a parallel arm in `compile_index_and_assign` /
+`compile_index_or_assign`.
+
+### Cascade 3: Existing test assumptions
+
+`test/sym_int_hash_merge.rb` line 10 expects `puts h3[:q]` after
+`h3.delete(:q)` to output `0`. Updating to empty line (Ruby's
+`puts nil`) requires the int? puts arm AND propagation through
+the analyze type so the call site dispatches to it. Without all
+cascades fixed, the test produces the raw `-9223372036854775808`
+output.
+
+### Re-planned Phase 4 (alternative: poly wrapper)
+
+The cleaner approach, mirroring `Array#index` (commit e46ec54):
+
+1. Add `sp_StrIntHash_get_poly(h, k)` runtime helper that returns
+   `sp_RbVal` (sp_box_nil() for missing, sp_box_int(v) for present).
+2. Same for `sp_SymIntHash_get_poly`.
+3. Codegen `h[k]` direct dispatch for `str_int_hash` / `sym_int_hash`
+   routes to `_get_poly` (returns sp_RbVal).
+4. Analyze `[]` returns `"poly"` for these variants.
+5. Compound writes (`&&=`/`||=`) read via `_get_poly`, write via
+   `_set` after unboxing.
+
+The poly route reuses existing infrastructure (sp_poly_truthy,
+sp_poly_inspect, etc.) and avoids the int? cascade. Cost: boxing
+on every `[]` lookup. For frameworks heavy in typed-int hash use,
+profile before committing.
+
+### Status
+
+Phase 4 deferred until either:
+- A focused session implements the poly-wrapper route end-to-end, or
+- The int? cascade is fixed at all sites (3+ places in
+  spinel_analyze.rb plus the compound-assignment codegen)
+
+Until then, `*IntHash[missing]` returns the value-type zero (`0`)
+— a known Ruby semantic violation, but stable.
 
 ## Phase 5 Scope
 
