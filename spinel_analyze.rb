@@ -8296,11 +8296,22 @@ class Compiler
           while mk < mstmts.length
             sid = mstmts[mk]
             if @nd_type[sid] == "DefNode"
-              mname = @nd_name[sid]
+ # `def self.X` is a class-level method on the module and
+ # does NOT flow through include. Copying it as an instance
+ # method on the host class also drags the module's @ivar
+ # writes into the class's ivar table and clobbers the
+ # module's hoisted const slot. Issue #714.
+              is_cls_def = 0
+              if @nd_receiver[sid] >= 0 && @nd_type[@nd_receiver[sid]] == "SelfNode"
+                is_cls_def = 1
+              end
+              if is_cls_def == 0
+                mname = @nd_name[sid]
  # Only add if class doesn't already have this method
-              existing = cls_find_method_direct(ci, mname)
-              if existing < 0
-                collect_class_method(ci, sid)
+                existing = cls_find_method_direct(ci, mname)
+                if existing < 0
+                  collect_class_method(ci, sid)
+                end
               end
             end
             mk = mk + 1
