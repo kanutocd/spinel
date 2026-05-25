@@ -20778,6 +20778,11 @@ class Compiler
       if mname == "dup" || mname == "to_a"
         return "sp_PolyArray_dup(" + rc + ")"
       end
+      if mname == "compact"
+ # Strip SP_TAG_NIL elements. The runtime helper handles the
+ # tag-table walk. Issue #725.
+        return "sp_PolyArray_compact(" + rc + ")"
+      end
       if mname == "empty?"
         return "(sp_PolyArray_length(" + rc + ") == 0)"
       end

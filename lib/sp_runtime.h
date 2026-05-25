@@ -1976,6 +1976,8 @@ static sp_PolyArray *sp_PolyArray_slice_bang(sp_PolyArray *a, mrb_int from, mrb_
   return r;
 }
 static sp_PolyArray *sp_PolyArray_dup(sp_PolyArray *a) { sp_PolyArray *b = sp_PolyArray_new(); for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(b, a->data[i]); return b; }
+/* Array#compact for poly_array: keep elements whose tag is not SP_TAG_NIL. */
+static sp_PolyArray *sp_PolyArray_compact(sp_PolyArray *a) { sp_PolyArray *b = sp_PolyArray_new(); if (!a) return b; for (mrb_int i = 0; i < a->len; i++) { if (a->data[i].tag != SP_TAG_NIL) sp_PolyArray_push(b, a->data[i]); } return b; }
 /* Sum the integer-tagged elements of a poly_array. Used by
    `Array#sum` on a poly_array whose runtime tags are uniform int
    (e.g. the result of `arr.map { _1[:int_key] }`). Non-int tags
