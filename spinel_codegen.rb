@@ -1319,7 +1319,18 @@ class Compiler
  # Used by both the stmt-form and expr-form raise arms.
   def emit_raise_one_arg(arg_id)
     if @nd_type[arg_id] == "ConstantReadNode"
-      emit("  sp_raise(\"" + @nd_name[arg_id] + "\");")
+ # `raise ArgumentError` -- raise the named class with no message.
+ # sp_raise(msg) hardcodes the class to RuntimeError, so passing
+ # "ArgumentError" as `msg` raises a RuntimeError-with-message,
+ # which `rescue ArgumentError` doesn't catch. Route through
+ # sp_raise_cls(class, msg) so the class survives. Issue #704.
+      cname_cr = @nd_name[arg_id]
+      if is_exception_class_name(cname_cr) == 1
+        @needs_exc_class_hierarchy = 1
+        emit("  sp_raise_cls(\"" + cname_cr + "\", " + exc_default_msg_expr(cname_cr) + ");")
+        return
+      end
+      emit("  sp_raise(\"" + cname_cr + "\");")
       return
     end
  # `raise <BuiltinExc>.new(<msg>)` -- ConstantReadNode is the exc
@@ -13367,6 +13378,61 @@ class Compiler
         end
       end
       return "0"
+    end
+    if t == "BeginNode"
+ # `puts (begin ... rescue ... end)` -- begin/rescue used as
+ # an expression. Same return-capture pattern as
+ # compile_body_return_inner's BeginNode arm. Issue #704.
+      rt_bn = infer_type(nid)
+      rc_id_bn = @nd_rescue_clause[nid]
+      ec_id_bn = @nd_ensure_clause[nid]
+      if rc_id_bn < 0 && ec_id_bn < 0
+ # Bare `begin ... end` with no rescue / ensure -- evaluate the
+ # body's last expression. compile_body_into emits the body and
+ # captures the last expr into ret_tmp.
+        ret_tmp_bn = new_temp
+        emit("  " + c_type(rt_bn) + " " + ret_tmp_bn + " = " + c_default_val(rt_bn) + ";")
+        compile_body_into(@nd_body[nid], ret_tmp_bn, rt_bn)
+        return ret_tmp_bn
+      end
+      if rc_id_bn >= 0 && body_has_retry(@nd_body[rc_id_bn]) == 0
+ # Single-setjmp rescue: capture begin body's last expression OR
+ # rescue arm's last expression into ret_tmp. When ensure is
+ # present, run the ensure body for side effects after the
+ # rescue chain -- its value is discarded per Ruby semantics.
+        @needs_setjmp = 1
+        ret_tmp_bn = new_temp
+        emit("  " + c_type(rt_bn) + " " + ret_tmp_bn + " = " + c_default_val(rt_bn) + ";")
+        emit("  sp_exc_top++;")
+        emit("  if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {")
+        @indent = @indent + 1
+        else_id_bn = @nd_else_clause[nid]
+        if else_id_bn >= 0
+          compile_stmts_body(@nd_body[nid])
+          else_body_bn = @nd_body[else_id_bn]
+          if else_body_bn >= 0
+            compile_body_into(else_body_bn, ret_tmp_bn, rt_bn)
+          end
+        else
+          compile_body_into(@nd_body[nid], ret_tmp_bn, rt_bn)
+        end
+        emit("  sp_exc_top--;")
+        @indent = @indent - 1
+        emit("  } else {")
+        @indent = @indent + 1
+        emit("  sp_exc_top--;")
+        compile_rescue_chain_into(rc_id_bn, ret_tmp_bn, rt_bn)
+        @indent = @indent - 1
+        emit("  }")
+        if ec_id_bn >= 0
+ # ensure body's value is discarded; emit as side-effecting stmts.
+          compile_stmts_body(@nd_body[ec_id_bn])
+        end
+        return ret_tmp_bn
+      end
+ # retry shapes: fall back to stmt form (no capture).
+      compile_begin_stmt(nid)
+      return c_default_val(rt_bn)
     end
     if t == "CaseNode"
  # Case as expression: use a temp var and compile each branch as assignment
