@@ -6680,8 +6680,8 @@ class Compiler
  # Class instance methods.
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       bodies = @cls_meth_bodies[ci].split(";")
       cls_changed = 0
       mj = 0
@@ -9570,7 +9570,7 @@ class Compiler
  # Issue #664 promote-mode tail.
     pre = blk_param_types_for_body(bid)
     if pre != ""
-      pre_parts = pre.split("|")
+      pre_parts = pre.split("|", -1)
       parts_pre = "".split(",")
       k_pre = 0
       while k_pre < arity
@@ -9597,8 +9597,8 @@ class Compiler
     ltypes = "".split(",")
     sn_b = @nd_scope_names[bid]
     if sn_b != ""
-      lnames = sn_b.split("|")
-      ltypes = @nd_scope_types[bid].split("|")
+      lnames = sn_b.split("|", -1)
+      ltypes = @nd_scope_types[bid].split("|", -1)
     end
     j = 0
     while j < lnames.length
@@ -9841,7 +9841,7 @@ class Compiler
     if ci < 0 || ci >= @cls_meth_ptypes.length || midx < 0
       return "".split(",")
     end
-    all = @cls_meth_ptypes[ci].split("|")
+    all = @cls_meth_ptypes[ci].split("|", -1)
     if midx >= all.length
       return "".split(",")
     end
@@ -9853,7 +9853,7 @@ class Compiler
     if ci < 0 || ci >= @cls_meth_params.length || midx < 0
       return "".split(",")
     end
-    all = @cls_meth_params[ci].split("|")
+    all = @cls_meth_params[ci].split("|", -1)
     if midx >= all.length
       return "".split(",")
     end
@@ -9864,7 +9864,7 @@ class Compiler
     if ci < 0 || ci >= @cls_cmeth_ptypes.length || midx < 0
       return "".split(",")
     end
-    all = @cls_cmeth_ptypes[ci].split("|")
+    all = @cls_cmeth_ptypes[ci].split("|", -1)
     if midx >= all.length
       return "".split(",")
     end
@@ -9876,7 +9876,7 @@ class Compiler
     if ci < 0 || ci >= @cls_cmeth_params.length || midx < 0
       return "".split(",")
     end
-    all = @cls_cmeth_params[ci].split("|")
+    all = @cls_cmeth_params[ci].split("|", -1)
     if midx >= all.length
       return "".split(",")
     end
@@ -10201,8 +10201,8 @@ class Compiler
       emit_constructor(i)
       mnames = @cls_meth_names[i].split(";")
       returns = @cls_meth_returns[i].split(";")
-      all_params = @cls_meth_params[i].split("|")
-      all_ptypes = @cls_meth_ptypes[i].split("|")
+      all_params = @cls_meth_params[i].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[i].split("|", -1)
       bodies = @cls_meth_bodies[i].split(";")
       j = 0
       while j < mnames.length
@@ -10230,8 +10230,8 @@ class Compiler
  # Class methods
       cmnames = @cls_cmeth_names[i].split(";")
       cm_returns = @cls_cmeth_returns[i].split(";")
-      cm_params = @cls_cmeth_params[i].split("|")
-      cm_ptypes = @cls_cmeth_ptypes[i].split("|")
+      cm_params = @cls_cmeth_params[i].split("|", -1)
+      cm_ptypes = @cls_cmeth_ptypes[i].split("|", -1)
       cm_bodies = @cls_cmeth_bodies[i].split(";")
  # Per-(class, cmj) scope tables for inherited bodies — see the
  # analyze-side comment on @cls_cmeth_scope_names. Empty fallback
@@ -10352,8 +10352,8 @@ class Compiler
     if init_idx < 0
       return
     end
-    all_params_str = @cls_meth_params[ci].split("|")
-    all_ptypes_str = @cls_meth_ptypes[ci].split("|")
+    all_params_str = @cls_meth_params[ci].split("|", -1)
+    all_ptypes_str = @cls_meth_ptypes[ci].split("|", -1)
     if init_idx >= all_params_str.length
       return
     end
@@ -10426,7 +10426,7 @@ class Compiler
       end
       if bid == -2
  # Synthetic struct constructor
-        all_params = @cls_meth_params[ci].split("|")
+        all_params = @cls_meth_params[ci].split("|", -1)
         pnames2 = "".split(",")
         if init_idx < all_params.length
           pnames2 = all_params[init_idx].split(",")
@@ -10508,8 +10508,8 @@ class Compiler
                 p_ptypes = "".split(",")
                 p_init_idx = cls_find_method_direct(pi, "initialize")
                 if p_init_idx >= 0
-                  p_all_params = @cls_meth_params[pi].split("|")
-                  p_all_ptypes = @cls_meth_ptypes[pi].split("|")
+                  p_all_params = @cls_meth_params[pi].split("|", -1)
+                  p_all_ptypes = @cls_meth_ptypes[pi].split("|", -1)
                   if p_init_idx < p_all_params.length
                     p_pnames = p_all_params[p_init_idx].split(",")
                   end
@@ -10745,7 +10745,7 @@ class Compiler
         if init_ci != ci
           parent_name = @cls_names[init_ci]
  # Build param forwarding: forward all constructor params to parent init
-          pi_params = @cls_meth_params[init_ci].split("|")
+          pi_params = @cls_meth_params[init_ci].split("|", -1)
           pi_idx = cls_find_method_direct(init_ci, "initialize")
           pnames = "".split(",")
           if pi_idx >= 0
@@ -11022,8 +11022,8 @@ class Compiler
     lnames = "".split(",")
     ltypes = "".split(",")
     if sn != ""
-      lnames = sn.split("|")
-      ltypes = st.split("|")
+      lnames = sn.split("|", -1)
+      ltypes = st.split("|", -1)
     end
     j = 0
     while j < lnames.length
@@ -11291,8 +11291,8 @@ class Compiler
     lnames = "".split(",")
     ltypes = "".split(",")
     if sn != ""
-      lnames = sn.split("|")
-      ltypes = st.split("|")
+      lnames = sn.split("|", -1)
+      ltypes = st.split("|", -1)
     end
     j = 0
     while j < lnames.length
@@ -11966,8 +11966,8 @@ class Compiler
     lnames = "".split(",")
     ltypes = "".split(",")
     if sn != ""
-      lnames = sn.split("|")
-      ltypes = st.split("|")
+      lnames = sn.split("|", -1)
+      ltypes = st.split("|", -1)
     end
     j = 0
     while j < lnames.length
@@ -12120,7 +12120,7 @@ class Compiler
     if @multi_const_inits != nil
       mci = 0
       while mci < @multi_const_inits.length
-        parts = @multi_const_inits[mci].split("|")
+        parts = @multi_const_inits[mci].split("|", -1)
         scope_n = parts[0]
         mw_id = parts[1].to_i
         targets = parse_id_list(@nd_targets[mw_id])
@@ -13177,7 +13177,7 @@ class Compiler
       if hash_or != ""
         recv_nid_or = @nd_receiver[left_nid]
         rc_or = compile_expr(recv_nid_or)
-        parts_or = hash_or.split("|")
+        parts_or = hash_or.split("|", -1)
         cls_or = parts_or[0]
         val_t_or = parts_or[1]
         key_kind_or = parts_or[2]
@@ -13693,7 +13693,7 @@ class Compiler
     args_c = ""
     if t == "ForwardingSuperNode"
  # Forward every formal param of the current method by name.
-      cur_params = @cls_meth_params[@current_class_idx].split("|")
+      cur_params = @cls_meth_params[@current_class_idx].split("|", -1)
       midx_cur = cls_find_method_direct(@current_class_idx, mname_su)
       if midx_cur >= 0 && midx_cur < cur_params.length
         pn_list = cur_params[midx_cur].split(",")
@@ -13765,7 +13765,7 @@ class Compiler
     map_to_sw = "".split(",")
     cur_params_for_fwd = "".split(",")
     if t == "ForwardingSuperNode"
-      cur_params_all = @cls_meth_params[@current_class_idx].split("|")
+      cur_params_all = @cls_meth_params[@current_class_idx].split("|", -1)
       midx_cur_sw2 = cls_find_method_direct(@current_class_idx, @current_method_name)
       if midx_cur_sw2 >= 0 && midx_cur_sw2 < cur_params_all.length
         cur_params_for_fwd = cur_params_all[midx_cur_sw2].split(",")
@@ -13812,8 +13812,8 @@ class Compiler
       flocals_t_sw = "".split(",")
       sn_sw = @nd_scope_names[bid_sw]
       if sn_sw != ""
-        flocals_n_sw = sn_sw.split("|")
-        flocals_t_sw = @nd_scope_types[bid_sw].split("|")
+        flocals_n_sw = sn_sw.split("|", -1)
+        flocals_t_sw = @nd_scope_types[bid_sw].split("|", -1)
       end
       kf_sw = 0
       while kf_sw < flocals_n_sw.length
@@ -14677,8 +14677,8 @@ class Compiler
     if body >= 0
       sn_b = @nd_scope_names[body]
       if sn_b != ""
-        all_names = sn_b.split("|")
-        all_types = @nd_scope_types[body].split("|")
+        all_names = sn_b.split("|", -1)
+        all_types = @nd_scope_types[body].split("|", -1)
       end
     end
 
@@ -15043,7 +15043,7 @@ class Compiler
             cands.each { |cn_t|
               cci_t = find_class_idx(cn_t)
               if cci_t >= 0
-                pall_t = @cls_cmeth_ptypes[cci_t].split("|")
+                pall_t = @cls_cmeth_ptypes[cci_t].split("|", -1)
                 cmnames_t = @cls_cmeth_names[cci_t].split(";")
                 cmidx_t = 0
                 while cmidx_t < cmnames_t.length
@@ -22435,8 +22435,8 @@ class Compiler
         if owner_ci >= 0
           owner_name = @cls_names[owner_ci]
           owner_cmnames = @cls_cmeth_names[owner_ci].split(";")
-          owner_cmptypes = @cls_cmeth_ptypes[owner_ci].split("|")
-          owner_cmdefaults = @cls_cmeth_defaults[owner_ci].split("|")
+          owner_cmptypes = @cls_cmeth_ptypes[owner_ci].split("|", -1)
+          owner_cmdefaults = @cls_cmeth_defaults[owner_ci].split("|", -1)
           cmidx = 0
           while cmidx < owner_cmnames.length
             if owner_cmnames[cmidx] == mname
@@ -27110,7 +27110,7 @@ class Compiler
     if args_id >= 0
       raw_arg_ids = get_args(args_id)
     end
-    all_defaults = @cls_meth_defaults[target_ci].split("|")
+    all_defaults = @cls_meth_defaults[target_ci].split("|", -1)
     ptypes = cls_meth_ptypes_get(target_ci, target_midx)
     pnames_t = cls_meth_pnames_get(target_ci, target_midx)
     defaults = "".split(",")
@@ -33310,8 +33310,8 @@ class Compiler
         ltypes = "".split(",")
         sn_lb = @nd_scope_names[body]
         if sn_lb != ""
-          raw_n = sn_lb.split("|")
-          raw_t = @nd_scope_types[body].split("|")
+          raw_n = sn_lb.split("|", -1)
+          raw_t = @nd_scope_types[body].split("|", -1)
           rk = 0
           while rk < raw_n.length
             keep = 1
@@ -33602,9 +33602,9 @@ class Compiler
       @proc_capture_types = "".split(",")
     end
     push_scope
-    pts = "".split("|")
+    pts = "".split("|", -1)
     if blk_param_types != ""
-      pts = blk_param_types.split("|")
+      pts = blk_param_types.split("|", -1)
     end
     di = 0
     while di < bps.length
@@ -38719,7 +38719,7 @@ class Compiler
  # a bigint expression.
     bpt_arr = "".split(",")
     if @current_method_blk_param_types != ""
-      bpt_arr = @current_method_blk_param_types.split("|")
+      bpt_arr = @current_method_blk_param_types.split("|", -1)
     end
     if args_id >= 0
       aids = get_args(args_id)
@@ -38845,8 +38845,8 @@ class Compiler
       flocals_t = "".split(",")
       sn_f = @nd_scope_names[bid]
       if sn_f != ""
-        flocals_n = sn_f.split("|")
-        flocals_t = @nd_scope_types[bid].split("|")
+        flocals_n = sn_f.split("|", -1)
+        flocals_t = @nd_scope_types[bid].split("|", -1)
       end
       k = 0
       while k < flocals_n.length
@@ -38955,8 +38955,8 @@ class Compiler
       flocals_t = "".split(",")
       sn_yc = @nd_scope_names[bid]
       if sn_yc != ""
-        flocals_n = sn_yc.split("|")
-        flocals_t = @nd_scope_types[bid].split("|")
+        flocals_n = sn_yc.split("|", -1)
+        flocals_t = @nd_scope_types[bid].split("|", -1)
       end
       kf = 0
       while kf < flocals_n.length
@@ -39912,8 +39912,8 @@ class Compiler
       flocals_t = "".split(",")
       sn_f = @nd_scope_names[bid]
       if sn_f != ""
-        flocals_n = sn_f.split("|")
-        flocals_t = @nd_scope_types[bid].split("|")
+        flocals_n = sn_f.split("|", -1)
+        flocals_t = @nd_scope_types[bid].split("|", -1)
       end
       k = 0
       while k < flocals_n.length
@@ -40018,8 +40018,8 @@ class Compiler
       flocals_t = "".split(",")
       sn_n = @nd_scope_names[bid_n]
       if sn_n != ""
-        flocals_n = sn_n.split("|")
-        flocals_t = @nd_scope_types[bid_n].split("|")
+        flocals_n = sn_n.split("|", -1)
+        flocals_t = @nd_scope_types[bid_n].split("|", -1)
       end
       kf_n = 0
       while kf_n < flocals_n.length
@@ -41284,6 +41284,9 @@ class Compiler
  # gets the bootstrap pipeline running end to end.
 
 
+ # Issue #771: return -1 for non-hex chars so ir_unescape can detect
+ # a malformed `%XX` and pass the bytes through verbatim instead of
+ # silently injecting a NUL byte into the decoded type string.
   def ir_hex_digit(c)
     if c == "0" then return 0 end
     if c == "1" then return 1 end
@@ -41307,7 +41310,7 @@ class Compiler
     if c == "d" then return 13 end
     if c == "e" then return 14 end
     if c == "f" then return 15 end
-    0
+    -1
   end
 
   def ir_unescape(s)
@@ -41317,9 +41320,18 @@ class Compiler
     while i < n
       ch = s[i]
       if ch == "%" && i + 2 < n
-        v = ir_hex_digit(s[i + 1]) * 16 + ir_hex_digit(s[i + 2])
-        result = result + v.chr
-        i = i + 3
+        d1 = ir_hex_digit(s[i + 1])
+        d2 = ir_hex_digit(s[i + 2])
+        if d1 >= 0 && d2 >= 0
+          v = d1 * 16 + d2
+          result = result + v.chr
+          i = i + 3
+        else
+ # Malformed escape -- pass `%` through verbatim, advance one
+ # char, and let the next iteration handle the following byte.
+          result = result + ch
+          i = i + 1
+        end
       else
         result = result + ch
         i = i + 1
@@ -41481,13 +41493,13 @@ class Compiler
     if n == 0
       return result
     end
-    parts = s.split("|")
+    parts = s.split("|", -1)
     i = 0
     while i < parts.length
       result.push(ir_unescape(parts[i]))
       i = i + 1
     end
- # `"".split("|")` returns [], so a single empty element appears
+ # `"".split("|", -1)` returns [], so a single empty element appears
  # as length 0. Pad up to the recorded count with empty strings.
     while result.length < n
       result.push("")
@@ -41582,9 +41594,9 @@ class Compiler
     elsif name == "@cls_meth_live"
       @cls_meth_live = val
     elsif name == "@meth_blk_param_types"
-      @meth_blk_param_types = val.split("|")
+      @meth_blk_param_types = val.split("|", -1)
     elsif name == "@cls_cmeth_blk_param_types"
-      @cls_cmeth_blk_param_types = val.split("|")
+      @cls_cmeth_blk_param_types = val.split("|", -1)
     end
   end
 

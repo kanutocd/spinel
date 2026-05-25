@@ -271,8 +271,12 @@ static int flatten(pm_node_t *node) {
     R("receiver", n->receiver);
     R("arguments", n->arguments);
     R("block", n->block);
+    /* Issue #793: emit explicit call_operator for non-safe-nav calls
+       too, so codegen reads "." instead of an unset field. */
     if (PM_NODE_FLAG_P(node, PM_CALL_NODE_FLAGS_SAFE_NAVIGATION)) {
       S("call_operator", escape_str((const uint8_t *)"&.", 2));
+    } else {
+      S("call_operator", escape_str((const uint8_t *)".", 1));
     }
     break;
   }
@@ -1397,12 +1401,16 @@ static char *resolve_requires(const char *source, const char *source_path) {
     if (!end || end > line_end) { scan_from = pos + 1; continue; }
 
     size_t path_len = end - start;
+    /* Issue #765: bail rather than silently truncating overlong paths
+       into the fixed-size buffers. */
+    if (path_len >= sizeof(((struct {char x[512];}*)0)->x)) { scan_from = pos + 1; continue; }
     char rel_path[512];
     snprintf(rel_path, sizeof(rel_path), "%.*s", (int)path_len, start);
 
     /* Build full path */
     char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir, rel_path);
+    int fp_n = snprintf(full_path, sizeof(full_path), "%s/%s", dir, rel_path);
+    if (fp_n < 0 || (size_t)fp_n >= sizeof(full_path)) { scan_from = pos + 1; continue; }
     {
       size_t fl = strlen(full_path);
       if (fl < sizeof(full_path) - 4 && (fl < 3 || strcmp(full_path + fl - 3, ".rb") != 0))
@@ -1660,8 +1668,13 @@ static char *rewrite_syntax_sugar(char *source) {
              source[i] == '?' || source[i] == '!')) i++;
       size_t name_len = i - ns;
       if (name_len > 0) {
-        /* Skip closing paren if we removed opening */
-        if (had_paren && i < len && source[i] == ')') i++;
+        /* Issue #792: skip any whitespace between the symbol name
+           and the closing paren so `(&:bar )` matches the same way
+           `(&:bar)` does. */
+        if (had_paren) {
+          while (i < len && (source[i] == ' ' || source[i] == '\t')) i++;
+          if (i < len && source[i] == ')') i++;
+        }
         OUT_STR(" { |_spx| _spx.");
         size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]);
         OUT_STR(" }");

@@ -225,7 +225,7 @@ class Compiler
     @cls_ivar_type_cache_version = 0
  # Single-slot caches for the outer "|" split of joined per-class
  # method/param fields. cls_meth_ptypes_get / cls_meth_pnames_get /
- # cls_cmeth_*_get all do `field[ci].split("|")` then
+ # cls_cmeth_*_get all do `field[ci].split("|", -1)` then
  # `[midx].split(",")` — the outer split is repeated for every
  # (ci, midx) pair. Cache one ci's outer split per field;
  # consecutive calls with the same ci skip the outer split.
@@ -6025,7 +6025,7 @@ class Compiler
         while ci < @cls_names.length
  # Check zero-arg methods (getters)
           ci2_mnames = @cls_meth_names[ci].split(";")
-          ci2_mparams = @cls_meth_params[ci].split("|")
+          ci2_mparams = @cls_meth_params[ci].split("|", -1)
           mi2 = 0
           while mi2 < ci2_mnames.length
             if ci2_mnames[mi2] == mname
@@ -6881,9 +6881,9 @@ class Compiler
           p_cmnames = @cls_cmeth_names[pi].split(";")
           p_cmreturns = @cls_cmeth_returns[pi].split(";")
           p_cmbodies = @cls_cmeth_bodies[pi].split(";")
-          p_cmparams = @cls_cmeth_params[pi].split("|")
-          p_cmptypes = @cls_cmeth_ptypes[pi].split("|")
-          p_cmdefaults = @cls_cmeth_defaults[pi].split("|")
+          p_cmparams = @cls_cmeth_params[pi].split("|", -1)
+          p_cmptypes = @cls_cmeth_ptypes[pi].split("|", -1)
+          p_cmdefaults = @cls_cmeth_defaults[pi].split("|", -1)
           pj = 0
           while pj < p_cmnames.length
             mname = p_cmnames[pj]
@@ -8286,11 +8286,11 @@ class Compiler
       $stderr.puts "Spinel: alias `" + new_name + "` -> `" + old_name + "`: source method not found in class " + @cls_names[ci]
       exit(1)
     end
-    pnames_all = @cls_meth_params[ci].split("|")
-    ptypes_all = @cls_meth_ptypes[ci].split("|")
+    pnames_all = @cls_meth_params[ci].split("|", -1)
+    ptypes_all = @cls_meth_ptypes[ci].split("|", -1)
     rets_all   = @cls_meth_returns[ci].split(";")
     bodies_all = @cls_meth_bodies[ci].split(";")
-    defs_all   = @cls_meth_defaults[ci].split("|")
+    defs_all   = @cls_meth_defaults[ci].split("|", -1)
     params  = pnames_all[src] || ""
     ptypes  = ptypes_all[src] || ""
     ret     = rets_all[src] || "int"
@@ -8326,12 +8326,12 @@ class Compiler
         end
       end
       if hit_u >= 0
-        cur_params_u = @cls_meth_params[ci].split("|")
-        cur_ptypes_u = @cls_meth_ptypes[ci].split("|")
+        cur_params_u = @cls_meth_params[ci].split("|", -1)
+        cur_ptypes_u = @cls_meth_ptypes[ci].split("|", -1)
         cur_returns_u = @cls_meth_returns[ci].split(";")
         cur_bodies_u = @cls_meth_bodies[ci].split(";")
-        cur_defaults_u = @cls_meth_defaults[ci].split("|")
-        cur_pempty_u = @cls_meth_ptypes_empty[ci].split("|")
+        cur_defaults_u = @cls_meth_defaults[ci].split("|", -1)
+        cur_pempty_u = @cls_meth_ptypes_empty[ci].split("|", -1)
         while cur_pempty_u.length < cur_names_u.length
           cur_pempty_u.push("")
         end
@@ -8962,12 +8962,12 @@ class Compiler
  # behaviour.
         $stderr.puts "warning: method '" + name + "' on " + @cls_names[ci] + " is being redefined; spinel uses last-def-wins semantics (calls before the redefinition won't see the original body — subset limitation)"
         cur_names = @cls_meth_names[ci].split(";")
-        cur_params = @cls_meth_params[ci].split("|")
-        cur_ptypes = @cls_meth_ptypes[ci].split("|")
+        cur_params = @cls_meth_params[ci].split("|", -1)
+        cur_ptypes = @cls_meth_ptypes[ci].split("|", -1)
         cur_returns = @cls_meth_returns[ci].split(";")
         cur_bodies = @cls_meth_bodies[ci].split(";")
-        cur_defaults = @cls_meth_defaults[ci].split("|")
-        cur_pempty = @cls_meth_ptypes_empty[ci].split("|")
+        cur_defaults = @cls_meth_defaults[ci].split("|", -1)
+        cur_pempty = @cls_meth_ptypes_empty[ci].split("|", -1)
         while cur_pempty.length < cur_names.length
           cur_pempty.push("")
         end
@@ -9044,11 +9044,11 @@ class Compiler
         end
       end
       if found_cmi >= 0
-        cur_cm_params = @cls_cmeth_params[ci].split("|")
-        cur_cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
+        cur_cm_params = @cls_cmeth_params[ci].split("|", -1)
+        cur_cm_ptypes = @cls_cmeth_ptypes[ci].split("|", -1)
         cur_cm_returns = @cls_cmeth_returns[ci].split(";")
         cur_cm_bodies = @cls_cmeth_bodies[ci].split(";")
-        cur_cm_defaults = @cls_cmeth_defaults[ci].split("|")
+        cur_cm_defaults = @cls_cmeth_defaults[ci].split("|", -1)
         cm_names_re[found_cmi] = name
         if found_cmi < cur_cm_params.length
           cur_cm_params[found_cmi] = params
@@ -12691,7 +12691,7 @@ class Compiler
                     mua_cci = find_class_idx(mua_cn)
                     if mua_cci >= 0
                       mua_cmnames = @cls_cmeth_names[mua_cci].split(";")
-                      mua_cmpall = @cls_cmeth_ptypes[mua_cci].split("|")
+                      mua_cmpall = @cls_cmeth_ptypes[mua_cci].split("|", -1)
                       mua_cmidx = 0
                       while mua_cmidx < mua_cmnames.length
                         if mua_cmnames[mua_cmidx] == mua_outer_mname && mua_cmidx < mua_cmpall.length
@@ -13305,8 +13305,8 @@ class Compiler
  # exists on both ActionController_Base and ActionResponse).
                     default_obj_t = ""
                     defs_str_cm = ""
-                    if j < @cls_meth_defaults[oci].split("|").length
-                      defs_str_cm = @cls_meth_defaults[oci].split("|")[j]
+                    if j < @cls_meth_defaults[oci].split("|", -1).length
+                      defs_str_cm = @cls_meth_defaults[oci].split("|", -1)[j]
                     end
                     defs_arr_cm = defs_str_cm.split(",")
                     if pk < defs_arr_cm.length
@@ -14566,7 +14566,7 @@ class Compiler
     while ci < @cls_names.length
       mnames = @cls_meth_names[ci].split(";")
       bodies = @cls_meth_bodies[ci].split(";")
-      defaults_per = @cls_meth_defaults[ci].split("|")
+      defaults_per = @cls_meth_defaults[ci].split("|", -1)
       cls_changed = 0
       mj = 0
       while mj < mnames.length
@@ -14855,8 +14855,8 @@ class Compiler
     ci = 0
     while ci < @cls_names.length
       mnames = @cls_meth_names[ci].split(";")
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       bodies = @cls_meth_bodies[ci].split(";")
       cls_changed = 0
       mj = 0
@@ -15140,9 +15140,9 @@ class Compiler
     end
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
-      all_defaults = @cls_meth_defaults[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
+      all_defaults = @cls_meth_defaults[ci].split("|", -1)
       cls_changed = 0
       mj = 0
       while mj < all_params.length
@@ -15181,9 +15181,9 @@ class Compiler
         @cls_meth_ptypes[ci] = all_ptypes.join("|")
         @cls_meth_ptypes_version = @cls_meth_ptypes_version + 1
       end
-      cmeth_params_all = @cls_cmeth_params[ci].split("|")
-      cmeth_ptypes_all = @cls_cmeth_ptypes[ci].split("|")
-      cmeth_defaults_all = @cls_cmeth_defaults[ci].split("|")
+      cmeth_params_all = @cls_cmeth_params[ci].split("|", -1)
+      cmeth_ptypes_all = @cls_cmeth_ptypes[ci].split("|", -1)
+      cmeth_defaults_all = @cls_cmeth_defaults[ci].split("|", -1)
       cmeth_cls_changed = 0
       cmj = 0
       while cmj < cmeth_params_all.length
@@ -15440,8 +15440,8 @@ class Compiler
     ltypes = "".split(",")
     sn_b = @nd_scope_names[body_id]
     if sn_b != ""
-      lnames = sn_b.split("|")
-      ltypes = @nd_scope_types[body_id].split("|")
+      lnames = sn_b.split("|", -1)
+      ltypes = @nd_scope_types[body_id].split("|", -1)
     end
     j = 0
     while j < lnames.length
@@ -15491,7 +15491,7 @@ class Compiler
       if ci < @cls_cmeth_names.length
         cmnames = @cls_cmeth_names[ci].split(";")
         cm_bodies = @cls_cmeth_bodies[ci].split(";")
-        cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
+        cm_ptypes = @cls_cmeth_ptypes[ci].split("|", -1)
         cmidx = 0
         while cmidx < cmnames.length
           if cmidx < cm_ptypes.length
@@ -16268,9 +16268,9 @@ class Compiler
       ci = 0
       while ci < @cls_names.length
         @current_class_idx = ci
-        all_params = @cls_meth_params[ci].split("|")
-        all_ptypes = @cls_meth_ptypes[ci].split("|")
-        all_empty = @cls_meth_ptypes_empty[ci].split("|")
+        all_params = @cls_meth_params[ci].split("|", -1)
+        all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
+        all_empty = @cls_meth_ptypes_empty[ci].split("|", -1)
         bodies = @cls_meth_bodies[ci].split(";")
         cls_changed = 0
         mj = 0
@@ -16399,8 +16399,8 @@ class Compiler
  # Class instance methods.
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       bodies = @cls_meth_bodies[ci].split(";")
       cls_changed = 0
       mj = 0
@@ -17747,7 +17747,7 @@ class Compiler
     ci = 0
     while ci < @cls_names.length
       mnames = @cls_meth_names[ci].split(";")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       ivar_names = @cls_ivar_names[ci].split(";")
       ivar_types = @cls_ivar_types[ci].split(";")
       changed = 0
@@ -18608,8 +18608,8 @@ class Compiler
     while i < @cls_names.length
       @current_class_idx = i
       mnames = @cls_meth_names[i].split(";")
-      all_params = @cls_meth_params[i].split("|")
-      all_ptypes = @cls_meth_ptypes[i].split("|")
+      all_params = @cls_meth_params[i].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[i].split("|", -1)
       bodies = @cls_meth_bodies[i].split(";")
       returns = @cls_meth_returns[i].split(";")
 
@@ -18776,8 +18776,8 @@ class Compiler
       cmnames = @cls_cmeth_names[i].split(";")
       cm_bodies = @cls_cmeth_bodies[i].split(";")
       cm_returns = @cls_cmeth_returns[i].split(";")
-      cm_params = @cls_cmeth_params[i].split("|")
-      cm_ptypes = @cls_cmeth_ptypes[i].split("|")
+      cm_params = @cls_cmeth_params[i].split("|", -1)
+      cm_ptypes = @cls_cmeth_ptypes[i].split("|", -1)
       saved_meth = @current_method_name
       j = 0
       while j < cmnames.length
@@ -18922,7 +18922,7 @@ class Compiler
                         if parent_ci >= 0
                           parent_init = cls_find_method_direct(parent_ci, "initialize")
                           if parent_init >= 0
-                            parent_ptypes = @cls_meth_ptypes[parent_ci].split("|")
+                            parent_ptypes = @cls_meth_ptypes[parent_ci].split("|", -1)
                             if parent_init < parent_ptypes.length
                               ppt = parent_ptypes[parent_init].split(",")
                               if sk < ppt.length
@@ -20976,8 +20976,8 @@ class Compiler
  # receiver-method unify path inside scan_new_calls.
         cm_names = @cls_cmeth_names[ci].split(";")
         cm_bodies = @cls_cmeth_bodies[ci].split(";")
-        cm_params = @cls_cmeth_params[ci].split("|")
-        cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
+        cm_params = @cls_cmeth_params[ci].split("|", -1)
+        cm_ptypes = @cls_cmeth_ptypes[ci].split("|", -1)
         saved_meth_cb = @current_method_name
         cmi = 0
         while cmi < cm_names.length
@@ -21596,8 +21596,8 @@ class Compiler
       stj = @nd_scope_types[sj]
       snj = sj < @nd_scope_names.length ? @nd_scope_names[sj] : ""
       if stj != "" && snj != ""
-        psj = stj.split("|")
-        pnj = snj.split("|")
+        psj = stj.split("|", -1)
+        pnj = snj.split("|", -1)
         chj = 0
         ppj = 0
         while ppj < psj.length && ppj < pnj.length
@@ -21945,7 +21945,7 @@ class Compiler
     if ci >= tbl.length
       return
     end
-    all_pt = tbl[ci].split("|")
+    all_pt = tbl[ci].split("|", -1)
     changed = 0
     mj = 0
     while mj < all_pt.length
@@ -22022,13 +22022,13 @@ class Compiler
     arbitrate_rbs_method_returns_definite_conflict
  # Class instance methods.
     @cls_meth_rbs_ptypes.each_pair { |k, rbs_pt|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_meth_ptypes.length
         next
       end
-      all_pt = @cls_meth_ptypes[ci].split("|")
+      all_pt = @cls_meth_ptypes[ci].split("|", -1)
       if midx < all_pt.length && all_pt[midx] != rbs_pt
         all_pt[midx] = rbs_pt
         @cls_meth_ptypes[ci] = all_pt.join("|")
@@ -22036,7 +22036,7 @@ class Compiler
       end
     }
     @cls_meth_rbs_returns.each_pair { |k, rbs_ret|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_meth_returns.length
@@ -22051,13 +22051,13 @@ class Compiler
     }
  # Class methods (cmeth).
     @cls_cmeth_rbs_ptypes.each_pair { |k, rbs_pt|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_cmeth_ptypes.length
         next
       end
-      all_pt = @cls_cmeth_ptypes[ci].split("|")
+      all_pt = @cls_cmeth_ptypes[ci].split("|", -1)
       if midx < all_pt.length && all_pt[midx] != rbs_pt
         all_pt[midx] = rbs_pt
         @cls_cmeth_ptypes[ci] = all_pt.join("|")
@@ -22065,7 +22065,7 @@ class Compiler
       end
     }
     @cls_cmeth_rbs_returns.each_pair { |k, rbs_ret|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_cmeth_returns.length
@@ -22262,7 +22262,7 @@ class Compiler
 
   def arbitrate_rbs_method_returns_definite_conflict
     @cls_meth_rbs_returns.each_pair { |k, rbs_ret|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_meth_bodies.length
@@ -22295,7 +22295,7 @@ class Compiler
       end
     }
     @cls_cmeth_rbs_returns.each_pair { |k, rbs_ret|
-      parts = k.split("|")
+      parts = k.split("|", -1)
       ci = parts[0].to_i
       midx = parts[1].to_i
       if ci < 0 || ci >= @cls_cmeth_bodies.length
@@ -22965,7 +22965,7 @@ class Compiler
       while sj < @nd_scope_types.length
         stj = @nd_scope_types[sj]
         if stj != ""
-          psj = stj.split("|")
+          psj = stj.split("|", -1)
           chj = 0
           ppj = 0
           while ppj < psj.length
@@ -23150,7 +23150,7 @@ class Compiler
  # Class instance method + cmeth params + returns.
     rci = 0
     while rci < @cls_names.length
-      r_im_pall = @cls_meth_ptypes[rci].split("|")
+      r_im_pall = @cls_meth_ptypes[rci].split("|", -1)
       r_im_ret = @cls_meth_returns[rci].split(";")
       r_imj = 0
       while r_imj < r_im_pall.length
@@ -23186,7 +23186,7 @@ class Compiler
         end
         r_imrj = r_imrj + 1
       end
-      r_cmpall = @cls_cmeth_ptypes[rci].split("|")
+      r_cmpall = @cls_cmeth_ptypes[rci].split("|", -1)
       r_cmret = @cls_cmeth_returns[rci].split(";")
       r_cmj = 0
       while r_cmj < r_cmpall.length
@@ -23248,7 +23248,7 @@ class Compiler
     while r_nd < @nd_scope_types.length
       r_st = @nd_scope_types[r_nd]
       if r_st != ""
-        r_pieces = r_st.split("|")
+        r_pieces = r_st.split("|", -1)
         r_pp = 0
         while r_pp < r_pieces.length
           if r_pieces[r_pp] != ""
@@ -23313,8 +23313,8 @@ class Compiler
     bci = 0
     while bci < @cls_names.length
       bcn = @cls_names[bci]
-      b_im_pn = @cls_meth_params[bci].split("|")
-      b_im_pt = @cls_meth_ptypes[bci].split("|")
+      b_im_pn = @cls_meth_params[bci].split("|", -1)
+      b_im_pt = @cls_meth_ptypes[bci].split("|", -1)
       b_im_mn = @cls_meth_names[bci].split(";")
       b_im_rn = @cls_meth_returns[bci].split(";")
       b_imj = 0
@@ -23340,8 +23340,8 @@ class Compiler
         end
         b_imj = b_imj + 1
       end
-      b_cm_pn = @cls_cmeth_params[bci].split("|")
-      b_cm_pt = @cls_cmeth_ptypes[bci].split("|")
+      b_cm_pn = @cls_cmeth_params[bci].split("|", -1)
+      b_cm_pt = @cls_cmeth_ptypes[bci].split("|", -1)
       b_cm_mn = @cls_cmeth_names[bci].split(";")
       b_cm_rn = @cls_cmeth_returns[bci].split(";")
       b_cmj = 0
@@ -24254,8 +24254,8 @@ class Compiler
             if ci2 >= 0
               init_idx = cls_find_method_direct(ci2, "initialize")
               if init_idx >= 0
-                all_params = @cls_meth_params[ci2].split("|")
-                all_ptypes = @cls_meth_ptypes[ci2].split("|")
+                all_params = @cls_meth_params[ci2].split("|", -1)
+                all_ptypes = @cls_meth_ptypes[ci2].split("|", -1)
                 pnames2 = "".split(",")
                 ptypes2 = "".split(",")
                 if init_idx < all_params.length
@@ -24382,8 +24382,8 @@ class Compiler
       mnames_str = @cls_meth_names[i]
       if mnames_str != ""
         mnames = mnames_str.split(";")
-        all_params = @cls_meth_params[i].split("|")
-        all_ptypes = @cls_meth_ptypes[i].split("|")
+        all_params = @cls_meth_params[i].split("|", -1)
+        all_ptypes = @cls_meth_ptypes[i].split("|", -1)
         bodies = @cls_meth_bodies[i].split(";")
         mi = 0
         while mi < mnames.length
@@ -24484,8 +24484,8 @@ class Compiler
       mnames_str = @cls_meth_names[i]
       if mnames_str != ""
         mnames = mnames_str.split(";")
-        all_params = @cls_meth_params[i].split("|")
-        all_ptypes = @cls_meth_ptypes[i].split("|")
+        all_params = @cls_meth_params[i].split("|", -1)
+        all_ptypes = @cls_meth_ptypes[i].split("|", -1)
         bodies = @cls_meth_bodies[i].split(";")
         saved_ci = @current_class_idx
         @current_class_idx = i
@@ -24965,7 +24965,7 @@ class Compiler
       return "".split(",")
     end
     if @cmp_outer_version != @cls_meth_ptypes_version || @cmp_outer_ci != ci
-      @cmp_outer_split = @cls_meth_ptypes[ci].split("|")
+      @cmp_outer_split = @cls_meth_ptypes[ci].split("|", -1)
       @cmp_outer_ci = ci
       @cmp_outer_version = @cls_meth_ptypes_version
     end
@@ -24980,7 +24980,7 @@ class Compiler
       return
     end
     if @cmp_outer_version != @cls_meth_ptypes_version || @cmp_outer_ci != ci
-      @cmp_outer_split = @cls_meth_ptypes[ci].split("|")
+      @cmp_outer_split = @cls_meth_ptypes[ci].split("|", -1)
       @cmp_outer_ci = ci
       @cmp_outer_version = @cls_meth_ptypes_version
     end
@@ -25001,7 +25001,7 @@ class Compiler
       return "".split(",")
     end
     if @cmn_outer_version != @cls_meth_params_version || @cmn_outer_ci != ci
-      @cmn_outer_split = @cls_meth_params[ci].split("|")
+      @cmn_outer_split = @cls_meth_params[ci].split("|", -1)
       @cmn_outer_ci = ci
       @cmn_outer_version = @cls_meth_params_version
     end
@@ -25016,7 +25016,7 @@ class Compiler
       return "".split(",")
     end
     if @ccmp_outer_version != @cls_cmeth_ptypes_version || @ccmp_outer_ci != ci
-      @ccmp_outer_split = @cls_cmeth_ptypes[ci].split("|")
+      @ccmp_outer_split = @cls_cmeth_ptypes[ci].split("|", -1)
       @ccmp_outer_ci = ci
       @ccmp_outer_version = @cls_cmeth_ptypes_version
     end
@@ -25031,7 +25031,7 @@ class Compiler
       return
     end
     if @ccmp_outer_version != @cls_cmeth_ptypes_version || @ccmp_outer_ci != ci
-      @ccmp_outer_split = @cls_cmeth_ptypes[ci].split("|")
+      @ccmp_outer_split = @cls_cmeth_ptypes[ci].split("|", -1)
       @ccmp_outer_ci = ci
       @ccmp_outer_version = @cls_cmeth_ptypes_version
     end
@@ -25049,7 +25049,7 @@ class Compiler
       return "".split(",")
     end
     if @ccmn_outer_version != @cls_cmeth_params_version || @ccmn_outer_ci != ci
-      @ccmn_outer_split = @cls_cmeth_params[ci].split("|")
+      @ccmn_outer_split = @cls_cmeth_params[ci].split("|", -1)
       @ccmn_outer_ci = ci
       @ccmn_outer_version = @cls_cmeth_params_version
     end
@@ -26132,8 +26132,8 @@ class Compiler
               icm_args_id = @nd_arguments[nid]
               if icm_args_id >= 0
                 icm_aargs = get_args(icm_args_id)
-                icm_all_ptypes = @cls_meth_ptypes[icm_owner_ci].split("|")
-                icm_all_empty = @cls_meth_ptypes_empty[icm_owner_ci].split("|")
+                icm_all_ptypes = @cls_meth_ptypes[icm_owner_ci].split("|", -1)
+                icm_all_empty = @cls_meth_ptypes_empty[icm_owner_ci].split("|", -1)
                 icm_ptypes = "".split(",")
                 icm_empties = "".split(",")
                 if icm_midx < icm_all_ptypes.length
@@ -29465,7 +29465,7 @@ class Compiler
     if @multi_const_inits != nil
       j = 0
       while j < @multi_const_inits.length
-        mw_id = @multi_const_inits[j].split("|")[1].to_i
+        mw_id = @multi_const_inits[j].split("|", -1)[1].to_i
         rhs = @nd_expression[mw_id]
         if rhs >= 0
           scan_locals(rhs, lnames, ltypes, empty_params)
@@ -29511,8 +29511,8 @@ class Compiler
  # Class instance methods.
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       bodies = @cls_meth_bodies[ci].split(";")
       cls_changed = 0
       mj = 0
@@ -29582,8 +29582,8 @@ class Compiler
  # Class instance methods.
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_meth_params[ci].split("|")
-      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      all_params = @cls_meth_params[ci].split("|", -1)
+      all_ptypes = @cls_meth_ptypes[ci].split("|", -1)
       bodies = @cls_meth_bodies[ci].split(";")
       mj = 0
       while mj < all_params.length
@@ -29606,8 +29606,8 @@ class Compiler
  # Class methods (cmeths).
     ci = 0
     while ci < @cls_names.length
-      all_params = @cls_cmeth_params[ci].split("|")
-      all_ptypes = @cls_cmeth_ptypes[ci].split("|")
+      all_params = @cls_cmeth_params[ci].split("|", -1)
+      all_ptypes = @cls_cmeth_ptypes[ci].split("|", -1)
       bodies = @cls_cmeth_bodies[ci].split(";")
       mj = 0
       while mj < all_params.length
@@ -29697,7 +29697,7 @@ class Compiler
         ci_w = find_class_idx(cls_name_w)
         if ci_w >= 0
           cm_names_w = @cls_cmeth_names[ci_w].split(";")
-          cmpall_w = @cls_cmeth_ptypes[ci_w].split("|")
+          cmpall_w = @cls_cmeth_ptypes[ci_w].split("|", -1)
           cmi_w = 0
           while cmi_w < cm_names_w.length
             if cm_names_w[cmi_w] == mname_w && cmi_w < cmpall_w.length
@@ -30225,7 +30225,7 @@ class Compiler
     if @multi_const_inits != nil
       mci = 0
       while mci < @multi_const_inits.length
-        parts = @multi_const_inits[mci].split("|")
+        parts = @multi_const_inits[mci].split("|", -1)
         scope_n = parts[0]
         mw_id = parts[1].to_i
         rhs = @nd_expression[mw_id]
