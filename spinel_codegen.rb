@@ -16115,7 +16115,7 @@ class Compiler
  # side-effect through the statement handler and pass "0" (nil in C)
  # up as the expression value. Without this, the call falls through
  # to warn_unresolved_call and the IO is silently dropped.
-    if mname == "puts" || mname == "print" || mname == "printf"
+    if mname == "puts" || mname == "print" || mname == "printf" || mname == "warn" || mname == "at_exit"
       if compile_io_call_stmt(nid, mname, -1) == 1
         return "0"
       end
@@ -31183,6 +31183,24 @@ class Compiler
     if mname == "printf"
       if recv < 0
         compile_printf(nid)
+        return 1
+      end
+    end
+ # `warn arg, arg, ...` -- write each arg to stderr followed by a
+ # newline (matching Kernel#warn). Issue #734.
+    if mname == "warn"
+      if recv < 0
+        compile_stderr_puts(nid)
+        return 1
+      end
+    end
+ # `at_exit { ... }` -- spinel doesn't model atexit hooks; emit
+ # nothing and let the block be ignored. A real implementation
+ # would push the block onto a static registry called from main's
+ # exit path; not worth the runtime plumbing for a generally-
+ # uncommon pattern. Issue #734.
+    if mname == "at_exit"
+      if recv < 0
         return 1
       end
     end
