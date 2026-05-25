@@ -13451,11 +13451,20 @@ class Compiler
       return "0"
     end
     if t == "EmbeddedStatementsNode"
+ # `"#{expr1; expr2; ...; exprN}"` -- the interpolation's value
+ # is the LAST statement in Ruby; intermediate statements run for
+ # their side effects. Emit each leading stmt and return the
+ # tail's expression. Issue #729.
       body = @nd_body[nid]
       if body >= 0
         stmts = get_stmts(body)
         if stmts.length > 0
-          return compile_expr(stmts.first)
+          k_es = 0
+          while k_es < stmts.length - 1
+            compile_stmt(stmts[k_es])
+            k_es = k_es + 1
+          end
+          return compile_expr(stmts[stmts.length - 1])
         end
       end
       return "0"
@@ -13919,7 +13928,14 @@ class Compiler
           if body >= 0
             stmts = get_stmts(body)
             if stmts.length > 0
-              inner = stmts.first
+ # Emit each leading stmt for side effects; the
+ # interpolation's value is the LAST stmt. Issue #729.
+              k_es2 = 0
+              while k_es2 < stmts.length - 1
+                compile_stmt(stmts[k_es2])
+                k_es2 = k_es2 + 1
+              end
+              inner = stmts[stmts.length - 1]
               it = infer_type(inner)
               if it == "int"
                 fmt = fmt + "%lld"
