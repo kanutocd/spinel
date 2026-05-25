@@ -17870,6 +17870,23 @@ class Compiler
       @needs_rb_value = 1
       return "sp_box_nil()"
     end
+    if mname == "!~"
+ # `str !~ re` is the negation of `str =~ re`: true when no
+ # match, false when match. Issue #732.
+      rc_nm = compile_expr_gc_rooted(recv)
+      nm_args = @nd_arguments[nid]
+      if nm_args >= 0
+        argl_nm = get_args(nm_args)
+        if argl_nm.length > 0
+          rpat_nm = regex_pat_c_expr(argl_nm[0])
+          if rpat_nm != ""
+            @needs_rb_value = 1
+            return "(sp_re_match_poly(" + rpat_nm + ", " + rc_nm + ").tag == SP_TAG_NIL)"
+          end
+        end
+      end
+      return "1"
+    end
     if mname == "=="
       return compile_eq(nid, "==")
     end

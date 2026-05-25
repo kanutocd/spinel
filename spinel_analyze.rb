@@ -3515,6 +3515,10 @@ class Compiler
       @needs_rb_value = 1
       return "poly"
     end
+    if mname == "!~"
+ # Negation of `=~`: bool. Issue #732.
+      return "bool"
+    end
     if mname == "<<"
       if recv >= 0
         if lt == "mutable_str"
