@@ -25562,7 +25562,7 @@ class Compiler
                   end
                   ki = ki + 1
                 end
-              elsif arg_type == "string"
+              elsif arg_type == "string" || arg_type == "string?" || arg_type == "mutable_str"
                 @needs_str_array = 1
                 ki = 0
                 while ki < names.length

@@ -652,9 +652,21 @@ static void traverse_members(rbs_parser_t *p, rbs_node_list_t *members,
                 emit_attr(p, a->name, a->type, lookup_scope, out);
                 break;
             }
+            case RBS_AST_MEMBERS_INSTANCE_VARIABLE: {
+                /* `@name: Type` declarations. seed_class_ivar in
+                 * analyze prepends "@" if missing; emit_attr writes
+                 * the name as-is (which in RBS includes the leading
+                 * @), so the seed line ends up with "@@name" if we
+                 * don't strip first. The seed_class_ivar handles
+                 * either form, but normalize here so the seed file
+                 * matches the attr_* shape (single `@`). */
+                rbs_ast_members_instance_variable_t *iv = (rbs_ast_members_instance_variable_t *) n;
+                emit_attr(p, iv->name, iv->type, lookup_scope, out);
+                break;
+            }
             default:
                 /* Skip: include / extend / prepend / public / private
-                 * / alias / instance_variable / class_variable. */
+                 * / alias / class_variable. */
                 break;
         }
         cur = cur->next;
