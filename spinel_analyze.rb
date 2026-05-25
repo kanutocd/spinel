@@ -5207,7 +5207,11 @@ class Compiler
         if @nd_type[recv] == "ConstantReadNode" && @nd_name[recv] == "ENV"
           return "string"
         end
-        rt = infer_type(recv)
+ # Strip nullable suffix: `Hash[K,V]?` return narrowed inside
+ # `if r; r[k]; end` should dispatch on the underlying variant,
+ # not fall through to the int default. The C-storage stays the
+ # same; the narrow just confirms non-NULL receiver.
+        rt = base_type(infer_type(recv))
         if rt == "string"
           return "string"
         end
