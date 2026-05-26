@@ -15946,7 +15946,7 @@ class Compiler
       if @nd_type[ec_check_recv] == "CallNode" && @nd_name[ec_check_recv] == "with_index" && @nd_block[ec_check_recv] < 0
         ec_check_recv = @nd_receiver[ec_check_recv]
       end
-      if ec_check_recv >= 0 && @nd_type[ec_check_recv] == "CallNode" && @nd_name[ec_check_recv] == "each_cons" && @nd_block[ec_check_recv] < 0
+      if ec_check_recv >= 0 && @nd_type[ec_check_recv] == "CallNode" && (@nd_name[ec_check_recv] == "each_cons" || @nd_name[ec_check_recv] == "each_slice") && @nd_block[ec_check_recv] < 0
         return compile_map_expr(nid, "")
       end
     end
@@ -38582,11 +38582,13 @@ class Compiler
     ec_call_n = -1
     ec_with_index = 0
     ec_off_expr = "0"
+    ec_is_slice = 0
     if recv_n >= 0 && @nd_type[recv_n] == "CallNode" && @nd_name[recv_n] == "with_index" && @nd_block[recv_n] < 0
       wi_inner_n = @nd_receiver[recv_n]
-      if wi_inner_n >= 0 && @nd_type[wi_inner_n] == "CallNode" && @nd_name[wi_inner_n] == "each_cons" && @nd_block[wi_inner_n] < 0
+      if wi_inner_n >= 0 && @nd_type[wi_inner_n] == "CallNode" && (@nd_name[wi_inner_n] == "each_cons" || @nd_name[wi_inner_n] == "each_slice") && @nd_block[wi_inner_n] < 0
         ec_call_n = wi_inner_n
         ec_with_index = 1
+        ec_is_slice = (@nd_name[wi_inner_n] == "each_slice") ? 1 : 0
         wi_args_id = @nd_arguments[recv_n]
         if wi_args_id >= 0
           wi_aargs = get_args(wi_args_id)
@@ -38595,8 +38597,9 @@ class Compiler
           end
         end
       end
-    elsif recv_n >= 0 && @nd_type[recv_n] == "CallNode" && @nd_name[recv_n] == "each_cons" && @nd_block[recv_n] < 0
+    elsif recv_n >= 0 && @nd_type[recv_n] == "CallNode" && (@nd_name[recv_n] == "each_cons" || @nd_name[recv_n] == "each_slice") && @nd_block[recv_n] < 0
       ec_call_n = recv_n
+      ec_is_slice = (@nd_name[recv_n] == "each_slice") ? 1 : 0
     end
     if ec_call_n >= 0
       @needs_gc = 1
@@ -38632,6 +38635,28 @@ class Compiler
           while ec_li < ec_lefts.length
             ec_destruct_names.push(@nd_name[ec_lefts[ec_li]])
             ec_li = ec_li + 1
+          end
+        else
+ # Issue #829: auto-destructure when block params count matches
+ # the yielded sub-array's length. `n` from each_cons/each_slice
+ # decides; `|pair, i|` against each_cons(2).with_index (reqs=2,
+ # need n+1=3) stays a pair.
+          ec_n_int = -1
+          ec_args_n_id = @nd_arguments[ec_call_n]
+          if ec_args_n_id >= 0
+            ec_n_args_l = get_args(ec_args_n_id)
+            if ec_n_args_l.length > 0 && @nd_type[ec_n_args_l[0]] == "IntegerNode"
+              ec_n_int = @nd_value[ec_n_args_l[0]].to_i
+            end
+          end
+          ec_expected = ec_n_int + ec_with_index
+          if ec_n_int > 0 && ec_reqs.length == ec_expected && ec_reqs.length >= 2
+            ec_destruct_count = ec_n_int
+            ec_li2 = 0
+            while ec_li2 < ec_destruct_count
+              ec_destruct_names.push(@nd_name[ec_reqs[ec_li2]])
+              ec_li2 = ec_li2 + 1
+            end
           end
         end
  # Result accumulator type from body's last-expression type.
@@ -38689,7 +38714,12 @@ class Compiler
           emit("  mrb_int " + ec_idx_var + " = (" + ec_off_expr + ");")
         end
         emit("  mrb_int " + ec_len + " = sp_" + ec_inner_pfx + "_length(" + ec_inner_rc + ");")
-        emit("  for (mrb_int " + ec_i + " = 0; " + ec_i + " + " + ec_n_expr + " <= " + ec_len + "; " + ec_i + "++) {")
+ # Issue #829: each_slice steps by n (fixed chunks); each_cons
+ # slides one element at a time. Short tails are dropped — Ruby's
+ # each_slice yields them but typed-array destructure can't bind
+ # missing positions safely.
+        ec_step = (ec_is_slice == 1) ? ec_n_expr : "1"
+        emit("  for (mrb_int " + ec_i + " = 0; " + ec_i + " + " + ec_n_expr + " <= " + ec_len + "; " + ec_i + " += " + ec_step + ") {")
         push_scope
         ec_pair_bp = ""
         if ec_destruct_names.length > 0

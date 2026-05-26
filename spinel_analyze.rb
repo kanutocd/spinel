@@ -29986,6 +29986,61 @@ class Compiler
         return "poly" if pi == 0
         return "poly_array" if pi == 1
       end
+ # Issue #829: `arr.each_cons(n).map { |x, y, ...| }` and the
+ # each_slice variant fuse in codegen and auto-destructure the
+ # yielded sub-array across multiple block params. The block
+ # sees each param as a *scalar* element of the inner array,
+ # not as the sub-array itself. Without this the analyzer types
+ # `x` as int_array and `y - x` dispatches to set difference.
+ # Issue #829: arr.each_cons(n)[.with_index].map { |x, y, ...[, i]| }
+ # auto-destructures when block req-param count matches n (+1 for
+ # with_index). `|pair|` and `|pair, i|` stay as sub-arrays.
+      if mname == "map"
+        ec_arr_node_fz = -1
+        ec_wi_flag_fz = 0
+        if recv >= 0 && @nd_type[recv] == "CallNode" && (@nd_name[recv] == "each_cons" || @nd_name[recv] == "each_slice") && @nd_block[recv] < 0
+          ec_arr_node_fz = recv
+        elsif recv >= 0 && @nd_type[recv] == "CallNode" && @nd_name[recv] == "with_index" && @nd_block[recv] < 0
+          inner_fz = @nd_receiver[recv]
+          if inner_fz >= 0 && @nd_type[inner_fz] == "CallNode" && (@nd_name[inner_fz] == "each_cons" || @nd_name[inner_fz] == "each_slice") && @nd_block[inner_fz] < 0
+            ec_arr_node_fz = inner_fz
+            ec_wi_flag_fz = 1
+          end
+        end
+        if ec_arr_node_fz >= 0
+          ec_inner_recv_fz = @nd_receiver[ec_arr_node_fz]
+          ec_n_fz = -1
+          ec_args_fz = @nd_arguments[ec_arr_node_fz]
+          if ec_args_fz >= 0
+            ec_a_list_fz = get_args(ec_args_fz)
+            if ec_a_list_fz.length > 0 && @nd_type[ec_a_list_fz[0]] == "IntegerNode"
+              ec_n_fz = @nd_value[ec_a_list_fz[0]].to_i
+            end
+          end
+          if ec_inner_recv_fz >= 0 && ec_n_fz > 0
+            ec_inner_rt_fz = infer_type(ec_inner_recv_fz)
+            if is_array_type(ec_inner_rt_fz) == 1
+              blk_fz = @nd_block[call_nid]
+              if blk_fz >= 0
+                ec_bpn_fz = @nd_parameters[blk_fz]
+                if ec_bpn_fz >= 0
+                  ec_inner_pn_fz = @nd_parameters[ec_bpn_fz]
+                  if ec_inner_pn_fz >= 0
+                    ec_reqs_fz = parse_id_list(@nd_requireds[ec_inner_pn_fz])
+                    ec_expected_fz = ec_n_fz + ec_wi_flag_fz
+                    if ec_reqs_fz.length == ec_expected_fz && ec_reqs_fz.length >= 2 && @nd_type[ec_reqs_fz[0]] != "MultiTargetNode"
+                      if ec_wi_flag_fz == 1 && pi == ec_reqs_fz.length - 1
+                        return "int"
+                      end
+                      return elem_type_of_array(ec_inner_rt_fz)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
  # Hash#each yields |k, v|. elem_type_of_array on a hash type
  # falls back to "int" for both, which then types `puts k + ":"`
  # inside the block as int-arithmetic and lowers to printf("%lld")
