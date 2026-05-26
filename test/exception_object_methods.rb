@@ -70,11 +70,12 @@ rescue ArgumentError => e
   puts "msg: #{e.message}"
 end
 
-# .backtrace returns nil (spinel does not track per-exception backtraces).
+# .backtrace returns an empty str_array (#895; spinel does not
+# track per-exception backtraces).
 begin
   raise "trace"
 rescue => e
-  puts "backtrace is nil: #{e.backtrace == nil}"
+  puts "backtrace is empty: #{e.backtrace.empty?}"
 end
 
 # .full_message returns "ClassName: message".

@@ -16141,8 +16141,14 @@ class Compiler
         return "sp_sprintf(\"%s: %s\", sp_exc_class_name(" + rc + "), sp_exc_message(" + rc + "))"
       end
       if mname == "backtrace"
- # Spinel doesn't track per-exception backtraces; return nil.
-        return "0"
+ # Issue #895: spinel doesn't track per-exception frames (no
+ # call-stack management in the AOT model -- same rationale as
+ # the deferred `caller` portion of #878). Return an empty
+ # str_array instead of nil so callers' `.first` / `.length`
+ # don't crash.
+        @needs_str_array = 1
+        @needs_gc = 1
+        return "sp_StrArray_new()"
       end
       if mname == "is_a?" || mname == "kind_of?"
         @needs_exc_class_hierarchy = 1

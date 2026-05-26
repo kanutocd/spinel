@@ -9,7 +9,7 @@ re-raised msg: inner
 compat-msg
 caught propagated: ArgumentError
 msg: propagate
-backtrace is nil: true
+backtrace is empty: true
 full: ArgumentError: fm
 second clause: TypeError multi
 done

@@ -2975,7 +2975,11 @@ class Compiler
             return "string"
           end
           if mname == "backtrace"
-            return "nil"
+ # Issue #895: spinel doesn't track per-exception frames;
+ # return an empty str_array (callers can call .first / .length
+ # safely). Documented limitation.
+            @needs_str_array = 1
+            return "str_array"
           end
           if mname == "is_a?" || mname == "kind_of?" || mname == "instance_of?"
             return "bool"
