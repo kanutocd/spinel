@@ -3762,7 +3762,7 @@ class Compiler
     if is_primitive_shared_method(mname) == 1
       return 1
     end
-    if mname == "Integer" || mname == "Float"
+    if mname == "Integer" || mname == "Float" || mname == "String"
       return 1
     end
     if mname == "delete_prefix" || mname == "delete_suffix"
@@ -4129,6 +4129,10 @@ class Compiler
     end
     if recv < 0 && mname == "Float"
       return "float"
+    end
+ # Kernel#String() returns string. Issue #879.
+    if recv < 0 && mname == "String"
+      return "string"
     end
  # Float#ceil(n)/floor(n)/round(n)/truncate(n) with n given return
  # Float; zero-arg / Integer#ceil etc. return Integer. (truncate's arm

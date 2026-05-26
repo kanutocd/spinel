@@ -16469,6 +16469,49 @@ class Compiler
       end
       return "(mrb_float)(" + compile_arg0(nid) + ")"
     end
+ # Kernel#String() — coerce via .to_s. nil -> "" per MRI.
+ # Issue #879.
+    if mname == "String"
+      args_id_S = @nd_arguments[nid]
+      if args_id_S >= 0
+        arg_ids_S = get_args(args_id_S)
+        if arg_ids_S.length > 0
+          a0_S = arg_ids_S[0]
+          at_S = infer_type(a0_S)
+          a_e_S = compile_expr(a0_S)
+          if at_S == "string" || at_S == "argv"
+            return a_e_S
+          end
+          if at_S == "int"
+            return "sp_int_to_s(" + a_e_S + ")"
+          end
+          if at_S == "float"
+            return "sp_float_inspect(" + a_e_S + ")"
+          end
+          if at_S == "bool"
+            return "((" + a_e_S + ") ? (&(\"\\xff\" \"true\")[1]) : (&(\"\\xff\" \"false\")[1]))"
+          end
+          if at_S == "nil"
+            return "sp_str_empty"
+          end
+          if at_S == "symbol"
+            return "sp_sym_to_s(" + a_e_S + ")"
+          end
+          if at_S == "bigint"
+            @needs_bigint = 1
+            return "sp_bigint_to_s((sp_Bigint *)" + a_e_S + ")"
+          end
+          if at_S == "mutable_str"
+            return "(" + a_e_S + ")->data"
+          end
+          if at_S == "poly"
+            @needs_rb_value = 1
+            return "sp_poly_to_s(" + a_e_S + ")"
+          end
+        end
+      end
+      return "sp_str_empty"
+    end
     if mname == "proc"
       if @nd_block[nid] >= 0
         return compile_proc_literal(nid)
