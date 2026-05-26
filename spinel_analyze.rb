@@ -9291,7 +9291,14 @@ class Compiler
                 @cls_ivar_types_version = @cls_ivar_types_version + 1
               end
             elsif old == "nil" && is_nullable_pointer_type(new_type) == 1
-              types[k] = new_type + "?"
+ # Issue #804: if new_type already ends in '?', don't append a
+ # second one. e.g. `@x = nil` then `@x = val` where val is
+ # already nullable -> stay as "string?", not "string??".
+              if is_nullable_type(new_type) == 1
+                types[k] = new_type
+              else
+                types[k] = new_type + "?"
+              end
               @cls_ivar_types[ci] = types.join(";")
               @cls_ivar_types_version = @cls_ivar_types_version + 1
  # Same base, one nullable: keep / adopt the nullable form
