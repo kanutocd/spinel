@@ -109,6 +109,15 @@ typedef struct mrb_regexp_pattern {
 #define MRB_REGEXP_STEP_LIMIT 1000000
 #endif
 
+/* Recursion depth ceiling for bt_match. Backtracking SPLIT/SAVE
+   recursion can otherwise drive the C stack to overflow on patterns
+   like long alternation chains or backref + many quantifier
+   iterations. 10000 frames covers realistic workloads while staying
+   well under a default 8 MB stack (~40 bytes per frame). Issue #777. */
+#ifndef MRB_REGEXP_DEPTH_LIMIT
+#define MRB_REGEXP_DEPTH_LIMIT 10000
+#endif
+
 /* Maximum captures. Issues #820, #776: raised from 32 so deeply
    nested-paren regexes (`((((...((a))...))))`) compile instead of
    raising RegexpError. 4096 covers >1k-deep nesting with room to

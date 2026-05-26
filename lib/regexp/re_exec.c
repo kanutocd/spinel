@@ -430,9 +430,27 @@ pike_vm(const mrb_regexp_pattern *pat,
  * Step-limited to prevent ReDoS.
  */
 static mrb_bool
+bt_match_depth(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
+               const char *sp, uint32_t pc, int *captures, int ncap, int *steps,
+               int depth);
+
+static mrb_bool
 bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
          const char *sp, uint32_t pc, int *captures, int ncap, int *steps)
 {
+  return bt_match_depth(pat, str, str_end, sp, pc, captures, ncap, steps, 0);
+}
+
+static mrb_bool
+bt_match_depth(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
+               const char *sp, uint32_t pc, int *captures, int ncap, int *steps,
+               int depth)
+{
+  /* Issue #777: bail before driving the C stack to overflow. The
+     callers below recurse on SPLIT / SAVE / lookahead / lookbehind;
+     each level adds one C frame. Treat over-deep as a failed match
+     -- conservative, in line with how steps-limit is handled. */
+  if (depth > MRB_REGEXP_DEPTH_LIMIT) return FALSE;
   while (pc < pat->code_len) {
     if (++(*steps) > MRB_REGEXP_STEP_LIMIT) return FALSE;
 
@@ -483,12 +501,12 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
       break;
 
     case RE_SPLIT:
-      if (bt_match(pat, str, str_end, sp, pc + 1, captures, ncap, steps)) return TRUE;
+      if (bt_match_depth(pat, str, str_end, sp, pc + 1, captures, ncap, steps, depth + 1)) return TRUE;
       pc = inst.offset;
       break;
 
     case RE_SPLITNG:
-      if (bt_match(pat, str, str_end, sp, inst.offset, captures, ncap, steps)) return TRUE;
+      if (bt_match_depth(pat, str, str_end, sp, inst.offset, captures, ncap, steps, depth + 1)) return TRUE;
       pc++;
       break;
 
@@ -498,7 +516,7 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
         if (slot < ncap) {
           int old = captures[slot];
           captures[slot] = (int)(sp - str);
-          if (bt_match(pat, str, str_end, sp, pc + 1, captures, ncap, steps)) return TRUE;
+          if (bt_match_depth(pat, str, str_end, sp, pc + 1, captures, ncap, steps, depth + 1)) return TRUE;
           captures[slot] = old;
         }
         return FALSE;
@@ -563,13 +581,13 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
       break;
 
     case RE_LOOKAHEAD:
-      if (!bt_match(pat, str, str_end, sp, pc + 1, captures, ncap, steps))
+      if (!bt_match_depth(pat, str, str_end, sp, pc + 1, captures, ncap, steps, depth + 1))
         return FALSE;
       pc = inst.offset;
       break;
 
     case RE_NEG_LOOKAHEAD:
-      if (bt_match(pat, str, str_end, sp, pc + 1, captures, ncap, steps))
+      if (bt_match_depth(pat, str, str_end, sp, pc + 1, captures, ncap, steps, depth + 1))
         return FALSE;
       pc = inst.offset;
       break;
@@ -578,7 +596,7 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
       {
         int lb_len = inst.a;
         if (sp - str < lb_len) return FALSE;  /* not enough text before */
-        if (!bt_match(pat, str, str_end, sp - lb_len, pc + 1, captures, ncap, steps))
+        if (!bt_match_depth(pat, str, str_end, sp - lb_len, pc + 1, captures, ncap, steps, depth + 1))
           return FALSE;
         pc = inst.offset;
       }
@@ -588,7 +606,7 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
       {
         int lb_len = inst.a;
         if (sp - str >= lb_len) {
-          if (bt_match(pat, str, str_end, sp - lb_len, pc + 1, captures, ncap, steps))
+          if (bt_match_depth(pat, str, str_end, sp - lb_len, pc + 1, captures, ncap, steps, depth + 1))
             return FALSE;
         }
         /* if not enough text before, negative lookbehind succeeds */
