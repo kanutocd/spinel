@@ -5541,6 +5541,15 @@ class Compiler
           end
           return tuple_elem_type_at(rt, 0)
         end
+ # Issue #833: *StrHash get now returns NULL for missing keys
+ # (was sp_str_empty). *IntHash analyze widening to int? is
+ # deferred -- body-usage widening cascades the change through
+ # declare_var et al., crashing the self-host build. The current
+ # change ships NULL for missing string keys (already nullable
+ # C-side) and SP_INT_NIL for int keys at the runtime level;
+ # int values surface as "int" at analyze, so `h[k].inspect`
+ # of a missing int key prints INT64_MIN's decimal until the
+ # follow-up phase that widens the LV slot.
         if rt == "str_int_hash"
           return "int"
         end
