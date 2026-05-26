@@ -28624,8 +28624,11 @@ class Compiler
  # Non-array string ivars (computed in analyze, consumed by emit)
     buf = buf + "STR @cls_cmeth_live " + ir_escape(@cls_cmeth_live) + "\n"
     buf = buf + "STR @cls_meth_live " + ir_escape(@cls_meth_live) + "\n"
-    buf = buf + "STR @meth_blk_param_types " + ir_escape(@meth_blk_param_types.join("|")) + "\n"
-    buf = buf + "STR @cls_cmeth_blk_param_types " + ir_escape(@cls_cmeth_blk_param_types.join("|")) + "\n"
+ # Issue #750: switch to SA (string array) so each element is
+ # escaped individually -- inner `|` in `int|int` no longer
+ # collides with the outer separator on round-trip.
+    buf = ir_emit_sa(buf, "@meth_blk_param_types", @meth_blk_param_types)
+    buf = ir_emit_sa(buf, "@cls_cmeth_blk_param_types", @cls_cmeth_blk_param_types)
 
  # Per-AST-node records (T / NM / NB / SN / ST) get accumulated
  # into a StrArray and joined once. Building them with `buf + ...`

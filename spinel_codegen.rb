@@ -41634,10 +41634,6 @@ class Compiler
       @cls_cmeth_live = val
     elsif name == "@cls_meth_live"
       @cls_meth_live = val
-    elsif name == "@meth_blk_param_types"
-      @meth_blk_param_types = val.split("|", -1)
-    elsif name == "@cls_cmeth_blk_param_types"
-      @cls_cmeth_blk_param_types = val.split("|", -1)
     end
   end
 
@@ -41806,6 +41802,12 @@ class Compiler
       @ieval_extra_param_names = val
     elsif name == "@cls_with_internal_ieval_lift"
       @cls_with_internal_ieval_lift = val
+ # Issue #750: blk_param_types arrays moved from STR to SA so
+ # the inner `|` separator survives the round-trip.
+    elsif name == "@meth_blk_param_types"
+      @meth_blk_param_types = val
+    elsif name == "@cls_cmeth_blk_param_types"
+      @cls_cmeth_blk_param_types = val
     end
   end
 
