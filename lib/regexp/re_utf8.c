@@ -46,30 +46,38 @@ re_utf8_decode(const char *s, int *len)
     return c;  /* invalid lead byte, return as-is */
   }
   else if (c < 0xe0) {
+    /* Issue #754: validate continuation byte before reading further.
+       NUL (0x00) is the C string terminator -- a 2-byte lead at
+       end-of-string would otherwise pull garbage. Also rejects any
+       byte without the 10xxxxxx continuation pattern. */
+    if (((uint8_t)s[1] & 0xc0) != 0x80) { *len = 1; return 0xFFFD; }
     *len = 2;
     cp = (c & 0x1f) << 6;
     cp |= ((uint8_t)s[1] & 0x3f);
-    /* Overlong: 2-byte form valid only for cp >= 0x80. */
     if (cp < 0x80) { *len = 1; return 0xFFFD; }
     return cp;
   }
   else if (c < 0xf0) {
+    if (((uint8_t)s[1] & 0xc0) != 0x80 || ((uint8_t)s[2] & 0xc0) != 0x80) {
+      *len = 1; return 0xFFFD;
+    }
     *len = 3;
     cp = (c & 0x0f) << 12;
     cp |= ((uint8_t)s[1] & 0x3f) << 6;
     cp |= ((uint8_t)s[2] & 0x3f);
-    /* Overlong: 3-byte form valid only for cp >= 0x800. */
     if (cp < 0x800) { *len = 1; return 0xFFFD; }
     return cp;
   }
   else {
+    if (((uint8_t)s[1] & 0xc0) != 0x80 || ((uint8_t)s[2] & 0xc0) != 0x80 ||
+        ((uint8_t)s[3] & 0xc0) != 0x80) {
+      *len = 1; return 0xFFFD;
+    }
     *len = 4;
     cp = (c & 0x07) << 18;
     cp |= ((uint8_t)s[1] & 0x3f) << 12;
     cp |= ((uint8_t)s[2] & 0x3f) << 6;
     cp |= ((uint8_t)s[3] & 0x3f);
-    /* Overlong: 4-byte form valid only for cp >= 0x10000. Also reject
-       codepoints above the Unicode max (U+10FFFF). */
     if (cp < 0x10000 || cp > 0x10FFFF) { *len = 1; return 0xFFFD; }
     return cp;
   }
