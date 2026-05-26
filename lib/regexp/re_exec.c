@@ -203,12 +203,21 @@ add_thread(pike_state *s, re_threadlist *list,
     break;
   }
 
-  if (list->count < list->capa) {
-    re_thread *t = &list->threads[list->count++];
-    t->pc = pc;
-    t->cap_slot = cap_slot;
-    t->sp = sp;
+  /* Issue #756: grow the thread list on demand instead of silently
+     dropping the new thread. The previous form produced false
+     negatives on patterns with many simultaneous alternatives. */
+  if (list->count >= list->capa) {
+    int new_capa = list->capa * 2;
+    re_thread *nt = (re_thread *)realloc(list->threads,
+                                         sizeof(re_thread) * new_capa);
+    if (!nt) return;  /* OOM: drop the thread, same as before */
+    list->threads = nt;
+    list->capa = new_capa;
   }
+  re_thread *t = &list->threads[list->count++];
+  t->pc = pc;
+  t->cap_slot = cap_slot;
+  t->sp = sp;
 }
 
 static int
