@@ -16311,9 +16311,21 @@ class Compiler
  # discards the times call) keep working, while genuine
  # "x.unknown_method" sites surface the bug instead of returning
  # a silent zero. Issue #727.
+ #
+ # Gate the raise on a *concrete* receiver type. "int" and "poly"
+ # often arise when an ivar / param's type couldn't be inferred
+ # (e.g. `@x = nil` later assigned an obj at runtime); raising
+ # would break the silent-fallback pattern optcarrot etc. depend
+ # on (`@hook && @hook.fire(...)` where @hook starts nil and is
+ # later assigned). Keep the warn for visibility, fall back to
+ # silent 0 on int/poly recvs.
     warn_unresolved_call(mname, base_type(recv_type))
+    rb_unr = base_type(recv_type)
+    if rb_unr == "int" || rb_unr == "poly" || rb_unr == "nil"
+      return "0"
+    end
     @needs_exc_class_hierarchy = 1
-    "({ sp_raise_cls(\"NoMethodError\", \"undefined method '" + mname + "' for " + base_type(recv_type) + "\"); (mrb_int)0; })"
+    "({ sp_raise_cls(\"NoMethodError\", \"undefined method '" + mname + "' for " + rb_unr + "\"); (mrb_int)0; })"
   end
 
   def compile_block_given_expr
