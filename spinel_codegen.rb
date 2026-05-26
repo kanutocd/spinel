@@ -13833,12 +13833,20 @@ class Compiler
       end
       kf_sw = 0
       while kf_sw < flocals_n_sw.length
+ # Issue #810: bound the type lookup. If the scope name list is
+ # longer than the type list (mismatched serialization), fall back
+ # to "int" so we don't pass nil through c_type / c_default_val
+ # and crash.
+        t_sw = "int"
+        if kf_sw < flocals_t_sw.length
+          t_sw = flocals_t_sw[kf_sw]
+        end
         tname_lv = flocals_n_sw[kf_sw] + suffix_sw
-        emit("  " + c_type(flocals_t_sw[kf_sw]) + " lv_" + tname_lv + " = " + c_default_val(flocals_t_sw[kf_sw]) + ";")
+        emit("  " + c_type(t_sw) + " lv_" + tname_lv + " = " + c_default_val(t_sw) + ";")
         map_from_sw.push(flocals_n_sw[kf_sw])
         map_to_sw.push(tname_lv)
-        declare_var(tname_lv, flocals_t_sw[kf_sw])
-        declare_var(flocals_n_sw[kf_sw], flocals_t_sw[kf_sw])
+        declare_var(tname_lv, t_sw)
+        declare_var(flocals_n_sw[kf_sw], t_sw)
         kf_sw = kf_sw + 1
       end
     end
