@@ -752,6 +752,48 @@ static size_t sp_utf8_byte_offset(const char*s,mrb_int char_idx){
 /* Issue #762: check malloc/realloc returns. On OOM, return an empty
    array rather than dereferencing NULL. */
 static uint32_t*sp_utf8_decode_all(const char*s,size_t*out_n){size_t cap=8,n=0;uint32_t*cps=(uint32_t*)malloc(cap*sizeof(uint32_t));if(!cps){*out_n=0;return NULL;}const char*p=s;while(s&&*p){if(n>=cap){size_t nc=cap*2;uint32_t*nx=(uint32_t*)realloc(cps,nc*sizeof(uint32_t));if(!nx){free(cps);*out_n=0;return NULL;}cps=nx;cap=nc;}uint32_t cp;p+=sp_utf8_decode(p,&cp);cps[n++]=cp;}*out_n=n;return cps;}
+
+/* Issue #858: expand `a-z` range notation in a String#delete /
+   String#tr / String#count character set. `^abc` negation is
+   NOT handled (separate v1 scope). Result is a malloc'd flat
+   codepoint array — caller frees. */
+static uint32_t*sp_utf8_decode_charset(const char*s,size_t*out_n){
+  size_t cap=16,n=0;
+  uint32_t*cps=(uint32_t*)malloc(cap*sizeof(uint32_t));
+  if(!cps){*out_n=0;return NULL;}
+  const char*p=s;
+  uint32_t prev=0; int has_prev=0;
+  while(s&&*p){
+    uint32_t cp;
+    int len=sp_utf8_decode(p,&cp);
+    p+=len;
+    /* Detect range: prev '-' next  (but leading or trailing '-'
+       is literal). When current char is '-' and there's a next
+       non-'-' char and we have a prev, expand. */
+    if(cp=='-' && has_prev && *p){
+      uint32_t hi;
+      int hi_len=sp_utf8_decode(p,&hi);
+      p+=hi_len;
+      if(hi>=prev){
+        /* Drop the prev we already wrote, re-emit the whole range. */
+        n--;  /* undo prev */
+        for(uint32_t c=prev;c<=hi;c++){
+          if(n>=cap){cap*=2;cps=(uint32_t*)realloc(cps,cap*sizeof(uint32_t));}
+          cps[n++]=c;
+        }
+        has_prev=0;
+        continue;
+      }
+      /* Bad range (hi<prev): fall through, push '-' literally. */
+      cp='-';
+    }
+    if(n>=cap){cap*=2;cps=(uint32_t*)realloc(cps,cap*sizeof(uint32_t));}
+    cps[n++]=cp;
+    prev=cp; has_prev=1;
+  }
+  *out_n=n;
+  return cps;
+}
 static int sp_utf8_set_has(const uint32_t*cps,size_t n,uint32_t cp){for(size_t i=0;i<n;i++)if(cps[i]==cp)return 1;return 0;}
 
 static inline void sp_mark_string(const char *s) {
@@ -1591,7 +1633,7 @@ static const char*sp_str_format_strarr(const char*fmt,sp_StrArray*a){size_t cap=
 static const char*sp_str_reverse(const char*s){if(!s)return sp_str_empty;size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t end=bl;const char*p=s;while(*p){int cn=sp_utf8_advance(p);end-=cn;memcpy(r+end,p,cn);p+=cn;}r[bl]=0;return r;}
 static const char*sp_str_sub(const char*s,const char*pat,const char*rep){if(!s)return sp_str_empty;if(!pat||!rep)return s;const char*f=strstr(s,pat);if(!f)return s;size_t pl=strlen(pat),rl=strlen(rep),sl=strlen(s);char*r=sp_str_alloc_raw(sl-pl+rl+1);size_t n=f-s;memcpy(r,s,n);memcpy(r+n,rep,rl);memcpy(r+n+rl,f+pl,sl-n-pl+1);return r;}
 static const char*sp_str_capitalize(const char*s){if(!s)return sp_str_empty;size_t l=strlen(s);char*r=sp_str_alloc_raw(l+1);for(size_t i=0;i<=l;i++)r[i]=tolower((unsigned char)s[i]);if(l>0)r[0]=toupper((unsigned char)r[0]);return r;}
-static mrb_int sp_str_count(const char*s,const char*chars){if(!chars)return 0;size_t setn;uint32_t*set=sp_utf8_decode_all(chars,&setn);mrb_int c=0;const char*p=s;while(*p){uint32_t cp;p+=sp_utf8_decode(p,&cp);if(sp_utf8_set_has(set,setn,cp))c++;}free(set);return c;}
+static mrb_int sp_str_count(const char*s,const char*chars){if(!chars)return 0;size_t setn;uint32_t*set=sp_utf8_decode_charset(chars,&setn);mrb_int c=0;const char*p=s;while(*p){uint32_t cp;p+=sp_utf8_decode(p,&cp);if(sp_utf8_set_has(set,setn,cp))c++;}free(set);return c;}
 /* Issue #800: clamp l*n so a malicious input can't allocate a tiny
    buffer through size_t overflow. */
 static const char*sp_str_repeat(const char*s,mrb_int n){if(!s||n<=0)return sp_str_empty;size_t l=strlen(s);if(l>0&&(size_t)n>SIZE_MAX/l)return sp_str_empty;char*r=sp_str_alloc_raw(l*n+1);for(mrb_int i=0;i<n;i++)memcpy(r+l*i,s,l);r[l*n]=0;return r;}
@@ -1601,7 +1643,7 @@ static sp_IntArray*sp_str_bytes(const char*s){sp_IntArray*a=sp_IntArray_new();if
    sp_utf8_decode (returns the leading byte for malformed seqs). */
 static sp_IntArray*sp_str_codepoints(const char*s){sp_IntArray*a=sp_IntArray_new();if(!s)return a;const char*p=s;while(*p){uint32_t cp;int n=sp_utf8_decode(p,&cp);sp_IntArray_push(a,(mrb_int)cp);p+=n;}return a;}
 /* Issue #798: guard NULL inputs (CRuby treats nil/no-op gracefully). */
-static const char*sp_str_tr(const char*s,const char*from,const char*to){if(!s)return sp_str_empty;if(!from||!to)return s;size_t fn,tn;uint32_t*fcps=sp_utf8_decode_all(from,&fn);uint32_t*tcps=sp_utf8_decode_all(to,&tn);size_t bl=strlen(s);size_t cap=bl*4+1;char*buf=(char*)malloc(cap);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);size_t mi=fn;for(size_t j=0;j<fn;j++)if(fcps[j]==cp){mi=j;break;}if(mi<fn&&tn>0){uint32_t rep=mi<tn?tcps[mi]:tcps[tn-1];n+=sp_utf8_encode(rep,buf+n);}else{memcpy(buf+n,p,cn);n+=cn;}p+=cn;}buf[n]=0;char*r=sp_str_alloc(n);memcpy(r,buf,n+1);free(buf);free(fcps);free(tcps);return r;}
+static const char*sp_str_tr(const char*s,const char*from,const char*to){if(!s)return sp_str_empty;if(!from||!to)return s;size_t fn,tn;uint32_t*fcps=sp_utf8_decode_charset(from,&fn);uint32_t*tcps=sp_utf8_decode_charset(to,&tn);size_t bl=strlen(s);size_t cap=bl*4+1;char*buf=(char*)malloc(cap);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);size_t mi=fn;for(size_t j=0;j<fn;j++)if(fcps[j]==cp){mi=j;break;}if(mi<fn&&tn>0){uint32_t rep=mi<tn?tcps[mi]:tcps[tn-1];n+=sp_utf8_encode(rep,buf+n);}else{memcpy(buf+n,p,cn);n+=cn;}p+=cn;}buf[n]=0;char*r=sp_str_alloc(n);memcpy(r,buf,n+1);free(buf);free(fcps);free(tcps);return r;}
 /* Issue #902: String#tr_s -- translate AND squeeze consecutive
    identical results into one. Walks codepoint-by-codepoint and
    collapses adjacent duplicates only among the translated bytes
@@ -1610,8 +1652,8 @@ static const char*sp_str_tr_s(const char*s,const char*from,const char*to){
   if(!s)return sp_str_empty;
   if(!from||!to)return s;
   size_t fn,tn;
-  uint32_t*fcps=sp_utf8_decode_all(from,&fn);
-  uint32_t*tcps=sp_utf8_decode_all(to,&tn);
+  uint32_t*fcps=sp_utf8_decode_charset(from,&fn);
+  uint32_t*tcps=sp_utf8_decode_charset(to,&tn);
   size_t bl=strlen(s);
   size_t cap=bl*4+1;
   char*buf=(char*)malloc(cap);
@@ -1649,7 +1691,7 @@ static const char*sp_str_tr_s(const char*s,const char*from,const char*to){
   free(buf); free(fcps); free(tcps);
   return r;
 }
-static const char*sp_str_delete(const char*s,const char*chars){if(!s)return sp_str_empty;if(!chars)return s;size_t setn;uint32_t*set=sp_utf8_decode_all(chars,&setn);size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(!sp_utf8_set_has(set,setn,cp)){memcpy(r+n,p,cn);n+=cn;}p+=cn;}r[n]=0;free(set);return r;}
+static const char*sp_str_delete(const char*s,const char*chars){if(!s)return sp_str_empty;if(!chars)return s;size_t setn;uint32_t*set=sp_utf8_decode_charset(chars,&setn);size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(!sp_utf8_set_has(set,setn,cp)){memcpy(r+n,p,cn);n+=cn;}p+=cn;}r[n]=0;sp_str_set_len(r,n);free(set);return r;}
 static const char*sp_str_squeeze(const char*s){if(!s)return sp_str_empty;size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;uint32_t prev=0xFFFFFFFFu;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(cp!=prev){memcpy(r+n,p,cn);n+=cn;prev=cp;}p+=cn;}r[n]=0;return r;}
 static const char*sp_str_ljust(const char*s,mrb_int w){if(!s)return sp_str_empty;mrb_int cl=sp_str_length(s);if(cl>=w)return s;size_t bl=strlen(s);size_t pad=(size_t)(w-cl);char*r=sp_str_alloc_raw(bl+pad+1);memcpy(r,s,bl);memset(r+bl,' ',pad);r[bl+pad]=0;return r;}
 static const char*sp_str_rjust(const char*s,mrb_int w){if(!s)return sp_str_empty;mrb_int cl=sp_str_length(s);if(cl>=w)return s;size_t bl=strlen(s);size_t pad=(size_t)(w-cl);char*r=sp_str_alloc_raw(bl+pad+1);memset(r,' ',pad);memcpy(r+pad,s,bl);r[bl+pad]=0;return r;}
