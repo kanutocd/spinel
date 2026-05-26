@@ -21159,6 +21159,23 @@ class Compiler
         return "sp_IntArray_empty(" + rc + ")"
       end
       if mname == "include?"
+ # Issue #911: cross-type include? returns false (CRuby). Sym_array
+ # shares the int_array dispatch (sym ids stored as ints), so allow
+ # "symbol" args too when receiver is sym_array.
+        args_id_inc = @nd_arguments[nid]
+        if args_id_inc >= 0
+          aa_inc = get_args(args_id_inc)
+          if aa_inc.length > 0
+            at_inc = infer_type(aa_inc[0])
+            ok_inc = at_inc == "int" || at_inc == "int?" || at_inc == "poly"
+            if recv_type == "sym_array" && at_inc == "symbol"
+              ok_inc = true
+            end
+            if !ok_inc
+              return "FALSE"
+            end
+          end
+        end
         return "sp_IntArray_include(" + rc + ", " + compile_arg0_as_int(nid) + ")"
       end
       if mname == "index" || mname == "find_index"
@@ -21757,6 +21774,17 @@ class Compiler
         return "sp_StrArray_empty(" + rc + ")"
       end
       if mname == "include?"
+ # Issue #911.
+        args_id_inc_s = @nd_arguments[nid]
+        if args_id_inc_s >= 0
+          aa_inc_s = get_args(args_id_inc_s)
+          if aa_inc_s.length > 0
+            at_inc_s = infer_type(aa_inc_s[0])
+            if at_inc_s != "string" && at_inc_s != "string?" && at_inc_s != "mutable_str" && at_inc_s != "poly"
+              return "FALSE"
+            end
+          end
+        end
         return "sp_StrArray_include(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "index" || mname == "find_index"
