@@ -8018,6 +8018,9 @@ class Compiler
     emit_raw("static sp_PolyPolyHash*sp_SymStrHash_invert(sp_SymStrHash*h){sp_PolyPolyHash*r=sp_PolyPolyHash_new();for(mrb_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,sp_box_str(sp_SymStrHash_get(h,h->order[i])),sp_box_sym(h->order[i]));return r;}")
     emit_raw("static sp_SymStrHash*sp_SymStrHash_merge(sp_SymStrHash*a,sp_SymStrHash*b){sp_SymStrHash*r=sp_SymStrHash_new();r->default_v=a->default_v;for(mrb_int i=0;i<a->len;i++)sp_SymStrHash_set(r,a->order[i],sp_SymStrHash_get(a,a->order[i]));for(mrb_int i=0;i<b->len;i++)sp_SymStrHash_set(r,b->order[i],sp_SymStrHash_get(b,b->order[i]));return r;}")
     emit_raw("static mrb_bool sp_SymStrHash_eq(sp_SymStrHash*a,sp_SymStrHash*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(mrb_int i=0;i<a->len;i++){sp_sym k=a->order[i];if(!sp_SymStrHash_has_key(b,k))return FALSE;if(!sp_str_eq(sp_SymStrHash_get(a,k),sp_SymStrHash_get(b,k)))return FALSE;}return TRUE;}")
+ # Issue #851: inspect for sym_str_hash, rendered with Ruby's
+ # `{:k=>"v", ...}` shorthand (sym keys, str values).
+    emit_raw("static const char*sp_SymStrHash_inspect(sp_SymStrHash*h){sp_String*s=sp_String_new(\"{\");if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,\", \");sp_String_append(s,sp_sym_to_s(h->order[i]));sp_String_append(s,\": \");sp_String_append(s,sp_str_inspect(sp_SymStrHash_get(h,h->order[i])));}}sp_String_append(s,\"}\");return s->data;}")
  # Cross-variant merge: when a `sym_str_hash` and a `sym_poly_hash`
  # are merged in either direction, both result paths return a
  # fresh sym_poly_hash with the str entries boxed via sp_box_str.
@@ -21777,6 +21780,15 @@ class Compiler
     if mname == "to_h" && is_hash_type(recv_type) == 1
       return rc
     end
+ # Issue #851: typed-hash inspect/to_s — route through the
+ # variant-specific runtime helper so `puts h.inspect` works
+ # for any typed hash, not just sym_int_hash.
+    if (mname == "inspect" || mname == "to_s") && is_hash_type(recv_type) == 1
+      ins_h = compile_inspect_for(recv_type, rc)
+      if ins_h != ""
+        return ins_h
+      end
+    end
     if recv_type == "sym_int_hash"
       if mname == "[]"
         args_id0 = @nd_arguments[nid]
@@ -33184,6 +33196,45 @@ class Compiler
         emit("  }")
         return 1
       end
+ # Issue #851: each_value on the common typed-hash variants.
+ # The shape is the same: walk h->order[i] and dispatch the
+ # variant's _get. Only int and string value parts here; the
+ # poly variants flow through the poly_poly_hash arm above
+ # already after boxing.
+      pfx_ev = ""
+      vty_ev = ""
+      vtag_ev = ""
+      if rt_ev == "sym_int_hash"
+        pfx_ev = "SymIntHash"; vty_ev = "mrb_int"; vtag_ev = "int"
+        @needs_sym_int_hash = 1
+      elsif rt_ev == "str_int_hash"
+        pfx_ev = "StrIntHash"; vty_ev = "mrb_int"; vtag_ev = "int"
+        @needs_str_int_hash = 1
+      elsif rt_ev == "int_str_hash"
+        pfx_ev = "IntStrHash"; vty_ev = "const char *"; vtag_ev = "string"
+      elsif rt_ev == "str_str_hash"
+        pfx_ev = "StrStrHash"; vty_ev = "const char *"; vtag_ev = "string"
+      elsif rt_ev == "sym_str_hash"
+        pfx_ev = "SymStrHash"; vty_ev = "const char *"; vtag_ev = "string"
+      end
+      if pfx_ev != ""
+        rc_ev2 = compile_expr_gc_rooted(recv)
+        bp_ev2 = get_block_param(nid, 0)
+        if bp_ev2 == ""
+          bp_ev2 = "_v"
+        end
+        tmp_ev2 = new_temp
+        emit("  for (mrb_int " + tmp_ev2 + " = 0; " + tmp_ev2 + " < " + rc_ev2 + "->len; " + tmp_ev2 + "++) {")
+        emit("    " + vty_ev + " lv_" + bp_ev2 + " = sp_" + pfx_ev + "_get(" + rc_ev2 + ", " + rc_ev2 + "->order[" + tmp_ev2 + "]);")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_ev2, vtag_ev)
+        compile_stmts_body(@nd_body[@nd_block[nid]])
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        return 1
+      end
     end
 
     if mname == "each_slice"
@@ -36225,6 +36276,33 @@ class Compiler
     if at == "sym_int_hash"
       @needs_sym_int_hash = 1
       return "sp_SymIntHash_inspect(" + val + ")"
+    end
+ # Issue #851: inspect for every typed-hash variant that ships
+ # an inspect helper in the runtime.
+    if at == "str_int_hash"
+      @needs_str_int_hash = 1
+      return "sp_StrIntHash_inspect(" + val + ")"
+    end
+    if at == "str_str_hash"
+      return "sp_StrStrHash_inspect(" + val + ")"
+    end
+    if at == "sym_str_hash"
+      return "sp_SymStrHash_inspect(" + val + ")"
+    end
+    if at == "int_str_hash"
+      return "sp_IntStrHash_inspect(" + val + ")"
+    end
+    if at == "str_poly_hash"
+      @needs_rb_value = 1
+      return "sp_StrPolyHash_inspect(" + val + ")"
+    end
+    if at == "sym_poly_hash"
+      @needs_rb_value = 1
+      return "sp_SymPolyHash_inspect(" + val + ")"
+    end
+    if at == "poly_poly_hash"
+      @needs_rb_value = 1
+      return "sp_PolyPolyHash_inspect(" + val + ")"
     end
     if at == "time"
       return "sp_time_inspect_v(" + val + ")"
