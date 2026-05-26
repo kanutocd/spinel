@@ -33,6 +33,12 @@ typedef struct {
 
 static void compile_alt(re_compiler *c);  /* forward */
 
+/* Issue #781: kept exit(1) for now -- routing through sp_raise_cls
+   would require a non-static linkage hook (the runtime's
+   sp_raise_cls is `static inline` per translation unit, so the
+   library cannot reference the user program's copy directly). A
+   later commit can introduce an extern raise hook + populate it
+   from the user program. */
 static void
 compile_error(re_compiler *c, const char *msg)
 {
@@ -313,17 +319,31 @@ static mrb_bool
 parse_quantifier(re_compiler *c, int *min_out, int *max_out)
 {
   const char *save = c->p;
+  /* Issue #819: integer overflow in `min/max = ... * 10 + digit`
+     used to wrap to negative. CRuby caps quantifiers at a sane
+     internal limit. We pick 100000 -- larger than any reasonable
+     pattern but small enough that the subsequent emit loop can't
+     run forever. */
+  enum { RE_QUANT_MAX = 100000 };
   int min = 0, max = -1;
 
   while (peek(c) >= '0' && peek(c) <= '9') {
-    min = min * 10 + (next_char(c) - '0');
+    int d = next_char(c) - '0';
+    if (min > RE_QUANT_MAX || min * 10 + d > RE_QUANT_MAX) {
+      compile_error(c, "quantifier too big");
+    }
+    min = min * 10 + d;
   }
   if (peek(c) == ',') {
     next_char(c);
     if (peek(c) >= '0' && peek(c) <= '9') {
       max = 0;
       while (peek(c) >= '0' && peek(c) <= '9') {
-        max = max * 10 + (next_char(c) - '0');
+        int d = next_char(c) - '0';
+        if (max > RE_QUANT_MAX || max * 10 + d > RE_QUANT_MAX) {
+          compile_error(c, "quantifier too big");
+        }
+        max = max * 10 + d;
       }
     }
     /* else max = -1 (unlimited) */
