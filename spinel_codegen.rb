@@ -16165,15 +16165,17 @@ class Compiler
  # Unresolved method call on a known receiver. None of the dispatch
  # branches above claimed the shape — typical causes: typo in the
  # method name, missing def on the receiver class, or a Ruby idiom
- # Spinel doesn't support yet. Warn loud at codegen so the user
- # sees the problem instead of just getting a silently-zero-valued
- # binary; emit `0` as the C expression so existing call sites that
- # genuinely rely on the silent fallback (the instance_eval
- # trampoline body, partially-implemented features whose bench/test
- # outputs happen to coincide with `0`) keep compiling. Hard fail
- # would catch more typos but tear up those existing patterns.
+ # Spinel doesn't support yet. Warn loud at codegen and bake a
+ # runtime NoMethodError raise into the expression itself via a
+ # statement-expression. The raise only fires when the expression
+ # is actually evaluated -- so chain-recognition arms (e.g.
+ # `4.times.map { ... }` which generates its own for-loop and
+ # discards the times call) keep working, while genuine
+ # "x.unknown_method" sites surface the bug instead of returning
+ # a silent zero. Issue #727.
     warn_unresolved_call(mname, base_type(recv_type))
-    "0"
+    @needs_exc_class_hierarchy = 1
+    "({ sp_raise_cls(\"NoMethodError\", \"undefined method '" + mname + "' for " + base_type(recv_type) + "\"); (mrb_int)0; })"
   end
 
   def compile_block_given_expr
