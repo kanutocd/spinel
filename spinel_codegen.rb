@@ -38272,7 +38272,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_" + pfx + " *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx_int_ia + ";")
-      emit("    if (sp_" + pfx + "_get(" + tt + ", " + ti + ")) {")
+      emit("    if (" + ti + " >= 0 && " + ti + " < " + tt + "->len) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_" + pfx + "_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38284,7 +38284,7 @@ class Compiler
       ti = new_temp
       idx_s = compile_expr_as_string(arg_ids[0])
       emit("  { sp_StrIntHash *" + tt + " = " + rc + "; const char *" + ti + " = " + idx_s + ";")
-      emit("    if (sp_StrIntHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (sp_StrIntHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_StrIntHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38295,7 +38295,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_IntStrHash *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx + ";")
-      emit("    if (sp_IntStrHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (sp_IntStrHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_IntStrHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38306,7 +38306,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_SymIntHash *" + tt + " = " + rc + "; sp_sym " + ti + " = " + idx + ";")
-      emit("    if (sp_SymIntHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (sp_SymIntHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_SymIntHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38342,7 +38342,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_" + pfx + " *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx_int_or + ";")
-      emit("    if (!sp_" + pfx + "_get(" + tt + ", " + ti + ")) {")
+      emit("    if (" + ti + " < 0 || " + ti + " >= " + tt + "->len) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_" + pfx + "_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38354,7 +38354,7 @@ class Compiler
       ti = new_temp
       idx_s = compile_expr_as_string(arg_ids[0])
       emit("  { sp_StrIntHash *" + tt + " = " + rc + "; const char *" + ti + " = " + idx_s + ";")
-      emit("    if (!sp_StrIntHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (!sp_StrIntHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_StrIntHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38365,7 +38365,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_IntStrHash *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx + ";")
-      emit("    if (!sp_IntStrHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (!sp_IntStrHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_IntStrHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
@@ -38376,7 +38376,7 @@ class Compiler
       tt = new_temp
       ti = new_temp
       emit("  { sp_SymIntHash *" + tt + " = " + rc + "; sp_sym " + ti + " = " + idx + ";")
-      emit("    if (!sp_SymIntHash_get(" + tt + ", " + ti + ")) {")
+      emit("    if (!sp_SymIntHash_has_key(" + tt + ", " + ti + ")) {")
       val = compile_expr(@nd_expression[nid])
       emit("      sp_SymIntHash_set(" + tt + ", " + ti + ", (" + val + "));")
       emit("    }")
