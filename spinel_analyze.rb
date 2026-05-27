@@ -5038,6 +5038,9 @@ class Compiler
     if mname == "next_float" || mname == "prev_float"
       return "float"
     end
+    if mname == "object_id"
+      return "int"
+    end
     if mname == "nan?" || mname == "finite?"
       return "bool"
     end

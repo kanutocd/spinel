@@ -19689,6 +19689,11 @@ class Compiler
     if mname == "itself"
       return rc
     end
+ # String#object_id — pointer bit pattern as the unique id. Stable across the GC since spinel's
+ # str-heap doesn't relocate live strings.
+    if mname == "object_id"
+      return "((mrb_int)(uintptr_t)(" + rc + "))"
+    end
  # String#valid_encoding? — spinel sources are UTF-8 and the
  # runtime helper validates byte sequences. Returns a bool.
     if mname == "valid_encoding?"
@@ -20744,6 +20749,11 @@ class Compiler
     if mname == "itself"
       return rc
     end
+ # Object#object_id — derive from the sym id with an offset that
+ # avoids collision with the integer formula (2*n+1).
+    if mname == "object_id"
+      return "((mrb_int)(" + rc + ") * 8 + 4)"
+    end
     if mname == "is_a?" || mname == "kind_of?"
       args_id = @nd_arguments[nid]
       if args_id >= 0
@@ -20844,6 +20854,12 @@ class Compiler
   end
 
   def compile_int_method_expr(nid, mname, rc)
+ # Object#object_id — MRI's tagged-int formula (2 * n + 1) gives
+ # a unique id per integer value. Doesn't need to match MRI's exact
+ # number, just to be consistent.
+    if mname == "object_id"
+      return "(2 * (" + rc + ") + 1)"
+    end
  # Integer#ceil / floor / round / truncate without precision arg
  # return self. With precision the CRuby semantics differ; defer
  # those to a follow-up.
