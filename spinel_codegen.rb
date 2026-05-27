@@ -19686,6 +19686,9 @@ class Compiler
  # FrozenError below; the mutable_str arm in compile_call_expr
  # handles the legal case before reaching here. Issues #859,
  # #886.
+    if mname == "itself"
+      return rc
+    end
  # Comparable#clamp on string. Issue #899.
     if mname == "clamp"
       args_id_clp = @nd_arguments[nid]
@@ -20724,6 +20727,9 @@ class Compiler
 
  # Symbol methods. rc is a sp_sym expression.
   def compile_symbol_method_expr(nid, mname, rc)
+    if mname == "itself"
+      return rc
+    end
     if mname == "is_a?" || mname == "kind_of?"
       args_id = @nd_arguments[nid]
       if args_id >= 0
