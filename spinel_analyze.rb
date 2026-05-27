@@ -4323,6 +4323,9 @@ class Compiler
     if mname == "cover?"
       return "bool"
     end
+    if mname == "overlap?"
+      return "bool"
+    end
     if mname == "==="
       return "bool"
     end

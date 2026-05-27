@@ -20250,6 +20250,23 @@ class Compiler
       arg = compile_arg0_as_int(nid)
       return "(" + arg + " >= " + tmp + ".first && " + arg + " <= " + tmp + ".last)"
     end
+    if mname == "overlap?"
+ # `(a..b).overlap?(c..d)` for two numeric ranges reduces to
+ # `a <= d && c <= b`. The arg must itself be a range (literal
+ # or evaluated) — compile to an sp_Range struct.
+      args_id_ov = @nd_arguments[nid]
+      if args_id_ov >= 0
+        a_ov = get_args(args_id_ov)
+        if a_ov.length >= 1
+          self_tmp = new_temp
+          other_tmp = new_temp
+          emit("  sp_Range " + self_tmp + " = " + rc + ";")
+          emit("  sp_Range " + other_tmp + " = " + compile_expr(a_ov[0]) + ";")
+          return "(" + self_tmp + ".first <= " + other_tmp + ".last && " + other_tmp + ".first <= " + self_tmp + ".last)"
+        end
+      end
+      return "FALSE"
+    end
     if mname == "to_a"
       @needs_int_array = 1
       @needs_gc = 1
@@ -22079,7 +22096,16 @@ class Compiler
         return "sp_PolyArray_compact(" + rc + ")"
       end
       if mname == "flatten"
- # Recursive flatten into nested array-typed elements. Issue #739.
+ # Recursive flatten into nested array-typed elements. With a
+ # depth arg the depth-bounded variant runs; without, fully
+ # flatten.
+        args_id_fl = @nd_arguments[nid]
+        if args_id_fl >= 0
+          a_fl = get_args(args_id_fl)
+          if a_fl.length >= 1
+            return "sp_PolyArray_flatten_n(" + rc + ", " + compile_expr_as_int(a_fl[0]) + ")"
+          end
+        end
         return "sp_PolyArray_flatten(" + rc + ")"
       end
       if mname == "empty?"
