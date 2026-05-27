@@ -21260,6 +21260,14 @@ class Compiler
     if mname == "abs"
       return "fabs(" + rc + ")"
     end
+ # Float#next_float / prev_float — adjacent representable floats
+ # via libm's nextafter.
+    if mname == "next_float"
+      return "nextafter(" + rc + ", INFINITY)"
+    end
+    if mname == "prev_float"
+      return "nextafter(" + rc + ", -INFINITY)"
+    end
     if mname == "nan?"
       return "(isnan(" + rc + ") ? TRUE : FALSE)"
     end

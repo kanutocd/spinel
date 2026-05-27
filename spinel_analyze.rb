@@ -5032,6 +5032,9 @@ class Compiler
     if mname == "fdiv"
       return "float"
     end
+    if mname == "next_float" || mname == "prev_float"
+      return "float"
+    end
     if mname == "nan?" || mname == "finite?"
       return "bool"
     end
