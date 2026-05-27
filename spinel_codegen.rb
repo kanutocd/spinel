@@ -13868,7 +13868,7 @@ class Compiler
             return "(&(\"\\xff\" \"/\")[1])"
           end
           if nname == "ALT_SEPARATOR"
-            return "sp_str_empty"
+            return "((const char*)0)"
           end
           if nname == "PATH_SEPARATOR"
             return "(&(\"\\xff\" \":\")[1])"
