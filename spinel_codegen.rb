@@ -22234,6 +22234,60 @@ class Compiler
       end
     end
     if recv_type == "sym_int_hash"
+      if mname == "map" && @nd_block[nid] >= 0
+ # Hash#map { |k, v| ... } walks the hash and accumulates the
+ # block's return into a result array. Result type comes from
+ # the block body's last expr (string → str_array, int → int_array,
+ # else poly_array). The previous fallthrough emitted a stale
+ # `_t = 0` and crashed on .inspect.
+        rc_hm = rc
+        bp_k_hm = get_block_param(nid, 0)
+        bp_k_hm = "_k" if bp_k_hm == ""
+        bp_v_hm = get_block_param(nid, 1)
+        bp_v_hm = "_v" if bp_v_hm == ""
+        blk_id_hm = @nd_block[nid]
+        body_id_hm = @nd_body[blk_id_hm]
+        body_stmts_hm = body_id_hm >= 0 ? get_stmts(body_id_hm) : []
+        body_ret_t_hm = "int"
+        if body_stmts_hm.length > 0
+          body_ret_t_hm = infer_type(body_stmts_hm.last)
+        end
+        out_hm = new_temp
+        iter_hm = new_temp
+        out_pfx = "IntArray"
+        if body_ret_t_hm == "string"
+          out_pfx = "StrArray"
+          @needs_str_array = 1
+        elsif body_ret_t_hm == "float"
+          out_pfx = "FloatArray"
+          @needs_float_array = 1
+        else
+          @needs_int_array = 1
+        end
+        emit("  sp_" + out_pfx + " *" + out_hm + " = sp_" + out_pfx + "_new();")
+        emit("  SP_GC_ROOT(" + out_hm + ");")
+        emit("  for (mrb_int " + iter_hm + " = 0; " + iter_hm + " < " + rc_hm + "->len; " + iter_hm + "++) {")
+        emit("    sp_sym lv_" + bp_k_hm + " = " + rc_hm + "->order[" + iter_hm + "];")
+        emit("    mrb_int lv_" + bp_v_hm + " = sp_SymIntHash_get(" + rc_hm + ", lv_" + bp_k_hm + ");")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_k_hm, "symbol")
+        declare_var(bp_v_hm, "int")
+        bexpr_hm = "0"
+        if body_stmts_hm.length > 0
+          k_hm = 0
+          while k_hm < body_stmts_hm.length - 1
+            compile_stmt(body_stmts_hm[k_hm])
+            k_hm = k_hm + 1
+          end
+          bexpr_hm = compile_expr(body_stmts_hm.last)
+        end
+        emit("    sp_" + out_pfx + "_push(" + out_hm + ", " + bexpr_hm + ");")
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        return out_hm
+      end
       if mname == "[]"
         args_id0 = @nd_arguments[nid]
         if args_id0 >= 0
