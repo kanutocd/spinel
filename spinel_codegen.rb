@@ -16257,7 +16257,7 @@ class Compiler
  # rather than compile_string_method_expr, which wants a string
  # receiver. Receiver can also be InterpolatedRegularExpressionNode
  # for `/foo_#{x}/.match?(s)` (rare but valid).
-    if recv >= 0 && (mname == "match?" || mname == "=~" || mname == "match")
+    if recv >= 0 && (mname == "match?" || mname == "=~" || mname == "match" || mname == "===")
       rpat = regex_pat_c_expr(recv)
  # regexp-typed receiver (the local stored a real
  # mrb_regexp_pattern * — typically from an if/else union where
@@ -16272,7 +16272,7 @@ class Compiler
           arg_ids = get_args(args_id)
           if arg_ids.length > 0
             sc = compile_expr(arg_ids[0])
-            if mname == "match?"
+            if mname == "match?" || mname == "==="
  # Issue #869: 2-arg form starts matching at the given byte
  # offset (negative counts from the end). Without the _at
  # helper the position was silently dropped.
