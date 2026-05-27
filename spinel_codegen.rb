@@ -33709,6 +33709,105 @@ class Compiler
       end
     end
 
+ # Hash#delete_if / #select! / #reject! on typed hashes —
+ # walk the hash, evaluate block on each (k, v), collect keys
+ # to drop, then delete in a second pass (modify-during-iter is
+ # not safe with the open-addressing layout). select! inverts
+ # the predicate (keep iff true).
+    if (mname == "delete_if" || mname == "reject!" || mname == "select!") && @nd_block[nid] >= 0 && recv >= 0
+      rt_dh = infer_type(recv)
+      pfx_dh = ""
+      key_ty_dh = ""
+      val_ty_dh = ""
+      key_arr_pfx = "IntArray" # default sym ids stored in int array
+      if rt_dh == "sym_int_hash"
+        pfx_dh = "SymIntHash"; key_ty_dh = "symbol"; val_ty_dh = "int"
+      elsif rt_dh == "str_int_hash"
+        pfx_dh = "StrIntHash"; key_ty_dh = "string"; val_ty_dh = "int"; key_arr_pfx = "StrArray"
+      end
+      if pfx_dh != ""
+        old_dh = @in_loop
+        @in_loop = 1
+        rc_dh = compile_expr_gc_rooted(recv)
+        bp_k = get_block_param(nid, 0)
+        bp_k = "_k" if bp_k == ""
+        bp_v = get_block_param(nid, 1)
+        bp_v = "_v" if bp_v == ""
+        rm_arr = new_temp
+        idx_dh = new_temp
+        @needs_int_array = 1
+        @needs_str_array = 1 if key_arr_pfx == "StrArray"
+        @needs_gc = 1
+        emit("  sp_" + key_arr_pfx + " *" + rm_arr + " = sp_" + key_arr_pfx + "_new();")
+        emit("  SP_GC_ROOT(" + rm_arr + ");")
+        emit("  for (mrb_int " + idx_dh + " = 0; " + idx_dh + " < " + rc_dh + "->len; " + idx_dh + "++) {")
+        key_c_decl = (key_ty_dh == "symbol") ? "sp_sym" : "const char *"
+        emit("    " + key_c_decl + " lv_" + bp_k + " = " + rc_dh + "->order[" + idx_dh + "];")
+        emit("    mrb_int lv_" + bp_v + " = sp_" + pfx_dh + "_get(" + rc_dh + ", lv_" + bp_k + ");")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_k, key_ty_dh)
+        declare_var(bp_v, val_ty_dh)
+        bbody_dh = @nd_body[@nd_block[nid]]
+        bexpr_dh = "FALSE"
+        if bbody_dh >= 0
+          bs_dh = get_stmts(bbody_dh)
+          kk = 0
+          while kk < bs_dh.length - 1
+            compile_stmt(bs_dh[kk])
+            kk = kk + 1
+          end
+          if bs_dh.length > 0
+            bexpr_dh = compile_expr(bs_dh.last)
+          end
+        end
+        cond_dh = (mname == "select!") ? "!(" + bexpr_dh + ")" : "(" + bexpr_dh + ")"
+        push_arg = (key_ty_dh == "symbol") ? "(mrb_int)lv_" + bp_k : "lv_" + bp_k
+        emit("    if (" + cond_dh + ") sp_" + key_arr_pfx + "_push(" + rm_arr + ", " + push_arg + ");")
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        rm_idx_dh = new_temp
+        get_call = (key_ty_dh == "symbol") ? "(sp_sym)sp_IntArray_get(" + rm_arr + ", " + rm_idx_dh + ")" : "sp_StrArray_get(" + rm_arr + ", " + rm_idx_dh + ")"
+        emit("  for (mrb_int " + rm_idx_dh + " = 0; " + rm_idx_dh + " < " + rm_arr + "->len; " + rm_idx_dh + "++) {")
+        emit("    sp_" + pfx_dh + "_delete(" + rc_dh + ", " + get_call + ");")
+        emit("  }")
+        @in_loop = old_dh
+        return 1
+      end
+    end
+
+ # `arr.combination(k) { |c| ... }` on int_array — call the
+ # blockless helper to materialise all combinations, then loop
+ # them and bind each sub-array to the block param.
+    if mname == "combination" && @nd_block[nid] >= 0 && recv >= 0
+      rt_co = infer_type(recv)
+      if rt_co == "int_array"
+        old_co = @in_loop
+        @in_loop = 1
+        rc_co = compile_expr_gc_rooted(recv)
+        bp_co = get_block_param(nid, 0)
+        bp_co = "_c" if bp_co == ""
+        @needs_int_array = 1
+        @needs_gc = 1
+        combos_co = new_temp
+        iter_co = new_temp
+        emit("  sp_PtrArray *" + combos_co + " = sp_IntArray_combination(" + rc_co + ", " + compile_arg0_as_int(nid) + ");")
+        emit("  SP_GC_ROOT(" + combos_co + ");")
+        emit("  for (mrb_int " + iter_co + " = 0; " + iter_co + " < " + combos_co + "->len; " + iter_co + "++) {")
+        emit("    sp_IntArray * lv_" + bp_co + " = (sp_IntArray *)" + combos_co + "->data[" + iter_co + "];")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_co, "int_array")
+        compile_stmts_body(@nd_body[@nd_block[nid]])
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        @in_loop = old_co
+        return 1
+      end
+    end
+
  # `reverse_each` on a typed array: walk indices backwards.
     if mname == "reverse_each" && @nd_block[nid] >= 0 && recv >= 0
       rt_re = infer_type(recv)
