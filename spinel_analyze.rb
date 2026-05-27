@@ -4471,6 +4471,9 @@ class Compiler
     if mname == "assoc" || mname == "rassoc"
       return "poly_array"
     end
+    if mname == "product"
+      return "int_array_ptr_array"
+    end
  # Issue #889: String#unpack returns Array of mixed-type elements;
  # spinel boxes through poly_array.
     if mname == "unpack"

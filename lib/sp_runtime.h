@@ -1846,6 +1846,22 @@ static const char*sp_IntArrayPtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_Stri
    k-element ordered combinations as a PtrArray of IntArrays. */
 static void sp_int_combination_recur(sp_IntArray*src,mrb_int start,mrb_int k,sp_IntArray*acc,sp_PtrArray*out){if(k==0){sp_IntArray*cp=sp_IntArray_new();for(mrb_int i=0;i<acc->len;i++)sp_IntArray_push(cp,acc->data[acc->start+i]);sp_PtrArray_push(out,cp);return;}for(mrb_int i=start;i<=src->len-k;i++){sp_IntArray_push(acc,src->data[src->start+i]);sp_int_combination_recur(src,i+1,k-1,acc,out);acc->len--;}}
 static sp_PtrArray*sp_IntArray_combination(sp_IntArray*a,mrb_int k){sp_PtrArray*out=sp_PtrArray_new();if(!a||k<0||k>a->len)return out;sp_IntArray*acc=sp_IntArray_new();sp_int_combination_recur(a,0,k,acc,out);return out;}
+
+/* Cartesian product of two int arrays. Returns a PtrArray of
+   2-element IntArrays. */
+static sp_PtrArray *sp_IntArray_product(sp_IntArray *a, sp_IntArray *b) {
+  sp_PtrArray *out = sp_PtrArray_new();
+  if (!a || !b) return out;
+  for (mrb_int i = 0; i < a->len; i++) {
+    for (mrb_int j = 0; j < b->len; j++) {
+      sp_IntArray *pair = sp_IntArray_new();
+      sp_IntArray_push(pair, a->data[a->start + i]);
+      sp_IntArray_push(pair, b->data[b->start + j]);
+      sp_PtrArray_push(out, pair);
+    }
+  }
+  return out;
+}
 /* Array#permutation(k) -- ordered k-permutations. */
 static void sp_int_permutation_recur(sp_IntArray*src,mrb_int k,sp_IntArray*used,sp_IntArray*acc,sp_PtrArray*out){if(k==0){sp_IntArray*cp=sp_IntArray_new();for(mrb_int i=0;i<acc->len;i++)sp_IntArray_push(cp,acc->data[acc->start+i]);sp_PtrArray_push(out,cp);return;}for(mrb_int i=0;i<src->len;i++){if(used->data[used->start+i])continue;used->data[used->start+i]=1;sp_IntArray_push(acc,src->data[src->start+i]);sp_int_permutation_recur(src,k-1,used,acc,out);acc->len--;used->data[used->start+i]=0;}}
 static sp_PtrArray*sp_IntArray_permutation(sp_IntArray*a,mrb_int k){sp_PtrArray*out=sp_PtrArray_new();if(!a||k<0||k>a->len)return out;sp_IntArray*used=sp_IntArray_new();for(mrb_int i=0;i<a->len;i++)sp_IntArray_push(used,0);sp_IntArray*acc=sp_IntArray_new();sp_int_permutation_recur(a,k,used,acc,out);return out;}

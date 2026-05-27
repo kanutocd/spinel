@@ -21347,6 +21347,19 @@ class Compiler
         @needs_gc = 1
         return "sp_IntArray_combination(" + rc + ", " + compile_arg0_as_int(nid) + ")"
       end
+ # `arr.product(other)` for two int_arrays — 2-arg Cartesian
+ # product via the runtime helper.
+      if mname == "product"
+        args_id_pr = @nd_arguments[nid]
+        if args_id_pr >= 0
+          a_pr = get_args(args_id_pr)
+          if a_pr.length == 1 && infer_type(a_pr[0]) == "int_array"
+            @needs_int_array = 1
+            @needs_gc = 1
+            return "sp_IntArray_product(" + rc + ", " + compile_expr(a_pr[0]) + ")"
+          end
+        end
+      end
       if mname == "permutation"
         @needs_int_array = 1
         @needs_gc = 1
