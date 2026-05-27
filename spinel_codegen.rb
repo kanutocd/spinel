@@ -22278,6 +22278,14 @@ class Compiler
       if mname == "uniq"
         return "sp_IntArray_uniq(" + rc + ")"
       end
+      if mname == "uniq!"
+ # Mutate in place. sp_IntArray_uniq returns a fresh array; copy
+ # its contents back. The return is the (now-deduped) receiver,
+ # matching CRuby's "returns self when something was removed,
+ # nil otherwise" only in the truthy case — we always return self
+ # since the typed int_array can't carry nil.
+        return "(sp_IntArray_replace(" + rc + ", sp_IntArray_uniq(" + rc + ")), " + rc + ")"
+      end
       if mname == "join"
         jarg = compile_arg0(nid)
         if jarg == "0"
