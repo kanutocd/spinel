@@ -23422,6 +23422,14 @@ class Compiler
  # get / delete all see the same sp_sym.
         return "({ sp_sym _k = " + compile_arg0(nid) + "; mrb_int _v = sp_SymIntHash_has_key(" + rc + ", _k) ? sp_SymIntHash_get(" + rc + ", _k) : 0; sp_SymIntHash_delete(" + rc + ", _k); _v; })"
       end
+ # Hash#replace(other) — empty receiver, then copy each entry
+ # from `other` in order. Returns the receiver.
+      if mname == "replace"
+        ra_arg = compile_arg0(nid)
+        tmp_rep = new_temp
+        emit("  { sp_SymIntHash *_d = " + rc + "; sp_SymIntHash *_s = " + ra_arg + "; for (mrb_int _ci = 0; _ci < _d->cap; _ci++) _d->keys[_ci] = -1; _d->len = 0; for (mrb_int _ri = 0; _ri < _s->len; _ri++) sp_SymIntHash_set(_d, _s->order[_ri], sp_SymIntHash_get(_s, _s->order[_ri])); }")
+        return rc
+      end
     end
     if recv_type == "sym_str_hash"
       if mname == "[]"
@@ -23551,6 +23559,10 @@ class Compiler
       end
       if mname == "delete"
         return "({ sp_sym _k = " + compile_arg0(nid) + "; const char *_v = sp_SymStrHash_has_key(" + rc + ", _k) ? sp_SymStrHash_get(" + rc + ", _k) : NULL; sp_SymStrHash_delete(" + rc + ", _k); _v; })"
+      end
+      if mname == "replace"
+        emit("  { sp_SymStrHash *_d = " + rc + "; sp_SymStrHash *_s = " + compile_arg0(nid) + "; for (mrb_int _ci = 0; _ci < _d->cap; _ci++) _d->keys[_ci] = -1; _d->len = 0; for (mrb_int _ri = 0; _ri < _s->len; _ri++) sp_SymStrHash_set(_d, _s->order[_ri], sp_SymStrHash_get(_s, _s->order[_ri])); }")
+        return rc
       end
     end
     if recv_type == "sym_poly_hash"
@@ -24033,6 +24045,10 @@ class Compiler
           return tmp
         end
       end
+      if mname == "replace"
+        emit("  { sp_StrIntHash *_d = " + rc + "; sp_StrIntHash *_s = " + compile_arg0(nid) + "; for (mrb_int _ci = 0; _ci < _d->cap; _ci++) _d->keys[_ci] = NULL; _d->len = 0; for (mrb_int _ri = 0; _ri < _s->len; _ri++) sp_StrIntHash_set(_d, _s->order[_ri], sp_StrIntHash_get(_s, _s->order[_ri])); }")
+        return rc
+      end
     end
     if recv_type == "int_int_hash"
       if mname == "[]"
@@ -24229,6 +24245,10 @@ class Compiler
       end
       if mname == "default="
         return "(" + rc + "->default_v = " + compile_expr_as_string(get_args(@nd_arguments[nid])[0]) + ")"
+      end
+      if mname == "replace"
+        emit("  { sp_StrStrHash *_d = " + rc + "; sp_StrStrHash *_s = " + compile_arg0(nid) + "; for (mrb_int _ci = 0; _ci < _d->cap; _ci++) _d->keys[_ci] = NULL; _d->len = 0; for (mrb_int _ri = 0; _ri < _s->len; _ri++) sp_StrStrHash_set(_d, _s->order[_ri], sp_StrStrHash_get(_s, _s->order[_ri])); }")
+        return rc
       end
     end
     ""
