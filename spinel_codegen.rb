@@ -12721,7 +12721,11 @@ class Compiler
     }
 
     if @needs_at_exit == 1
-      emit_raw("  for (mrb_int _ax = sp_at_exit_count - 1; _ax >= 0; _ax--) sp_proc_call(sp_at_exit_hooks[_ax], NULL);")
+ # Pass a zero-init args buffer instead of NULL — the proc fn's
+ # synthesized `args[0]` read happens even for zero-arity blocks,
+ # and reading from NULL is undefined (locally elided by the
+ # optimizer; CI gcc/clang/macos all segfaulted on it).
+      emit_raw("  { mrb_int _ax_args[16] = {0}; for (mrb_int _ax = sp_at_exit_count - 1; _ax >= 0; _ax--) sp_proc_call(sp_at_exit_hooks[_ax], _ax_args); }")
     end
     emit_raw("  return 0;")
     emit_raw("}")
