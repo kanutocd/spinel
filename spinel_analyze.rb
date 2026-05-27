@@ -4754,6 +4754,14 @@ class Compiler
     if mname == "lines"
       return "str_array"
     end
+    if mname == "rand" && recv < 0
+ # `rand()` (no arg) returns Float in [0.0, 1.0). `rand(int)`
+ # returns Integer; the int-arg case falls through to the int
+ # default below.
+      if @nd_arguments[nid] < 0 || get_args(@nd_arguments[nid]).length == 0
+        return "float"
+      end
+    end
     if mname == "scan"
       return "str_array"
     end

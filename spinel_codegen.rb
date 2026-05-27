@@ -17377,9 +17377,19 @@ class Compiler
       @needs_rand = 1
       args_id = @nd_arguments[nid]
       if args_id >= 0
-        return "((mrb_int)(rand() % (int)" + compile_arg0(nid) + "))"
+        ra = get_args(args_id)
+        if ra.length > 0
+          at_rand = infer_type(ra[0])
+ # `rand(range)` and `rand(float)` are deferred — keep the
+ # existing int-arg behaviour and add the no-arg Float form.
+          if at_rand == "int" || at_rand == "int?"
+            return "((mrb_int)(rand() % (int)" + compile_expr(ra[0]) + "))"
+          end
+          return "((mrb_int)(rand() % (int)" + compile_expr(ra[0]) + "))"
+        end
       end
-      return "((mrb_int)rand())"
+ # No-arg rand() returns Float in [0.0, 1.0) per CRuby.
+      return "((mrb_float)rand() / ((mrb_float)RAND_MAX + 1.0))"
     end
     if mname == "raise"
       @needs_setjmp = 1
