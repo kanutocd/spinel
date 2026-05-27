@@ -1998,7 +1998,11 @@ class Compiler
  # Also unwrap `.freeze` (`PATTERN = /pat/.freeze`) — Prism wraps
  # the literal in a `freeze` CallNode whose receiver is the
  # RegularExpressionNode. .
-    if @nd_type[nid] == "ConstantReadNode"
+ # ConstantPathNode (`M::RX`) resolves the same way — resolve_const_ref_name
+ # already maps `M::RX` to the registered name `M_RX`. Without this, a
+ # namespaced constant regex fell through, so `s.gsub(M::RX, ...)` silently
+ # no-op'd and `s.scan(M::RX)` raised undefined-method (e.g. emoji_regex).
+    if @nd_type[nid] == "ConstantReadNode" || @nd_type[nid] == "ConstantPathNode"
       cname = resolve_const_ref_name(nid)
       if cname != ""
         ci = find_const_idx(cname)
