@@ -3450,7 +3450,7 @@ class Compiler
       return "int"
     end
     if t == "AndNode"
-      return "bool"
+      return and_result_type(nid)
     end
     if t == "OrNode"
       return or_result_type(nid)
@@ -3988,7 +3988,7 @@ class Compiler
 
   def tuple_elem_types_str(t)
  # "tuple:int,string" → "int,string"
-    t[6, t.length - 6]
+    t[6, t.length - 6].to_s
   end
 
   def tuple_elem_type_at(t, idx)
@@ -4375,9 +4375,9 @@ class Compiler
 
   def base_type(t)
     if t.length > 1 && t[t.length - 1] == "?"
-      return t[0, t.length - 1]
+      return t[0, t.length - 1].to_s
     end
-    t
+    t.to_s
   end
 
  # Scalar nullable types use a reserved sentinel value rather than
@@ -12868,13 +12868,113 @@ class Compiler
     ""
   end
 
-  def or_result_type(nid)
-    lt = infer_type(@nd_left[nid])
+  def logical_truthiness_kind(nid, t)
+    if nid >= 0
+      nt = @nd_type[nid]
+      if nt == "TrueNode"
+        return "truthy"
+      end
+      if nt == "FalseNode" || nt == "NilNode"
+        return "falsy"
+      end
+    end
+    if t == "nil" || t == "void"
+      return "falsy"
+    end
+    if t == "bool" || t == "poly"
+      return "dynamic"
+    end
+    if is_nullable_type(t) == 1
+      return "dynamic"
+    end
+    if type_is_pointer(t) == 1
+      return "dynamic"
+    end
+    "truthy"
+  end
+
+  def falsey_logical_value_type(t)
+    if t == "poly"
+      return "poly"
+    end
+    if t == "bool"
+      return "bool"
+    end
+    if t == "nil" || t == "void"
+      return "nil"
+    end
+    if is_nullable_type(t) == 1
+      return "nil"
+    end
+    t
+  end
+
+  def and_result_type(nid)
+    left_nid = @nd_left[nid]
+    lt = infer_type(left_nid)
     rt = infer_type(@nd_right[nid])
+    kind = logical_truthiness_kind(left_nid, lt)
+    if kind == "truthy"
+      return rt
+    end
+    if kind == "falsy"
+      return lt == "void" ? "nil" : lt
+    end
+    ft = falsey_logical_value_type(lt)
+    if ft == rt
+      return ft
+    end
+    if ft == "poly" || rt == "poly"
+      return "poly"
+    end
+    if ft == "nil"
+      if rt == "nil" || rt == "void"
+        return "nil"
+      end
+      if rt == "int"
+        return "int?"
+      end
+      return "poly"
+    end
+    if rt == "nil" || rt == "void"
+      if ft == "int"
+        return "int?"
+      end
+      return "poly"
+    end
+    if ft == "bool" && rt == "bool"
+      return "bool"
+    end
+    "poly"
+  end
+
+  def or_result_type(nid)
+    left_nid = @nd_left[nid]
+    lt = infer_type(left_nid)
+    rt = infer_type(@nd_right[nid])
+    kind = logical_truthiness_kind(left_nid, lt)
+    if kind == "truthy" && !(left_nid >= 0 && @nd_type[left_nid] == "TrueNode")
+      kind = "dynamic"
+    end
+    if kind == "truthy"
+      return lt
+    end
+    if kind == "falsy"
+      return rt
+    end
+    if lt == "poly" || rt == "poly"
+      return "poly"
+    end
+    if lt == "bool"
+      if rt == "bool"
+        return "bool"
+      end
+      return "poly"
+    end
     if lt == rt
       return lt
     end
-    if lt == "nil"
+    if lt == "nil" || lt == "void"
       return rt
     end
     if rt == "nil"
@@ -13664,11 +13764,54 @@ class Compiler
       right_nid = @nd_right[nid]
       lt = infer_type(left_nid)
       rt = infer_type(right_nid)
-      le = compile_expr(left_nid)
-      re = compile_expr(right_nid)
-      le_t = truthy_node_expr(left_nid, lt, le)
-      re_t = truthy_node_expr(right_nid, rt, re)
-      return "(" + le_t + " && " + re_t + ")"
+      at = and_result_type(nid)
+      left_tmp = new_temp
+      emit("  " + c_type(lt) + " " + left_tmp + " = " + compile_expr(left_nid) + ";")
+      kind = logical_truthiness_kind(left_nid, lt)
+      if kind == "truthy"
+        return compile_expr(right_nid)
+      end
+      left_vt = falsey_logical_value_type(lt)
+      left_value = left_tmp
+      if at == "poly"
+        @needs_rb_value = 1
+        if lt == "poly"
+          left_value = left_tmp
+        elsif lt == "bool"
+          left_value = box_value_to_poly("bool", left_tmp)
+        elsif lt == "nil" || lt == "void" || is_nullable_type(lt) == 1
+          left_value = box_value_to_poly("nil", "0")
+        else
+          left_value = box_value_to_poly("nil", "0")
+        end
+      elsif left_vt == "void" || left_vt == "nil" || at == "nil"
+        if left_vt != "nil" || at != "nil"
+          left_value = c_default_val(at)
+        end
+      end
+      if kind == "falsy"
+        return left_value
+      end
+      result_tmp = new_temp
+      emit("  " + c_type(at) + " " + result_tmp + " = " + c_default_val(at) + ";")
+      emit("  if (" + truthy_node_expr(left_nid, lt, left_tmp) + ") {")
+      right_expr = compile_expr(right_nid)
+      right_value = right_expr
+      if at == "poly"
+        @needs_rb_value = 1
+        if rt != "poly"
+          right_value = box_value_to_poly(rt, right_expr)
+        end
+      elsif rt == "void" || rt == "nil" || at == "nil"
+        if rt != "nil" || at != "nil"
+          right_value = c_default_val(at)
+        end
+      end
+      emit("    " + result_tmp + " = " + right_value + ";")
+      emit("  } else {")
+      emit("    " + result_tmp + " = " + left_value + ";")
+      emit("  }")
+      return result_tmp
     end
     if t == "OrNode"
       left_nid = @nd_left[nid]
