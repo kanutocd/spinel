@@ -20236,6 +20236,19 @@ class Compiler
     if mname == "delete"
       return "sp_str_delete(" + rc + ", " + compile_arg0(nid) + ")"
     end
+    if mname == "crypt"
+ # 1-arg form (salt). 0-arg falls through (CRuby raises but
+ # spinel keeps the contract permissive — empty salt = "..").
+      args_id_cr = @nd_arguments[nid]
+      salt_cr = "(&(\"\\xff\" \"..\")[1])"
+      if args_id_cr >= 0
+        a_cr = get_args(args_id_cr)
+        if a_cr.length > 0
+          salt_cr = compile_expr(a_cr[0])
+        end
+      end
+      return "sp_str_crypt(" + rc + ", " + salt_cr + ")"
+    end
     if mname == "scrub"
  # 1-arg: replacement string. 0-arg: NULL (helper falls back to U+FFFD).
       args_id_sc = @nd_arguments[nid]

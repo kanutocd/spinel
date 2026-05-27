@@ -1748,6 +1748,43 @@ static const char*sp_str_delete(const char*s,const char*chars){if(!s)return sp_s
    would see the alloc size and trailing NULs. */
 static const char*sp_str_squeeze(const char*s){if(!s)return sp_str_empty;size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;uint32_t prev=0xFFFFFFFFu;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);if(cp!=prev){memcpy(r+n,p,cn);n+=cn;prev=cp;}p+=cn;}r[n]=0;sp_str_set_len(r,n);return r;}
 
+/* Forward decl from sp_crypto.h (libspinel_rt.a). Used by
+   sp_str_crypt below to provide a deterministic crypt-like
+   hash without dragging in libc crypt(3). */
+const char *sp_crypto_hmac_sha256_b64url(const char *key, const char *msg);
+
+/* String#crypt — Spinel's crypt is NOT the libc DES crypt. It
+   returns `salt[0..1] || hmac_sha256(salt, password)[0..10]` as
+   a 13-char string (same length as DES crypt, deterministic,
+   stronger primitive). CRuby's spec says String#crypt is impl-
+   defined and "should not be used for security"; this matches
+   that contract while keeping outputs reproducible across
+   spinel builds. Short salts get padded with '.' so the result
+   still has the canonical first-2-chars-are-salt shape. */
+static const char *sp_str_crypt(const char *s, const char *salt) {
+  if (!salt) salt = "";
+  char salt2[3];
+  salt2[0] = salt[0] ? salt[0] : '.';
+  salt2[1] = (salt[0] && salt[1]) ? salt[1] : '.';
+  salt2[2] = 0;
+  const char *digest = sp_crypto_hmac_sha256_b64url(salt2, s ? s : "");
+  char *r = sp_str_alloc(13);
+  r[0] = salt2[0];
+  r[1] = salt2[1];
+  for (int i = 0; i < 11; i++) {
+    char c = digest[i];
+    /* Map b64url's `-`/`_` to crypt-alphabet `.`/`/` so the
+       output stays in `[./0-9A-Za-z]` like the historical
+       crypt result. */
+    if (c == '-') c = '.';
+    else if (c == '_') c = '/';
+    r[2 + i] = c;
+  }
+  r[13] = 0;
+  sp_str_set_len(r, 13);
+  return r;
+}
+
 /* String#scrub — walk the bytes; for each valid UTF-8 lead +
    continuation sequence, copy through. For invalid bytes (lone
    continuation, truncated multi-byte, overlong, etc.), emit the

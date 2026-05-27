@@ -4259,6 +4259,9 @@ class Compiler
     if mname == "scrub"
       return "string"
     end
+    if mname == "crypt"
+      return "string"
+    end
     if mname == "delete_prefix!" || mname == "delete_suffix!"
  # Bang variants mutate self in place. When recv is mutable_str
  # the call returns the same mutable_str; on a frozen literal
