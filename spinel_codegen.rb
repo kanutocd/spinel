@@ -26083,6 +26083,13 @@ class Compiler
 
  # frozen? on any type
     if mname == "frozen?"
+ # Arrays carry frozen in the struct; hashes in the GC header.
+      if is_typed_array_type(recv_type)
+        return "(" + rc + " ? " + rc + "->frozen != 0 : FALSE)"
+      end
+      if is_hash_type(recv_type) == 1
+        return "sp_gc_is_frozen(" + rc + ")"
+      end
       return "TRUE"
     end
 
@@ -26092,6 +26099,15 @@ class Compiler
  # array types, etc.) so `expr.freeze` in a const initializer (issue
  # #63) doesn't fall through to the "0" fallback.
     if mname == "freeze"
+ # Set the frozen flag and return self so a subsequent mutator
+ # raises FrozenError. Array flag lives in the struct, hash flag
+ # in the GC header.
+      if is_typed_array_type(recv_type)
+        return "({ " + c_type(recv_type) + " _fz = " + rc + "; if (_fz) _fz->frozen = 1; _fz; })"
+      end
+      if is_hash_type(recv_type) == 1
+        return "(" + c_type(recv_type) + ")sp_gc_freeze(" + rc + ")"
+      end
       return rc
     end
 
@@ -37831,6 +37847,16 @@ class Compiler
       rt = base_type(rt)
     end
     rc = compile_expr_gc_rooted(recv)
+ # Issue #918: `h[k] = v` on a frozen hash raises FrozenError. The
+ # hash flag lives in the GC header (hash mutation isn't hot, so the
+ # extra cache line is fine). Array `[]=` is NOT guarded here — it
+ # lowers to sp_<T>Array_set, which already checks the struct's
+ # frozen flag, so a call-site guard would just double-read on
+ # optcarrot's hot framebuffer-write path.
+    if is_hash_type(rt) == 1
+      @needs_setjmp = 1
+      emit("  if (sp_gc_is_frozen(" + rc + ")) sp_raise_frozen_hash();")
+    end
     args_id = @nd_arguments[nid]
     arg_ids = []
     if args_id >= 0
