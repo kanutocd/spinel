@@ -3576,6 +3576,11 @@ class Compiler
           return "poly"
         end
       end
+ # Proc / lambda composition operators return another proc / lambda
+ # of the same representation. `(f << g)` / `(f >> g)`.
+      if (lt == "lambda" || lt == "proc") && (mname == "<<" || mname == ">>")
+        return lt
+      end
  # Bigint operators return bigint
       if lt == "bigint"
         if mname == "+" || mname == "-" || mname == "*" || mname == "/" || mname == "%"

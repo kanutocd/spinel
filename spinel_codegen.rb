@@ -19281,6 +19281,15 @@ class Compiler
     end
     if mname == "<<"
       lt = infer_type(recv)
+ # Proc#<< / lambda compose: `(f << g).call(x)` == f(g(x)).
+ # recv is outer, arg is inner. The two proc representations
+ # (sp_Val * lambda vs sp_Proc * block-proc) compose separately.
+      if lt == "lambda"
+        return "sp_lam_compose(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
+      end
+      if lt == "proc"
+        return "sp_proc_compose((sp_Proc *)" + compile_expr(recv) + ", (sp_Proc *)" + compile_arg0(nid) + ")"
+      end
       if lt == "mutable_str"
         @needs_mutable_str = 1
         rc = compile_expr_gc_rooted(recv)
@@ -19381,7 +19390,16 @@ class Compiler
       return "(" + compile_expr(recv) + " << " + compile_arg0_as_int(nid) + ")"
     end
     if mname == ">>"
-      if infer_type(recv) == "poly"
+      lt_shr = infer_type(recv)
+ # Proc#>> / lambda then-compose: `(f >> g).call(x)` == g(f(x)).
+ # recv is inner, arg is outer (swapped from <<).
+      if lt_shr == "lambda"
+        return "sp_lam_compose(" + compile_arg0(nid) + ", " + compile_expr(recv) + ")"
+      end
+      if lt_shr == "proc"
+        return "sp_proc_compose((sp_Proc *)" + compile_arg0(nid) + ", (sp_Proc *)" + compile_expr(recv) + ")"
+      end
+      if lt_shr == "poly"
         @needs_rb_value = 1
         return "sp_poly_shr(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(@nd_arguments[nid])[0]) + ")"
       end

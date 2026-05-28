@@ -3471,6 +3471,28 @@ static mrb_bool sp_proc_lambda_p(sp_Proc *p) { return p ? p->lambda_p : FALSE; }
 static mrb_int sp_proc_call(sp_Proc *p, mrb_int *args) { if (!p || !p->fn) return 0; if (!args) { mrb_int noargs[16] = {0}; return ((mrb_int (*)(void *, mrb_int *))p->fn)(p->cap, noargs); } return ((mrb_int (*)(void *, mrb_int *))p->fn)(p->cap, args); }
 static sp_PolyArray *sp_proc_parameters(sp_Proc *p) { sp_PolyArray *r = sp_PolyArray_new(); if (!p || p->param_count <= 0 || !p->param_kinds) return r; SP_GC_ROOT(r); for (mrb_int i = 0; i < p->param_count; i++) { sp_PolyArray *pair = sp_PolyArray_new(); sp_PolyArray_push(pair, sp_box_sym(p->param_kinds[i])); if (p->param_names && p->param_names[i] >= 0) sp_PolyArray_push(pair, sp_box_sym(p->param_names[i])); sp_PolyArray_push(r, sp_box_poly_array(pair)); } return r; }
 
+/* Proc#<< / Proc#>> composition. The composed proc captures the two
+   operands and, on call, threads its single argument through inner
+   then outer: `(f << g).call(x)` == f(g(x)). For `>>` the codegen
+   swaps the operands so `(f >> g).call(x)` == g(f(x)). */
+typedef struct { sp_Proc *outer; sp_Proc *inner; } sp_ProcCompose;
+static void sp_proc_compose_scan(void *p) { sp_ProcCompose *c = (sp_ProcCompose *)p; if (c->outer) sp_gc_mark(c->outer); if (c->inner) sp_gc_mark(c->inner); }
+static mrb_int sp_proc_compose_fn(void *cap, mrb_int *args) {
+  sp_ProcCompose *c = (sp_ProcCompose *)cap;
+  mrb_int inner_args[16] = {0};
+  if (args) inner_args[0] = args[0];
+  mrb_int mid = sp_proc_call(c->inner, inner_args);
+  mrb_int outer_args[16] = {0};
+  outer_args[0] = mid;
+  return sp_proc_call(c->outer, outer_args);
+}
+static sp_Proc *sp_proc_compose(sp_Proc *outer, sp_Proc *inner) {
+  sp_ProcCompose *c = (sp_ProcCompose *)sp_gc_alloc(sizeof(sp_ProcCompose), NULL, sp_proc_compose_scan);
+  c->outer = outer;
+  c->inner = inner;
+  return sp_proc_new_meta((void *)sp_proc_compose_fn, c, sp_proc_compose_scan, 1, TRUE, 1, NULL, NULL);
+}
+
 /* ---- StringIO runtime ---- */
 typedef struct { char *buf; int64_t len; int64_t cap; int64_t pos; int64_t lineno; int closed; } sp_StringIO;
 static void sio_grow(sp_StringIO *sio, int64_t need) { int64_t req = sio->pos + need; if (req <= sio->cap) return; int64_t nc = sio->cap ? sio->cap : 64; while (nc < req) nc *= 2; sio->buf = (char *)realloc(sio->buf, nc + 1); sio->cap = nc; }
@@ -3527,6 +3549,11 @@ typedef sp_Val *(*sp_fn4_t)(sp_Val *self, sp_Val *a, sp_Val *b, sp_Val *c, sp_Va
 static sp_Val *sp_lam_call2(sp_Val *f, sp_Val *a, sp_Val *b) { return ((sp_fn2_t)(uintptr_t)f->u.proc.fn)(f, a, b); }
 static sp_Val *sp_lam_call3(sp_Val *f, sp_Val *a, sp_Val *b, sp_Val *c) { return ((sp_fn3_t)(uintptr_t)f->u.proc.fn)(f, a, b, c); }
 static sp_Val *sp_lam_call4(sp_Val *f, sp_Val *a, sp_Val *b, sp_Val *c, sp_Val *d) { return ((sp_fn4_t)(uintptr_t)f->u.proc.fn)(f, a, b, c, d); }
+/* lambda#<< / #>> composition over the sp_Val * representation.
+   captures[0] = outer, captures[1] = inner; `(f << g).(x)` == f(g(x)).
+   The codegen swaps operands for `>>`. */
+static sp_Val *sp_lam_compose_fn(sp_Val *self, sp_Val *arg) { return sp_lam_call(self->captures[0], sp_lam_call(self->captures[1], arg)); }
+static sp_Val *sp_lam_compose(sp_Val *outer, sp_Val *inner) { sp_Val *v = sp_lam_proc(sp_lam_compose_fn, 2); v->captures[0] = outer; v->captures[1] = inner; return v; }
 static mrb_int sp_lam_to_int(sp_Val *v) { return v->u.ival; }
 
 /* ---- Fiber runtime (ucontext) ---- */
