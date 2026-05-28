@@ -517,7 +517,7 @@ static const char *sp_rational_inspect(sp_Rational r) {
    recycle(h) on the unmarked object instead of finalize+free. The
    hook is responsible for deciding whether to keep the storage
    (pool push) or free it. Used by class-instance free-list pools. */
-typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); size_t size; unsigned marked : 1; void (*recycle)(struct sp_gc_hdr *); } sp_gc_hdr;
+typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); size_t size; unsigned marked : 1; unsigned frozen : 1; void (*recycle)(struct sp_gc_hdr *); } sp_gc_hdr;
 static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 256*1024;
 
 /* ---- String GC ---- */
@@ -1727,6 +1727,12 @@ static inline mrb_int sp_str_setbyte(const char *s, mrb_int i, mrb_int v) {
 }
 
 typedef struct{char*data;int64_t len;int64_t cap;}sp_String;
+/* Issue #972: per-mutable-string freeze flag rides in the GC header
+   alongside `marked`. sp_String_freeze sets it; the in-place mutators
+   below raise FrozenError when the bit is set. Literal `const char *`
+   strings stay frozen via the 0xff marker byte (see sp_str_setbyte). */
+static inline mrb_bool sp_String_is_frozen(sp_String*s){if(!s)return TRUE;sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));return h->frozen;}
+static inline sp_String*sp_String_freeze(sp_String*s){if(s){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));h->frozen=1;}return s;}
 static void sp_String_fin(void*p){free(((sp_String*)p)->data-1);}
 static sp_String*sp_String_new(const char*s){
   /* Copy s's payload into a raw-malloc'd buffer BEFORE sp_gc_alloc.
@@ -1752,13 +1758,13 @@ static sp_String*sp_String_new(const char*s){
 /* Issue #757: realloc on growth used to overwrite s->data unconditionally,
    leaking the old buffer + null-dereferencing if realloc fails. Now we
    check the result and bail without mutating on failure. */
-static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;int64_t tl=(int64_t)strlen(t);if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memcpy(s->data+s->len,t,tl+1);s->len+=tl;}
-static inline void sp_String_prepend(sp_String*s,const char*t){if(!s||!t)return;int64_t tl=(int64_t)strlen(t);if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memmove(s->data+tl,s->data,s->len+1);memcpy(s->data,t,tl);s->len+=tl;}
+static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_cls("FrozenError","can't modify frozen String");return;}int64_t tl=(int64_t)strlen(t);if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memcpy(s->data+s->len,t,tl+1);s->len+=tl;}
+static inline void sp_String_prepend(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_cls("FrozenError","can't modify frozen String");return;}int64_t tl=(int64_t)strlen(t);if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memmove(s->data+tl,s->data,s->len+1);memcpy(s->data,t,tl);s->len+=tl;}
 /* Issue #741: String#insert(idx, str) -- insert str at idx. Negative
    idx is relative to len+1 (insert before tail). */
-static inline void sp_String_insert(sp_String*s,int64_t idx,const char*t){if(!s||!t)return;int64_t tl=(int64_t)strlen(t);if(tl==0)return;if(idx<0)idx+=s->len+1;if(idx<0)idx=0;if(idx>s->len)idx=s->len;if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memmove(s->data+idx+tl,s->data+idx,s->len-idx+1);memcpy(s->data+idx,t,tl);s->len+=tl;}
+static inline void sp_String_insert(sp_String*s,int64_t idx,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_cls("FrozenError","can't modify frozen String");return;}int64_t tl=(int64_t)strlen(t);if(tl==0)return;if(idx<0)idx+=s->len+1;if(idx<0)idx=0;if(idx>s->len)idx=s->len;if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=(s->len+tl)*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memmove(s->data+idx+tl,s->data+idx,s->len-idx+1);memcpy(s->data+idx,t,tl);s->len+=tl;}
 /* Issue #740/#741 sibling: String#replace(s) -- replace entire content. */
-static inline void sp_String_replace(sp_String*s,const char*t){if(!s||!t)return;int64_t tl=(int64_t)strlen(t);if(tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=tl*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memcpy(s->data,t,tl);s->data[tl]='\0';s->len=tl;}
+static inline void sp_String_replace(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_cls("FrozenError","can't modify frozen String");return;}int64_t tl=(int64_t)strlen(t);if(tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));int64_t new_cap=tl*2+16;char*raw=(char*)realloc(s->data-1,new_cap+2);if(!raw)return;sp_gc_bytes-=s->cap+2;h->size-=s->cap+2;s->cap=new_cap;raw[0]=(char)0xfd;s->data=raw+1;h->size+=s->cap+2;sp_gc_bytes+=s->cap+2;}memcpy(s->data,t,tl);s->data[tl]='\0';s->len=tl;}
 static inline const char*sp_String_cstr(sp_String*s){return s->data;}
 static inline int64_t sp_String_length(sp_String*s){return s->len;}
 static sp_String*sp_String_dup(sp_String*s){return sp_String_new(s->data);}

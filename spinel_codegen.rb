@@ -16769,6 +16769,15 @@ class Compiler
       if mname == "replace"
         return "(sp_String_replace(" + rc + ", " + compile_arg0(nid) + "), " + rc + ")"
       end
+ # Issue #972: freeze flag rides in the GC header of the sp_String
+ # wrapper. Literal `const char *` strings handle freeze via the
+ # 0xff marker byte at offset -1 instead.
+      if mname == "freeze"
+        return "sp_String_freeze(" + rc + ")"
+      end
+      if mname == "frozen?"
+        return "sp_String_is_frozen(" + rc + ")"
+      end
  # For all other string methods, convert via ->data
       r = compile_string_method_expr(nid, mname, rc + "->data")
       if r != ""
@@ -31946,8 +31955,21 @@ class Compiler
       if vt == "mutable_str"
         rhs_type = infer_type(@nd_expression[nid])
         val = compile_expr(@nd_expression[nid])
+ # Issue #972: `s = "hello".freeze` widens to mutable_str storage
+ # for later mutation, but the user-visible intent is a frozen
+ # string. After wrapping, mark the sp_String frozen so a
+ # subsequent `s << x` raises FrozenError.
+        rhs_is_freeze = 0
+        rhs_eid = @nd_expression[nid]
+        if rhs_eid >= 0 && @nd_type[rhs_eid] == "CallNode" && @nd_name[rhs_eid] == "freeze"
+          rhs_is_freeze = 1
+        end
         if rhs_type == "string" || rhs_type == "int"
-          emit("  " + vref + " = sp_String_new(" + val + ");")
+          if rhs_is_freeze == 1
+            emit("  " + vref + " = sp_String_freeze(sp_String_new(" + val + "));")
+          else
+            emit("  " + vref + " = sp_String_new(" + val + ");")
+          end
         else
           emit("  " + vref + " = " + val + ";")
         end
@@ -35196,7 +35218,10 @@ class Compiler
         if rt == "mutable_str"
           rc = compile_expr_gc_rooted(recv)
           val = compile_arg0(nid)
-          emit("  " + rc + "->len = 0; " + rc + "->data[0] = 0; sp_String_append(" + rc + ", " + val + ");")
+ # Issue #972: route through sp_String_replace so the frozen-flag
+ # guard fires. The earlier inline `->len = 0; ->data[0] = 0; append`
+ # bypassed the check and mutated a frozen string before raising.
+          emit("  sp_String_replace(" + rc + ", " + val + ");")
           return 1
         end
         if rt == "string"
@@ -35253,7 +35278,9 @@ class Compiler
         rt = infer_type(recv)
         if rt == "mutable_str"
           rc = compile_expr_gc_rooted(recv)
-          emit("  " + rc + "->len = 0; " + rc + "->data[0] = 0;")
+ # Issue #972: route through sp_String_replace("") so the
+ # frozen-flag guard fires before any mutation.
+          emit("  sp_String_replace(" + rc + ", \"\");")
           return 1
         end
         if rt == "string"
