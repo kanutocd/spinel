@@ -3089,6 +3089,23 @@ class Compiler
         return ss_t if rt_ss == "stringscanner"
       end
     end
+
+ # File handle method return types (sp_File * recv from non-block
+ # `File.open`). Same fast-path gate as StringScanner above.
+    if recv >= 0
+      ft = ""
+      if mname == "read" || mname == "gets" || mname == "path" || mname == "to_path"
+        ft = "string"
+      elsif mname == "write" || mname == "syswrite" || mname == "flush" || mname == "close"
+        ft = "int"
+      elsif mname == "closed?" || mname == "eof?" || mname == "eof"
+        ft = "bool"
+      end
+      if ft != ""
+        rt_file = infer_type(recv)
+        return ft if rt_file == "file"
+      end
+    end
  # `StringScanner.new(s)` constructs an sp_StringScanner * — return
  # the primitive type, not the (non-existent) user-class type.
     if mname == "new" && recv >= 0 && @nd_type[recv] == "ConstantReadNode" && @nd_name[recv] == "StringScanner"
@@ -6286,6 +6303,12 @@ class Compiler
           end
           if mname == "basename" || mname == "dirname" || mname == "extname"
             return "string"
+          end
+ # `File.open(path, mode)` without a block returns an sp_File *
+ # handle. The block form is statement-only and never reaches
+ # infer_call_type; this arm only fires for the non-block call.
+          if mname == "open" && @nd_block[nid] < 0
+            return "file"
           end
         end
         if rcname == "ENV"

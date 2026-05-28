@@ -1768,6 +1768,82 @@ static inline void sp_String_replace(sp_String*s,const char*t){if(!s||!t)return;
 static inline const char*sp_String_cstr(sp_String*s){return s->data;}
 static inline int64_t sp_String_length(sp_String*s){return s->len;}
 static sp_String*sp_String_dup(sp_String*s){return sp_String_new(s->data);}
+
+/* `File.open(path, mode)` without a block returns an sp_File * — a
+   GC-managed wrapper around `FILE *fp`. The finalizer fclose()s any
+   still-open fp so a dropped file handle doesn't leak. `path` and
+   `mode` are kept live for `f.path` / `f.mode` introspection; they
+   come from the caller's already-live string slot so no extra mark
+   is needed. */
+typedef struct { FILE *fp; const char *path; const char *mode; } sp_File;
+static void sp_File_fin(void *p) { sp_File *f = (sp_File *)p; if (f->fp) { fclose(f->fp); f->fp = NULL; } }
+static void sp_File_scan(void *p) { sp_File *f = (sp_File *)p; if (f->path) sp_mark_string(f->path); if (f->mode) sp_mark_string(f->mode); }
+static sp_File *sp_File_open(const char *path, const char *mode) {
+  sp_File *f = (sp_File *)sp_gc_alloc(sizeof(sp_File), sp_File_fin, sp_File_scan);
+  f->fp = fopen(path ? path : "", mode ? mode : "r");
+  if (!f->fp) { sp_raise_cls("Errno::ENOENT", "No such file or directory"); return NULL; }
+  f->path = path;
+  f->mode = mode;
+  return f;
+}
+static inline mrb_int sp_File_write(sp_File *f, const char *s) {
+  if (!f || !f->fp || !s) return 0;
+  size_t n = strlen(s);
+  return (mrb_int)fwrite(s, 1, n, f->fp);
+}
+static inline mrb_int sp_File_close(sp_File *f) {
+  if (f && f->fp) { fclose(f->fp); f->fp = NULL; }
+  return 0;
+}
+static inline mrb_bool sp_File_closed_p(sp_File *f) {
+  return !f || !f->fp;
+}
+static inline void sp_File_puts(sp_File *f, const char *s) {
+  if (!f || !f->fp || !s) return;
+  size_t n = strlen(s);
+  fputs(s, f->fp);
+  if (n == 0 || s[n - 1] != '\n') fputc('\n', f->fp);
+}
+static inline void sp_File_print(sp_File *f, const char *s) {
+  if (!f || !f->fp || !s) return;
+  fputs(s, f->fp);
+}
+static inline mrb_int sp_File_flush(sp_File *f) {
+  if (f && f->fp) fflush(f->fp);
+  return 0;
+}
+static inline const char *sp_File_gets(sp_File *f) {
+  if (!f || !f->fp) return NULL;
+  char buf[65536];
+  if (!fgets(buf, (int)sizeof(buf), f->fp)) return NULL;
+  size_t n = strlen(buf);
+  char *r = sp_str_alloc(n);
+  memcpy(r, buf, n);
+  return r;
+}
+static inline const char *sp_File_read(sp_File *f) {
+  if (!f || !f->fp) return sp_str_empty;
+  long pos = ftell(f->fp);
+  if (pos < 0) pos = 0;
+  if (fseek(f->fp, 0, SEEK_END) != 0) return sp_str_empty;
+  long end = ftell(f->fp);
+  fseek(f->fp, pos, SEEK_SET);
+  long n = (end > pos) ? (end - pos) : 0;
+  if (n <= 0) return sp_str_empty;
+  char *r = sp_str_alloc((size_t)n);
+  size_t got = fread(r, 1, (size_t)n, f->fp);
+  r[got] = 0;
+  return r;
+}
+static inline mrb_bool sp_File_eof_p(sp_File *f) {
+  if (!f || !f->fp) return TRUE;
+  int c = fgetc(f->fp);
+  if (c == EOF) return TRUE;
+  ungetc(c, f->fp);
+  return FALSE;
+}
+static inline const char *sp_File_path(sp_File *f) { return f && f->path ? f->path : sp_str_empty; }
+
 /* Array#inspect for each typed array: `[elem1, elem2, ...]` with each
    element rendered via its own primitive inspect. Matches CRuby's
    Array#inspect output byte-for-byte. Returns a GC-managed C string. */

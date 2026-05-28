@@ -4635,6 +4635,10 @@ class Compiler
     if t == "stringscanner"
       return "sp_StringScanner *"
     end
+ # File is a GC-managed wrapper around FILE *.
+    if t == "file"
+      return "sp_File *"
+    end
  # FFI raw C pointer (void *). See type_is_pointer for GC rules.
     if t == "ptr"
       return "void *"
@@ -25244,6 +25248,26 @@ class Compiler
         if mname == "extname"
           return "sp_file_extname(" + compile_arg0(nid) + ")"
         end
+ # `File.open(path, mode)` without a block — returns a GC-managed
+ # sp_File * handle. The block form is statement-only (handled in
+ # compile_file_open_call_stmt) and the expression context only
+ # reaches here when no block follows.
+        if mname == "open" && @nd_block[nid] < 0
+          args_id_fo = @nd_arguments[nid]
+          path_fo = "\"\""
+          mode_fo = "\"r\""
+          if args_id_fo >= 0
+            arg_ids_fo = get_args(args_id_fo)
+            if arg_ids_fo.length >= 1
+              path_fo = compile_expr(arg_ids_fo[0])
+            end
+            if arg_ids_fo.length >= 2
+              mode_fo = compile_expr(arg_ids_fo[1])
+            end
+          end
+          @needs_setjmp = 1
+          return "sp_File_open(" + path_fo + ", " + mode_fo + ")"
+        end
       end
       if rcname == "Dir"
         if mname == "pwd" || mname == "getwd"
@@ -26413,6 +26437,41 @@ class Compiler
     if recv_type == "stringscanner"
       ssm = strscan_runtime_call(mname, rc, nid)
       return ssm if ssm != ""
+    end
+ # File method dispatch on an sp_File * handle returned by the
+ # non-block `File.open(path, mode)`. Mutating I/O methods are
+ # emitted as comma-expressions so they're legal in expr context.
+    if recv_type == "file"
+      if mname == "write" || mname == "syswrite"
+        return "sp_File_write(" + rc + ", " + compile_expr_as_string(@nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1) + ")"
+      end
+      if mname == "close"
+        return "sp_File_close(" + rc + ")"
+      end
+      if mname == "closed?"
+        return "sp_File_closed_p(" + rc + ")"
+      end
+      if mname == "puts"
+        return "(sp_File_puts(" + rc + ", " + compile_expr_as_string(@nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1) + "), 0)"
+      end
+      if mname == "print"
+        return "(sp_File_print(" + rc + ", " + compile_expr_as_string(@nd_arguments[nid] >= 0 ? get_args(@nd_arguments[nid])[0] : -1) + "), 0)"
+      end
+      if mname == "flush"
+        return "sp_File_flush(" + rc + ")"
+      end
+      if mname == "gets"
+        return "sp_File_gets(" + rc + ")"
+      end
+      if mname == "read"
+        return "sp_File_read(" + rc + ")"
+      end
+      if mname == "eof?" || mname == "eof"
+        return "sp_File_eof_p(" + rc + ")"
+      end
+      if mname == "path" || mname == "to_path"
+        return "sp_File_path(" + rc + ")"
+      end
     end
  # Object method calls
     if is_obj_type(recv_type) == 1
