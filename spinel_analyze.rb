@@ -4125,6 +4125,15 @@ class Compiler
     if mname == "inspect"
       return "string"
     end
+ # Hash#to_proc on an int-valued typed hash returns a proc that
+ # maps key -> value. Only the int-valued sym/str variants are
+ # supported (the proc-call ABI returns mrb_int).
+    if mname == "to_proc" && recv >= 0
+      rt_tp = infer_type(recv)
+      if rt_tp == "sym_int_hash" || rt_tp == "str_int_hash"
+        return "proc"
+      end
+    end
  # NilClass coercion methods. Issue #871. to_c / to_r / to_h
  # skipped: Complex / Rational unsupported, Hash needs typed
  # element judgement.

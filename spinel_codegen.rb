@@ -8389,6 +8389,8 @@ class Compiler
  # routes literal symbol keys here), so the bare-name form always
  # round-trips correctly.
     emit_raw("static const char*sp_SymIntHash_inspect(sp_SymIntHash*h){sp_String*s=sp_String_new(\"{\");for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,\", \");sp_String_append(s,sp_sym_to_s(h->order[i]));sp_String_append(s,\": \");sp_String_append(s,sp_int_to_s(sp_SymIntHash_get(h,h->order[i])));}sp_String_append(s,\"}\");return s->data;}")
+ # Hash#to_proc lookup fn — `cap` is the hash, args[0] the symbol key.
+    emit_raw("static mrb_int sp_SymIntHash_proc_fn(void*cap,mrb_int*args){return sp_SymIntHash_get((sp_SymIntHash*)cap,(sp_sym)args[0]);}")
  # sym_array.tally — emitted alongside sp_SymIntHash because the
  # helper depends on the typedef. sym_array storage is sp_IntArray
  # (sym ids stored as mrb_int); cast each element to sp_sym for the
@@ -23440,6 +23442,9 @@ class Compiler
       end
     end
     if recv_type == "sym_int_hash"
+      if mname == "to_proc"
+        return "sp_proc_new_meta((void *)sp_SymIntHash_proc_fn, " + rc + ", sp_hashproc_cap_scan, 1, TRUE, 1, NULL, NULL)"
+      end
       if mname == "map" && @nd_block[nid] >= 0
  # Hash#map { |k, v| ... } walks the hash and accumulates the
  # block's return into a result array. Result type comes from
@@ -24334,6 +24339,9 @@ class Compiler
       end
     end
     if recv_type == "str_int_hash"
+      if mname == "to_proc"
+        return "sp_proc_new_meta((void *)sp_StrIntHash_proc_fn, " + rc + ", sp_hashproc_cap_scan, 1, TRUE, 1, NULL, NULL)"
+      end
       if mname == "map" && @nd_block[nid] >= 0
  # Hash#map { |k, v| ... } walks the hash and accumulates the
  # block's return into a result array. Block return type drives the

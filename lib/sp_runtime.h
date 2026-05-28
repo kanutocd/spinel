@@ -1885,6 +1885,8 @@ static const char*sp_PtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_String_new("
    non-int value, since the bare `k: v` shorthand only applies
    when values are inspectable as one-liners — match CRuby). */
 static const char*sp_StrIntHash_inspect(sp_StrIntHash*h){sp_String*s=sp_String_new("{");if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_int_to_s(sp_StrIntHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
+/* Hash#to_proc lookup fn — cap is the hash, args[0] the string key. */
+static mrb_int sp_StrIntHash_proc_fn(void *cap, mrb_int *args) { return sp_StrIntHash_get((sp_StrIntHash *)cap, (const char *)(uintptr_t)args[0]); }
 static const char*sp_StrStrHash_inspect(sp_StrStrHash*h){sp_String*s=sp_String_new("{");if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_str_inspect(sp_StrStrHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
 static const char*sp_IntStrHash_inspect(sp_IntStrHash*h){sp_String*s=sp_String_new("{");if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_str_inspect(sp_IntStrHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
 static const char*sp_IntIntHash_inspect(sp_IntIntHash*h){sp_String*s=sp_String_new("{");if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_int_to_s(sp_IntIntHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
@@ -3492,6 +3494,11 @@ static sp_Proc *sp_proc_compose(sp_Proc *outer, sp_Proc *inner) {
   c->inner = inner;
   return sp_proc_new_meta((void *)sp_proc_compose_fn, c, sp_proc_compose_scan, 1, TRUE, 1, NULL, NULL);
 }
+/* Hash#to_proc cap-scan: the proc's `cap` field IS the source hash
+   (a single GC pointer), so marking it keeps the hash alive for the
+   proc's lifetime. The per-variant lookup fn is emitted by codegen
+   alongside the hash type it closes over. */
+static void sp_hashproc_cap_scan(void *p) { sp_gc_mark(p); }
 
 /* ---- StringIO runtime ---- */
 typedef struct { char *buf; int64_t len; int64_t cap; int64_t pos; int64_t lineno; int closed; } sp_StringIO;
