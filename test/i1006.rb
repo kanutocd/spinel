@@ -1,4 +1,4 @@
-path = "/tmp/spinel_i1006.txt"
+path = "i1006_tmp.txt"
 File.delete(path) if File.exist?(path)
 
 f = File.open(path, "w")
