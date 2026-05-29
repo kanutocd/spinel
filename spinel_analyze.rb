@@ -6565,6 +6565,14 @@ class Compiler
             return "int"
           end
         end
+        if rcname == "GC"
+          if mname == "stat"
+            return "str_int_hash"
+          end
+          if mname == "start"
+            return "nil"
+          end
+        end
         if rcname == "Random"
           if mname == "bytes"
             return "string"

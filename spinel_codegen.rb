@@ -933,7 +933,7 @@ class Compiler
     if name == "ARGV" || name == "ENV" || name == "STDIN" || name == "STDOUT" || name == "STDERR"
       return 1
     end
-    if name == "Math" || name == "File" || name == "Dir" || name == "Time" || name == "IO" || name == "Process" || name == "Kernel" || name == "Comparable" || name == "Enumerable" || name == "Complex"
+    if name == "Math" || name == "File" || name == "Dir" || name == "Time" || name == "IO" || name == "Process" || name == "Kernel" || name == "Comparable" || name == "Enumerable" || name == "Complex" || name == "GC"
       return 1
     end
     if name == "Object" || name == "Integer" || name == "String" || name == "Float" || name == "Symbol" || name == "Array" || name == "Hash" || name == "Range" || name == "Numeric" || name == "TrueClass" || name == "FalseClass" || name == "NilClass" || name == "Proc" || name == "Lambda" || name == "Regexp" || name == "MatchData" || name == "StringIO" || name == "Fiber" || name == "Encoding"
@@ -25590,6 +25590,17 @@ class Compiler
         end
         if mname == "bytes"
           return "sp_Random_bytes(sp_random_default_get(), " + compile_arg0_as_int(nid) + ")"
+        end
+      end
+      if rcname == "GC"
+ # GC.stat returns a String=>Integer hash snapshot of the collector
+ # globals; GC.start forces a collection and returns nil.
+        if mname == "stat"
+          @needs_str_int_hash = 1
+          return "sp_gc_stat()"
+        end
+        if mname == "start"
+          return "(sp_gc_collect(), 0)"
         end
       end
       if rcname == "Time"

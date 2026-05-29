@@ -1079,6 +1079,11 @@ static void sp_StrIntHash_update(sp_StrIntHash*a,sp_StrIntHash*b){for(mrb_int i=
 static sp_StrIntHash*sp_StrIntHash_dup(sp_StrIntHash*h){sp_StrIntHash*r=sp_StrIntHash_new();r->default_v=h->default_v;for(mrb_int i=0;i<h->len;i++)sp_StrIntHash_set(r,h->order[i],sp_StrIntHash_get(h,h->order[i]));return r;}
 static mrb_bool sp_StrIntHash_eq(sp_StrIntHash*a,sp_StrIntHash*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(mrb_int i=0;i<a->len;i++){const char*k=a->order[i];if(!sp_StrIntHash_has_key(b,k))return FALSE;if(sp_StrIntHash_get(a,k)!=sp_StrIntHash_get(b,k))return FALSE;}return TRUE;}
 
+/* GC.stat snapshot: String=>Integer hash over the collector globals.
+   full_runs derives from sp_gc_cycle / SP_GC_FULL_INTERVAL (the major
+   collection cadence). */
+static sp_StrIntHash*sp_gc_stat(void){sp_StrIntHash*h=sp_StrIntHash_new();sp_StrIntHash_set(h,"bytes",(mrb_int)sp_gc_bytes);sp_StrIntHash_set(h,"old_bytes",(mrb_int)sp_gc_old_bytes);sp_StrIntHash_set(h,"threshold",(mrb_int)sp_gc_threshold);sp_StrIntHash_set(h,"cycle",(mrb_int)sp_gc_cycle);sp_StrIntHash_set(h,"full_runs",(mrb_int)(sp_gc_cycle/SP_GC_FULL_INTERVAL));return h;}
+
 static void sp_StrStrHash_fin(void*p){sp_StrStrHash*h=(sp_StrStrHash*)p;free(h->keys);free(h->vals);free(h->order);}
 static void sp_StrStrHash_scan(void*p){sp_StrStrHash*h=(sp_StrStrHash*)p;for(mrb_int i=0;i<h->cap;i++){if(h->keys[i]){sp_mark_string(h->keys[i]);sp_mark_string(h->vals[i]);}}if(h->default_v)sp_mark_string(h->default_v);}
 static sp_StrStrHash*sp_StrStrHash_new(void){sp_StrStrHash*h=(sp_StrStrHash*)sp_gc_alloc(sizeof(sp_StrStrHash),sp_StrStrHash_fin,sp_StrStrHash_scan);h->cap=16;h->mask=15;h->keys=(const char**)calloc(h->cap,sizeof(const char*));h->vals=(const char**)calloc(h->cap,sizeof(const char*));h->order=(const char**)malloc(sizeof(const char*)*h->cap);h->len=0;h->default_v=NULL;return h;}
