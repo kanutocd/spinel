@@ -21556,11 +21556,14 @@ class Compiler
       return "(2 * (" + rc + ") + 1)"
     end
  # Integer#ceil / floor / round / truncate without precision arg
- # return self. With precision the CRuby semantics differ; defer
- # those to a follow-up.
+ # return self. With a precision argument, route to runtime helpers.
     if mname == "ceil" || mname == "floor" || mname == "round" || mname == "truncate"
       if @nd_arguments[nid] < 0 || get_args(@nd_arguments[nid]).length == 0
         return rc
+      end
+      if @nd_arguments[nid] >= 0
+        arg = compile_arg0(nid)
+        return "sp_int_" + mname + "(" + rc + ", " + arg + ")"
       end
     end
  # is_a? / kind_of? on a primitive int: resolve at compile time. The
