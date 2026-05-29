@@ -12003,6 +12003,27 @@ class Compiler
     }
 
     in_module_function = 0
+ # `module_function :a, :b` (argument form) promotes already-defined
+ # instance methods to module (class) methods. Pre-scan the names so
+ # the DefNode pass below registers them as <Mod>_cls_<name>
+ # regardless of whether the def precedes or follows the call.
+    mf_named = "".split(";", -1)
+    body_stmts.each { |sid_mf|
+      if @nd_type[sid_mf] == "CallNode" && @nd_receiver[sid_mf] < 0 && @nd_name[sid_mf] == "module_function"
+        aid_mf = @nd_arguments[sid_mf]
+        if aid_mf >= 0
+          aargs_mf = get_args(aid_mf)
+          ai_mf = 0
+          while ai_mf < aargs_mf.length
+            an_mf = aargs_mf[ai_mf]
+            if @nd_type[an_mf] == "SymbolNode" || @nd_type[an_mf] == "StringNode"
+              mf_named.push(@nd_content[an_mf])
+            end
+            ai_mf = ai_mf + 1
+          end
+        end
+      end
+    }
     body_stmts.each { |sid|
       if @nd_type[sid] == "ConstantWriteNode"
         collect_scoped_constant(mname, sid)
@@ -12028,7 +12049,7 @@ class Compiler
         if @nd_receiver[sid] >= 0 && @nd_type[@nd_receiver[sid]] == "SelfNode"
           is_self_def = 1
         end
-        if is_self_def == 1 || (in_module_function == 1 && @nd_receiver[sid] < 0)
+        if is_self_def == 1 || (in_module_function == 1 && @nd_receiver[sid] < 0) || (@nd_receiver[sid] < 0 && not_in(@nd_name[sid], mf_named) == 0)
           dmname = @nd_name[sid]
           full_dn = mname + "_cls_" + dmname
  # CRuby's module re-open: last definition wins. If the same
@@ -12080,7 +12101,7 @@ class Compiler
         if @nd_receiver[sid] >= 0 && @nd_type[@nd_receiver[sid]] == "SelfNode"
           is_self_def_iv = 1
         end
-        if is_self_def_iv == 1 || (in_module_function == 1 && @nd_receiver[sid] < 0)
+        if is_self_def_iv == 1 || (in_module_function == 1 && @nd_receiver[sid] < 0) || (@nd_receiver[sid] < 0 && not_in(@nd_name[sid], mf_named) == 0)
           dbody = @nd_body[sid]
           if dbody >= 0
             register_module_def_ivars(mname, dbody)
