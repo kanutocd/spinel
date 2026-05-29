@@ -1846,6 +1846,53 @@ class Compiler
     0
   end
 
+ # 1 if any registered class is a proper descendant of class index ci.
+  def class_has_user_subclass(ci)
+    k = 0
+    while k < @cls_names.length
+      if cls_is_descendant(k, ci) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
+ # For `self.class.new(...)` written inside an instance method, return
+ # the enclosing class name when that class has no user subclass (so
+ # the runtime `self` is exactly that class and static construction is
+ # correct); "" otherwise. This lets the idiomatic functional-update
+ # `self.class.new(args)` lower to the static constructor instead of
+ # failing on a dynamic class value. Class-method bodies are excluded:
+ # there `self` is the class, so `self.class` is Class, not the
+ # enclosing class. Analyze marks class-method bodies with a `_cls_`
+ # infix in @current_method_name (@current_method_has_self is unused
+ # on this side).
+  def self_class_enclosing_ctor_cname(nid)
+    if @nd_name[nid] != "new"
+      return ""
+    end
+    recv = @nd_receiver[nid]
+    if recv < 0 || @nd_type[recv] != "CallNode" || @nd_name[recv] != "class"
+      return ""
+    end
+    inner = @nd_receiver[recv]
+    if inner < 0 || @nd_type[inner] != "SelfNode"
+      return ""
+    end
+    if @current_class_idx < 0
+      return ""
+    end
+    cm_marker = @current_method_name.index("_cls_")
+    if cm_marker != nil && cm_marker >= 0
+      return ""
+    end
+    if class_has_user_subclass(@current_class_idx) == 1
+      return ""
+    end
+    @cls_names[@current_class_idx]
+  end
+
   def cls_cmethod_owner(ci, mname)
     if ci < 0
       return -1
@@ -4358,6 +4405,12 @@ class Compiler
  # works unchanged.
     if mname == "new"
       if recv >= 0 && infer_type(recv) == "class"
+ # `self.class.new(args)` in an instance method of a leaf (no
+ # subclass) class -> construct the enclosing class statically.
+        cn_sc = self_class_enclosing_ctor_cname(nid)
+        if cn_sc != ""
+          return "obj_" + cn_sc
+        end
         rty_n = @nd_type[recv]
         if rty_n != "ConstantReadNode" && rty_n != "ConstantPathNode"
           return "poly"

@@ -2360,6 +2360,47 @@ class Compiler
     0
   end
 
+ # 1 if any registered class is a proper descendant of class index ci.
+  def class_has_user_subclass(ci)
+    k = 0
+    while k < @cls_names.length
+      if cls_is_descendant(k, ci) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
+ # For `self.class.new(...)` in an instance method of a class with no
+ # user subclass, return the enclosing class name (so the call lowers
+ # to the static constructor `sp_<C>_new(args)`); "" otherwise. Mirror
+ # of the analyze helper; here instance-method context is the
+ # @current_method_has_self flag (set by emit_instance_method).
+  def self_class_enclosing_ctor_cname(nid)
+    if @nd_name[nid] != "new"
+      return ""
+    end
+    recv = @nd_receiver[nid]
+    if recv < 0 || @nd_type[recv] != "CallNode" || @nd_name[recv] != "class"
+      return ""
+    end
+    inner = @nd_receiver[recv]
+    if inner < 0 || @nd_type[inner] != "SelfNode"
+      return ""
+    end
+    if @current_class_idx < 0
+      return ""
+    end
+    if @current_method_has_self != 1
+      return ""
+    end
+    if class_has_user_subclass(@current_class_idx) == 1
+      return ""
+    end
+    @cls_names[@current_class_idx]
+  end
+
   def find_method_idx(name)
     i = 0
     while i < @meth_names.length
@@ -19903,6 +19944,18 @@ class Compiler
     cname = constructor_class_name(recv)
     if cname == ""
       cname = implicit_new_class_name(recv)
+    end
+    if cname == ""
+ # `self.class.new(args)` in an instance method of a leaf class:
+ # construct the enclosing class statically. Only when analyze
+ # actually annotated this node as obj_<enclosing> (it does for
+ # direct method-body nodes; block-body nodes are left uncached and
+ # fall back to the prior dynamic-class behavior, avoiding a
+ # container/element type mismatch).
+      cn_scc = self_class_enclosing_ctor_cname(nid)
+      if cn_scc != "" && @nd_inferred_type[nid] == "obj_" + cn_scc
+        cname = cn_scc
+      end
     end
     if cname != ""
  # Built-in exception class `.new("msg")` (or a user subclass of
