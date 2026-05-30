@@ -37,12 +37,24 @@ typedef bool mrb_bool;
 /* Sentinel value reserved by the int? (scalar-nullable int) type. An
    int? slot is bit-compatible with mrb_int; SP_INT_NIL marks the
    "nil" inhabitant. The pattern is INTPTR_MIN -- INT64_MIN on 64-bit
-   (unchanged), INT32_MIN on 32-bit. On 64-bit this value would auto-
-   promote to Bignum in CRuby so the reservation is safe; on 32-bit
-   INT32_MIN is a representable Integer, so the sentinel can collide
-   with a genuine -2147483648 (an accepted 32-bit-build limitation).
+   (unchanged), INT32_MIN on 32-bit.
    `sp_int_is_nil(v)` is the canonical predicate; treat any int? value
-   produced by runtime helpers as opaque outside this macro. */
+   produced by runtime helpers as opaque outside this macro.
+
+   KNOWN LIMITATION (32-bit builds only). The reservation is a single
+   bit pattern, so a *genuine* integer equal to the sentinel is
+   indistinguishable from nil. On 64-bit, INT64_MIN is effectively
+   unreachable in practice (CRuby would have promoted it to Bignum), so
+   this never bites. On 32-bit, INT32_MIN (-2147483648) is an ordinary
+   reachable Integer, so a real -2147483648 flowing into an int? slot
+   reads back as nil -- e.g. `[-2147483648].pop` yields nil instead of
+   the value. This affects ONLY int? (nullable-int) slots; a plain
+   (non-nullable) int holding -2147483648 is fine, since it never
+   consults sp_int_is_nil. The integer-overflow helpers deliberately do
+   NOT reserve this value (checking every +/-/* result against it would
+   cost the hot path the embedded build is trying to save). Code that
+   must store -2147483648 nullably on 32-bit should box it (poly) rather
+   than use a flat int? slot. */
 #define SP_INT_NIL ((mrb_int)INTPTR_MIN)
 #define sp_int_is_nil(v) ((v) == SP_INT_NIL)
 
