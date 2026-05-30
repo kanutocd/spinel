@@ -21111,7 +21111,7 @@ class Compiler
           if a.length >= 2
             return "sp_str_split_limit(" + rc + ", " + compile_expr(a[0]) + ", " + compile_expr_as_int(a[1]) + ")"
           end
-          return "sp_str_split(" + rc + ", " + compile_expr(a[0]) + ")"
+          return "sp_str_split_drop_trailing(" + rc + ", " + compile_expr(a[0]) + ")"
         end
       end
  # No-arg split (`s.split`) is Ruby's whitespace-split idiom.
