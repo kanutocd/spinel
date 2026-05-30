@@ -1285,11 +1285,12 @@ static sp_StrArray*sp_str_split(const char*s,const char*sep){sp_StrArray*a=sp_St
 static sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep){sp_StrArray*a=sp_str_split(s,sep);while(a->len>0&&a->data[a->len-1][0]==0)a->len--;return a;}
 /* `s.split(sep, n)` with explicit limit. Positive n caps the result
    at n elements: the last element holds the unsplit remainder.
-   n <= 0 (CRuby's "no limit" or "keep trailing empties") falls back
-   to the plain split. Empty separator works the same as the no-limit
-   path -- splits into Unicode characters; the limit caps the array.
+   n == 0 means "no limit" and drops trailing empty strings (same as
+   the no-arg default); n < 0 means "no limit" but keeps trailing
+   empties. Empty separator works the same as the no-limit path --
+   splits into Unicode characters; the limit caps the array.
    Issue #619 puzzle 2. */
-static sp_StrArray*sp_str_split_limit(const char*s,const char*sep,mrb_int n){if(n<=0)return sp_str_split(s,sep);sp_StrArray*a=sp_StrArray_new();if(*s==0)return a;size_t sl=strlen(sep);if(sl==0){const char*p=s;mrb_int k=0;while(*p&&k<n-1){int cn=sp_utf8_advance(p);char*c=sp_str_alloc_raw(cn+1);memcpy(c,p,cn);c[cn]=0;sp_StrArray_push(a,c);p+=cn;k++;}if(*p){char*r=sp_str_alloc_raw(strlen(p)+1);strcpy(r,p);sp_StrArray_push(a,r);}return a;}const char*p=s;mrb_int k=0;while(k<n-1){const char*f=strstr(p,sep);if(!f)break;size_t m=f-p;char*r=sp_str_alloc_raw(m+1);memcpy(r,p,m);r[m]=0;sp_StrArray_push(a,r);p=f+sl;k++;}char*r=sp_str_alloc_raw(strlen(p)+1);strcpy(r,p);sp_StrArray_push(a,r);return a;}
+static sp_StrArray*sp_str_split_limit(const char*s,const char*sep,mrb_int n){if(n==0)return sp_str_split_drop_trailing(s,sep);if(n<0)return sp_str_split(s,sep);sp_StrArray*a=sp_StrArray_new();if(*s==0)return a;size_t sl=strlen(sep);if(sl==0){const char*p=s;mrb_int k=0;while(*p&&k<n-1){int cn=sp_utf8_advance(p);char*c=sp_str_alloc_raw(cn+1);memcpy(c,p,cn);c[cn]=0;sp_StrArray_push(a,c);p+=cn;k++;}if(*p){char*r=sp_str_alloc_raw(strlen(p)+1);strcpy(r,p);sp_StrArray_push(a,r);}return a;}const char*p=s;mrb_int k=0;while(k<n-1){const char*f=strstr(p,sep);if(!f)break;size_t m=f-p;char*r=sp_str_alloc_raw(m+1);memcpy(r,p,m);r[m]=0;sp_StrArray_push(a,r);p=f+sl;k++;}char*r=sp_str_alloc_raw(strlen(p)+1);strcpy(r,p);sp_StrArray_push(a,r);return a;}
 /* `s.split` / `s.split(nil)` -- whitespace mode: split on runs of
    ASCII whitespace, skip leading whitespace. Issue #507: the no-arg
    form previously emitted `sp_str_split(s, 0)` and segfaulted at
