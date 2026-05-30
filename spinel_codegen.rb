@@ -21538,6 +21538,22 @@ class Compiler
       return "sp_str_capitalize(" + rc + ")"
     end
     if mname == "count"
+      args_id_ct = @nd_arguments[nid]
+      if args_id_ct >= 0
+        a_ct = get_args(args_id_ct)
+        if a_ct.length > 1
+          tmp_arr = new_temp
+          tmp_i = new_temp
+          tmp_r = new_temp
+          emit("  const char *" + tmp_arr + "[" + a_ct.length.to_s + "];")
+          a_ct.each_with_index do |arg, i|
+            emit("  " + tmp_arr + "[" + i.to_s + "] = " + compile_expr(arg) + ";")
+          end
+          emit("  mrb_int " + tmp_r + " = sp_str_count_n(" + rc + ", " + tmp_arr + ", " + a_ct.length.to_s + ");")
+          return tmp_r
+        end
+        return "sp_str_count(" + rc + ", " + compile_arg0(nid) + ")"
+      end
       return "sp_str_count(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "*"
