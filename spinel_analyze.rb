@@ -17979,6 +17979,70 @@ class Compiler
   end
 
  # Collect every element type seen in `pname.push(elem)` or
+ # True (1) when `name` is assigned an empty `[]` array literal
+ # somewhere under `nid`. Used to gate the empty-array-local
+ # promotion (mirrors the empty-default-param gate): only a local
+ # that started as `[]` has a deferred element type that a later
+ # `<<` / push should resolve. A `name = [1, 2]` non-empty literal
+ # is a genuine int_array and must not be re-promoted from its
+ # object pushes.
+ # Promote empty-array locals (`x = []`) in the current scope from
+ # their `[]` seed (int_array) to the concrete typed-array implied by
+ # their pushes. scan_locals_first_type doesn't track the
+ # deferred-element-then-push widening that scan_locals / codegen
+ # apply, so an `x = []; x << obj` local is otherwise left at
+ # int_array. That under-typing flows through scan_new_calls ->
+ # widen_ptypes_from_args: a local passed as a call argument widens
+ # the callee's param to int_array instead of the real
+ # `<obj>_ptr_array`, and the value (a real PtrArray at runtime) is
+ # later read back as an IntArray -- e.g. `@cache = list` then
+ # `@cache.size` returns garbage. Mirrors
+ # infer_param_array_type_from_body's empty-default-param promotion,
+ # applied to locals and gated on an actual empty-`[]` initializer.
+ # Run after each scan_locals_first_type pass so block params of a
+ # promoted receiver (`promoted.each { |r| ... }`) re-derive their
+ # element type on the next pass, letting the widening propagate
+ # transitively (e.g. loaded -> r -> group).
+  def promote_empty_array_locals_in_scope(bid, names, types)
+    li = 0
+    while li < names.length
+      if li < types.length && types[li] == "int_array" && local_initialized_empty_array(bid, names[li]) == 1
+        elem_acc_pl = "".split(",", -1)
+        collect_param_push_elem_types(bid, names[li], elem_acc_pl)
+        promoted_pl = empty_array_promotion_for(elem_acc_pl)
+        if promoted_pl != "" && promoted_pl != "int_array"
+          set_var_type(names[li], promoted_pl)
+        end
+      end
+      li = li + 1
+    end
+  end
+
+  def local_initialized_empty_array(nid, name)
+    if nid < 0
+      return 0
+    end
+    if @nd_type[nid] == "DefNode" || @nd_type[nid] == "ClassNode" || @nd_type[nid] == "ModuleNode"
+      return 0
+    end
+    if @nd_type[nid] == "LocalVariableWriteNode" && @nd_name[nid] == name
+      rhs = @nd_expression[nid]
+      if rhs >= 0 && @nd_type[rhs] == "ArrayNode" && parse_id_list(@nd_elements[rhs]).length == 0
+        return 1
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      if local_initialized_empty_array(cs[k], name) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
  # `pname << elem` patterns under nid. The deferred-element-type
  # promotion pass uses this to decide what concrete typed-array a
  # parameter should be promoted to when callers all passed empty
@@ -22847,6 +22911,10 @@ class Compiler
               declare_var(lnames[lk], ltypes[lk])
               lk = lk + 1
             end
+ # Promote empty-array locals before the second scan so a
+ # `promoted.each { |r| ... }` block param re-derives its
+ # element type from the promoted receiver below.
+            promote_empty_array_locals_in_scope(bid, lnames, ltypes)
  # Second pass: rescan with locals now in scope for better inference
             lnames2 = "".split(",", -1)
             ltypes2 = "".split(",", -1)
@@ -22858,6 +22926,11 @@ class Compiler
               end
               lk2 = lk2 + 1
             end
+ # Re-promote after the second scan: locals whose pushes feed
+ # off a now-typed block param (e.g. `group << r` where `r`
+ # only became concrete once its receiver was promoted above)
+ # resolve on this pass.
+            promote_empty_array_locals_in_scope(bid, lnames2, ltypes2)
  # Scan for calls to other methods in same class
             scan_cls_method_calls(ci, bid)
  # Also scan for constructor calls to infer param types
