@@ -3955,6 +3955,15 @@ class Compiler
  # without needing an actual ArrayNode to host them.
   def infer_array_elem_type_from_ids(elems)
     if elems.length > 0
+ # `[*"a".."z"]` -- a splat of a string range expands to string
+ # elements, so the literal is a str_array. infer_type(SplatNode)
+ # defaults to int, which would otherwise mis-route this to int_array.
+      if @nd_type[elems[0]] == "SplatNode"
+        inner0 = @nd_expression[elems[0]]
+        if inner0 >= 0 && @nd_type[inner0] == "RangeNode" && infer_type(@nd_left[inner0]) == "string"
+          return "str_array"
+        end
+      end
       et = infer_type(elems[0])
       if et == "symbol"
  # Check if ALL elements are symbols
@@ -32911,7 +32920,28 @@ class Compiler
       emit("  SP_GC_ROOT(" + tmp + ");")
       k = 0
       while k < elems.length
-        emit("  sp_StrArray_push(" + tmp + ", " + compile_expr(elems[k]) + ");")
+        eid_sa = elems[k]
+ # `[*"a".."z"]` / `[*other_str_array]` -- expand the splat source's
+ # elements into the str_array rather than lowering the splat to a
+ # single default value.
+        if @nd_type[eid_sa] == "SplatNode"
+          inner_sa = @nd_expression[eid_sa]
+          src_sa = new_temp
+          if inner_sa >= 0 && @nd_type[inner_sa] == "RangeNode"
+            excl_sa = range_excl_end(inner_sa) == 1 ? "1" : "0"
+            emit("  sp_StrArray *" + src_sa + " = sp_StrArray_from_string_range(" + compile_expr(@nd_left[inner_sa]) + ", " + compile_expr(@nd_right[inner_sa]) + ", " + excl_sa + ");")
+          else
+            emit("  sp_StrArray *" + src_sa + " = " + compile_expr(inner_sa) + ";")
+          end
+          emit("  SP_GC_ROOT(" + src_sa + ");")
+          ii_sa = new_temp
+          emit("  for (mrb_int " + ii_sa + " = 0; " + ii_sa + " < sp_StrArray_length(" + src_sa + "); " + ii_sa + "++) {")
+          emit("    sp_StrArray_push(" + tmp + ", sp_StrArray_get(" + src_sa + ", " + ii_sa + "));")
+          emit("  }")
+          k = k + 1
+          next
+        end
+        emit("  sp_StrArray_push(" + tmp + ", " + compile_expr(eid_sa) + ");")
         k = k + 1
       end
       return tmp

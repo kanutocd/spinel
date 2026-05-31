@@ -2766,6 +2766,15 @@ class Compiler
  # without needing an actual ArrayNode to host them.
   def infer_array_elem_type_from_ids(elems)
     if elems.length > 0
+ # `[*"a".."z"]` -- a splat of a string range expands to string
+ # elements, so the literal is a str_array. infer_type(SplatNode)
+ # defaults to int, which would otherwise mis-route this to int_array.
+      if @nd_type[elems[0]] == "SplatNode"
+        inner0 = @nd_expression[elems[0]]
+        if inner0 >= 0 && @nd_type[inner0] == "RangeNode" && infer_type(@nd_left[inner0]) == "string"
+          return "str_array"
+        end
+      end
       et = infer_type(elems[0])
       if et == "symbol"
  # Check if ALL elements are symbols
