@@ -37213,6 +37213,26 @@ class Compiler
           if bp == ""
             bp = "_l"
           end
+ # `each_line(chomp: true)` strips the trailing line ending (\n, \r\n)
+ # from each yielded line. Detect the keyword pair at compile time.
+          chomp_el = 0
+          if @nd_arguments[nid] >= 0
+            aargs_el = get_args(@nd_arguments[nid])
+            if aargs_el.length >= 1 && @nd_type[aargs_el[0]] == "KeywordHashNode"
+              kelems_el = parse_id_list(@nd_elements[aargs_el[0]])
+              kk_el = 0
+              while kk_el < kelems_el.length
+                if @nd_type[kelems_el[kk_el]] == "AssocNode"
+                  key_el = @nd_key[kelems_el[kk_el]]
+                  val_el = @nd_expression[kelems_el[kk_el]]
+                  if key_el >= 0 && @nd_type[key_el] == "SymbolNode" && @nd_content[key_el] == "chomp" && val_el >= 0 && @nd_type[val_el] == "TrueNode"
+                    chomp_el = 1
+                  end
+                end
+                kk_el = kk_el + 1
+              end
+            end
+          end
           src_el = rc
           if rt == "mutable_str"
             src_el = rc + "->data"
@@ -37231,6 +37251,11 @@ class Compiler
           emit("    while (" + pos_el + " < " + slen_el + " && " + base_el + "[" + pos_el + "] != '\\n') " + pos_el + "++;")
           emit("    if (" + pos_el + " < " + slen_el + ") " + pos_el + "++;")
           emit("    mrb_int " + llen_el + " = " + pos_el + " - " + start_el + ";")
+          if chomp_el == 1
+ # Trim the trailing line ending from the copied span (pos_el still
+ # advances past it, so the next iteration starts correctly).
+            emit("    if (" + llen_el + " > 0 && " + base_el + "[" + start_el + " + " + llen_el + " - 1] == '\\n') { " + llen_el + "--; if (" + llen_el + " > 0 && " + base_el + "[" + start_el + " + " + llen_el + " - 1] == '\\r') " + llen_el + "--; }")
+          end
           emit("    char *" + buf_el + " = sp_str_alloc(" + llen_el + ");")
           emit("    memcpy(" + buf_el + ", " + base_el + " + " + start_el + ", " + llen_el + ");")
           emit("    " + buf_el + "[" + llen_el + "] = 0;")
