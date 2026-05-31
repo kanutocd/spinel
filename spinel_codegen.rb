@@ -17234,6 +17234,29 @@ class Compiler
           arg_ids = get_args(args_id)
           if arg_ids.length > 0
             sc = compile_expr(arg_ids[0])
+ # A non-String match operand can't be coerced: CRuby raises
+ # TypeError. Without this guard the scalar is passed where a
+ # const char* is expected (sp_re_match*), so the integer is
+ # dereferenced as a pointer and segfaults.
+            sc_bt_re = base_type(infer_type(arg_ids[0]))
+            if sc_bt_re == "int" || sc_bt_re == "bigint" || sc_bt_re == "float" || sc_bt_re == "symbol" || sc_bt_re == "nil" || sc_bt_re == "bool"
+              rb_t_re = "Integer"
+              if sc_bt_re == "float"
+                rb_t_re = "Float"
+              elsif sc_bt_re == "symbol"
+                rb_t_re = "Symbol"
+              elsif sc_bt_re == "nil"
+                rb_t_re = "nil"
+              elsif sc_bt_re == "bool"
+                rb_t_re = "true"
+              end
+              raise_re = "sp_raise_cls(\"TypeError\", \"no implicit conversion of " + rb_t_re + " into String\")"
+              if mname == "match?" || mname == "==="
+                return "(" + raise_re + ", FALSE)"
+              end
+              @needs_rb_value = 1
+              return "(" + raise_re + ", sp_box_nil())"
+            end
             if mname == "match?" || mname == "==="
  # Issue #869: 2-arg form starts matching at the given byte
  # offset (negative counts from the end). Without the _at
