@@ -991,4 +991,175 @@ class Compiler
     end
   end
 
+ # ---- Module#instance_methods(false) const-fold support ----
+ # `Klass.instance_methods(false)` reports a class/module's own (non-
+ # inherited) instance-method names. For a *compiled* user class/module
+ # that set is statically known, so the call folds to a literal symbol
+ # array. These helpers are shared so the analyze pass (symbol-table
+ # registration + result typing) and the codegen pass (the fold) agree
+ # exactly -- a name set or gate that drifted between passes would emit
+ # a `sym_array`-typed slot the other side can't populate.
+
+ # Resolved const name iff `nid` is a foldable
+ # `<ConstantRead>.instance_methods(false)` call, else "". Receiver
+ # resolution is context-free (the raw constant name) on purpose: the
+ # gate must be identical in a flat symbol-collection walk and in a
+ # class-scoped emit, so it deliberately does NOT consult lexical
+ # scope. ConstantPath receivers and the no-arg / `true` forms fall
+ # through unfolded (and stay untyped), matching today's behaviour.
+  def instance_methods_fold_target(nid)
+    recv = @nd_receiver[nid]
+    if recv < 0 || @nd_type[recv] != "ConstantReadNode"
+      return ""
+    end
+    aid = @nd_arguments[nid]
+    if aid < 0
+      return ""
+    end
+    aargs = get_args(aid)
+    if aargs.length != 1 || @nd_type[aargs[0]] != "FalseNode"
+      return ""
+    end
+    cn = @nd_name[recv]
+    if instance_methods_fold_const?(cn) == 0
+      return ""
+    end
+    cn
+  end
+
+ # 1 iff `cname` is a user-defined class or module whose own instance-
+ # method set is statically known. Built-in classes (Integer, String,
+ # ...) aren't in @cls_names, so they fall through -- spinel can't
+ # enumerate their native method tables.
+  def instance_methods_fold_const?(cname)
+    if cname == ""
+      return 0
+    end
+    if find_class_idx(cname) >= 0
+      return 1
+    end
+    mi = 0
+    while mi < @module_names.length
+      if @module_names[mi] == cname
+        return 1
+      end
+      mi = mi + 1
+    end
+    0
+  end
+
+ # Ordered, de-duplicated own instance-method names (as strings) for a
+ # foldable const. Class: attr readers + `=`-suffixed writers + method
+ # table (matches class_has_method_local, which method_defined? uses).
+ # Module: body `def`s excluding `def self.x` and module_function
+ # promotions, plus attr accessors. spinel doesn't model visibility, so
+ # private defs are included -- consistent with method_defined?.
+  def instance_methods_own_names(cname)
+    acc = "".split(";", -1)
+    ci = find_class_idx(cname)
+    if ci >= 0
+      im_push_names(acc, @cls_attr_readers[ci].split(";", -1), "")
+      im_push_names(acc, @cls_attr_writers[ci].split(";", -1), "=")
+      im_push_names(acc, @cls_meth_names[ci].split(";", -1), "")
+      return acc
+    end
+    mi = 0
+    while mi < @module_names.length
+      if @module_names[mi] == cname && mi < @module_body_ids.length
+        im_push_module_body(acc, @module_body_ids[mi])
+      end
+      mi = mi + 1
+    end
+    acc
+  end
+
+  def im_push_names(acc, names, suffix)
+    k = 0
+    while k < names.length
+      if names[k] != ""
+        full = names[k] + suffix
+        if not_in(full, acc) == 1
+          acc.push(full)
+        end
+      end
+      k = k + 1
+    end
+  end
+
+  def im_push_module_body(acc, body)
+    if body < 0
+      return
+    end
+    stmts = get_stmts(body)
+ # Pre-scan `module_function :a, :b` named promotions: those defs
+ # become class methods, not instance methods.
+    mf_named = "".split(";", -1)
+    si = 0
+    while si < stmts.length
+      sid = stmts[si]
+      if @nd_type[sid] == "CallNode" && @nd_receiver[sid] < 0 && @nd_name[sid] == "module_function"
+        aid = @nd_arguments[sid]
+        if aid >= 0
+          margs = get_args(aid)
+          mk = 0
+          while mk < margs.length
+            if @nd_type[margs[mk]] == "SymbolNode" || @nd_type[margs[mk]] == "StringNode"
+              mf_named.push(@nd_content[margs[mk]])
+            end
+            mk = mk + 1
+          end
+        end
+      end
+      si = si + 1
+    end
+ # `module_function` (no args) flips subsequent bare `def`s into
+ # class methods. `def self.x` is always a class method.
+    in_mf = 0
+    si = 0
+    while si < stmts.length
+      sid = stmts[si]
+      t = @nd_type[sid]
+      if t == "CallNode" && @nd_receiver[sid] < 0
+        cn = @nd_name[sid]
+        if cn == "module_function"
+          aid2 = @nd_arguments[sid]
+          if aid2 < 0 || get_args(aid2).length == 0
+            in_mf = 1
+          end
+        end
+        if cn == "attr_reader" || cn == "attr_accessor"
+          im_push_attr_args(acc, sid, "")
+        end
+        if cn == "attr_writer" || cn == "attr_accessor"
+          im_push_attr_args(acc, sid, "=")
+        end
+      end
+      if t == "DefNode" && @nd_receiver[sid] < 0 && in_mf == 0
+        dn = @nd_name[sid]
+        if not_in(dn, mf_named) == 1 && not_in(dn, acc) == 1
+          acc.push(dn)
+        end
+      end
+      si = si + 1
+    end
+  end
+
+  def im_push_attr_args(acc, sid, suffix)
+    aid = @nd_arguments[sid]
+    if aid < 0
+      return
+    end
+    aargs = get_args(aid)
+    k = 0
+    while k < aargs.length
+      if @nd_type[aargs[k]] == "SymbolNode" || @nd_type[aargs[k]] == "StringNode"
+        full = @nd_content[aargs[k]] + suffix
+        if not_in(full, acc) == 1
+          acc.push(full)
+        end
+      end
+      k = k + 1
+    end
+  end
+
 end

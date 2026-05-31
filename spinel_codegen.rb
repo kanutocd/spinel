@@ -26199,6 +26199,24 @@ class Compiler
  # instance methods, attr readers/writers, ancestors). When the
  # second arg is the literal `false`, restrict the lookup to the
  # receiver's own methods (no parent walk) via class_has_method_local.
+      if mname == "instance_methods"
+ # `Klass.instance_methods(false)` -> literal symbol array of the
+ # class/module's own method names. Same gate + name set analyze
+ # registered the symbols and typed the result `sym_array` against.
+        im_target = instance_methods_fold_target(nid)
+        if im_target != ""
+          im_names = instance_methods_own_names(im_target)
+          @needs_int_array = 1
+          im_tmp = new_temp
+          emit("  sp_IntArray *" + im_tmp + " = sp_IntArray_new();")
+          im_k = 0
+          while im_k < im_names.length
+            emit("  sp_IntArray_push(" + im_tmp + ", " + compile_symbol_literal(im_names[im_k]) + ");")
+            im_k = im_k + 1
+          end
+          return im_tmp
+        end
+      end
       if mname == "method_defined?"
         ci_md = find_class_idx(rcname)
         if ci_md >= 0

@@ -4442,6 +4442,14 @@ class Compiler
         return "poly_array"
       end
     end
+ # `Klass.instance_methods(false)` -> literal symbol array. Gated on
+ # the shared fold target so analyze and codegen agree; the no-arg /
+ # `true` forms stay unfolded (and fall through untyped).
+    if mname == "instance_methods"
+      if instance_methods_fold_target(nid) != ""
+        return "sym_array"
+      end
+    end
     if mname == "<" || mname == "<=" || mname == ">" || mname == ">="
       if recv >= 0 && infer_type(recv) == "class"
         return "bool"
@@ -25746,6 +25754,20 @@ class Compiler
             cn_proc_sym = @nd_name[r_proc_sym]
             if cn_proc_sym == "Proc" || cn_proc_sym == "Lambda"
               collect_proc_param_sym_names(local, @nd_block[i], cn_proc_sym == "Lambda" ? 1 : 0)
+            end
+          end
+        end
+ # `Klass.instance_methods(false)` folds to a literal symbol array;
+ # register its own-method names so the elements resolve to static
+ # SPS_ ids (same gate + name set the codegen fold uses).
+        if mn == "instance_methods"
+          im_target = instance_methods_fold_target(i)
+          if im_target != ""
+            im_names = instance_methods_own_names(im_target)
+            im_k = 0
+            while im_k < im_names.length
+              collect_sym_name_into(local, im_names[im_k])
+              im_k = im_k + 1
             end
           end
         end
