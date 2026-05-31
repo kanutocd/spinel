@@ -26336,6 +26336,24 @@ class Compiler
             end
           end
         end
+ # `arr.map { Foo.new }` over a typed-array/range receiver: the map
+ # result is typed `obj_<C>_ptr_array` and compile_map_expr collects
+ # the objects into a sp_PtrArray (its `_push` takes `void *`). A
+ # value-type `<C>` would return a struct by value from `<C>.new` and
+ # mismatch that void* slot, so keep it heap. Scoped to `map` because
+ # that is the only block-returning enumerator whose codegen has the
+ # object-collection arm.
+        if mname == "map"
+          map_rt = infer_type(nid)
+          if is_ptr_array_type(map_rt) == 1
+            map_elem = ptr_array_elem_type(map_rt)
+            if is_obj_type(map_elem) == 1
+              if not_in(map_elem, @ptr_array_stored_types) == 1
+                @ptr_array_stored_types.push(map_elem)
+              end
+            end
+          end
+        end
       end
       nid = nid + 1
     end

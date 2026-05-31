@@ -43609,7 +43609,13 @@ class Compiler
       block_is_typed_array = (block_ret_r == "int_array" || block_ret_r == "str_array" ||
                               block_ret_r == "float_array" || block_ret_r == "sym_array" ||
                               is_ptr_array_type(block_ret_r) == 1 || block_ret_r == "poly_array")
-      if block_ret_r != "int" && block_ret_r != "string" && block_ret_r != "float" && block_ret_r != "poly" && block_ret_r != "bigint" && block_is_typed_array == false
+ # Block returns a heap user object (`(1..n).map { Obj.new }`): collect
+ # into a PtrArray of object pointers, mirroring the typed-array recv
+ # path's obj arm. Value-type classes are excluded (struct-by-value
+ # can't go through `void *`); detect_ptr_array_stored_types forces a
+ # `map`-collected class heap, so the relevant classes are non-value.
+      block_ret_r_is_obj = (is_obj_type(block_ret_r) == 1 && is_value_type_class(block_ret_r[4, block_ret_r.length - 4]) == 0)
+      if block_ret_r != "int" && block_ret_r != "string" && block_ret_r != "float" && block_ret_r != "poly" && block_ret_r != "bigint" && block_is_typed_array == false && block_ret_r_is_obj == false
         return "0"
       end
       @needs_int_array = 1
@@ -43640,6 +43646,9 @@ class Compiler
         else
           emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
         end
+      elsif block_ret_r_is_obj
+        @needs_ptr_array = 1
+        emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
       else
         emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
       end
@@ -43722,6 +43731,8 @@ class Compiler
             else
               emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)" + lastv_r + ");")
             end
+          elsif block_ret_r_is_obj
+            emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)(" + lastv_r + "));")
           else
  # promote-mode block tail returning bigint into IntArray;
  # unbox before pushing.
