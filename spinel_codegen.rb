@@ -35674,6 +35674,23 @@ class Compiler
     emit("  }")
   end
 
+ # True (1) when an ImaginaryNode's coefficient is the literal 0 (so the
+ # complex value is (0+0i), which can === a real subject). `i` alone is
+ # 1i (coefficient 1).
+  def imaginary_im_is_zero(nid)
+    inner = @nd_expression[nid]
+    if inner < 0
+      return 0
+    end
+    if @nd_type[inner] == "IntegerNode"
+      return @nd_value[inner].to_i == 0 ? 1 : 0
+    end
+    if @nd_type[inner] == "FloatNode"
+      return @nd_content[inner].to_f == 0.0 ? 1 : 0
+    end
+    0
+  end
+
   def compile_when_conds(wid, tmp, pred_type)
     wconds = parse_id_list(@nd_conditions[wid])
     result = ""
@@ -35683,6 +35700,55 @@ class Compiler
         result = result + " || "
       end
       cid = wconds[k]
+ # `when *arr` -- Array#=== is membership: match when the subject is
+ # an element of the splatted array. Without this the splat lowered to
+ # a single default value and never matched.
+      if @nd_type[cid] == "SplatNode"
+        inner_wc = @nd_expression[cid]
+        it_wc = inner_wc >= 0 ? infer_type(inner_wc) : ""
+        if pred_type == "int" && (it_wc == "int_array" || it_wc == "sym_array")
+          result = result + "sp_IntArray_include(" + compile_expr(inner_wc) + ", " + tmp + ")"
+        elsif pred_type == "string" && it_wc == "str_array"
+          result = result + "sp_StrArray_include(" + compile_expr(inner_wc) + ", " + tmp + ")"
+        else
+ # Type-incompatible subject/array (or a shape we don't special-case):
+ # no element can be ===, so this arm never matches.
+          result = result + "0"
+        end
+        k = k + 1
+        next
+      end
+ # `when <Rational>` / `when <Complex>` -- a numeric literal of these
+ # value types can only === a numeric subject. CRuby Rational#== /
+ # Complex#== are value equality; emit a scalar comparison for int/float
+ # subjects, and `0` (never matches) for non-numeric subjects. This
+ # replaces the old generic `tmp == <struct literal>`, which was an
+ # invalid `mrb_int == sp_Rational`/`sp_Complex` in C.
+      if @nd_type[cid] == "RationalNode"
+        num_wc = @nd_rat_num[cid]
+        den_wc = @nd_rat_den[cid]
+        if pred_type == "int"
+          result = result + "(" + den_wc + "LL == 1 && " + tmp + " == " + num_wc + "LL)"
+        elsif pred_type == "float"
+          result = result + "(" + tmp + " == (mrb_float)" + num_wc + "LL / (mrb_float)" + den_wc + "LL)"
+        else
+          result = result + "0"
+        end
+        k = k + 1
+        next
+      end
+      if @nd_type[cid] == "ImaginaryNode"
+ # A purely-imaginary literal (re=0, im=N) === a real subject only
+ # when N==0 and the subject==0.
+        im_zero_wc = imaginary_im_is_zero(cid)
+        if (pred_type == "int" || pred_type == "float") && im_zero_wc == 1
+          result = result + "(" + tmp + " == 0)"
+        else
+          result = result + "0"
+        end
+        k = k + 1
+        next
+      end
       if @nd_type[cid] == "RangeNode"
         left = compile_expr(@nd_left[cid])
         right = compile_expr(@nd_right[cid])
