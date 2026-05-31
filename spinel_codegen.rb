@@ -44267,8 +44267,16 @@ class Compiler
         @needs_bigint = 1
         emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
         p_container = "poly_array"
+      elsif block_ret_p == "poly"
+ # Block returns a poly scalar (sp_RbVal), e.g. `arr.map { |o|
+ # o.poly_field }`. analyze types the result poly_array, so the
+ # accumulator must be a PolyArray; a PtrArray would push the
+ # sp_RbVal through `(void *)` -- a hard C error. Issue #1076.
+        @needs_rb_value = 1
+        emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
+        p_container = "poly_array"
       else
- # obj/ptr/poly block return: keep a PtrArray of the result.
+ # obj/ptr block return: keep a PtrArray of the result.
         emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
         p_container = "ptr_array"
       end
@@ -44299,6 +44307,10 @@ class Compiler
           elsif block_ret_p == "bigint"
             @needs_bigint = 1
             emit("  sp_PolyArray_push(" + tmp_arr + ", sp_box_int(sp_bigint_to_int((sp_Bigint *)" + lastv_p + ")));")
+          elsif block_ret_p == "poly"
+ # lastv_p is already an sp_RbVal; push it straight into the
+ # PolyArray (no (void *) cast, no re-box). Issue #1076.
+            emit("  sp_PolyArray_push(" + tmp_arr + ", " + lastv_p + ");")
           else
             emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)(" + lastv_p + "));")
           end
