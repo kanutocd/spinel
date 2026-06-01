@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <float.h>   /* DBL_MAX / DBL_MIN / DBL_EPSILON for Float::* constants */
 
 /* mrb_int follows pointer width (decided at compile time via intptr_t):
    int64_t on 64-bit hosts -- PCs, no behavior change -- and int32_t on

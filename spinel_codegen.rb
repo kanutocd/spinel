@@ -14546,10 +14546,23 @@ class Compiler
           if nname == "NAN"
             return "(0.0/0.0)"
           end
-        end
-        if rname == "Integer"
+ # Float::MAX / MIN / EPSILON / DIG / MANT_DIG map to the C
+ # <float.h> macros (DBL_*), not to the Float_<name> identifier
+ # the generic fall-through would emit (which is undeclared C).
           if nname == "MAX"
-            return "INT64_MAX"
+            return "DBL_MAX"
+          end
+          if nname == "MIN"
+            return "DBL_MIN"
+          end
+          if nname == "EPSILON"
+            return "DBL_EPSILON"
+          end
+          if nname == "DIG"
+            return "DBL_DIG"
+          end
+          if nname == "MANT_DIG"
+            return "DBL_MANT_DIG"
           end
         end
         if rname == "Math"
@@ -14559,6 +14572,15 @@ class Compiler
           if nname == "E"
             return "2.71828182845904523536"
           end
+        end
+ # Integer has no public constants in CRuby (it is arbitrary
+ # precision), so Integer::MAX / MIN / any member raises a
+ # NameError. Without this arm the generic fall-through emits a
+ # bare `Integer_<name>` identifier that is undeclared C.
+        if rname == "Integer"
+          @needs_setjmp = 1
+          rt_ic = infer_type(nid)
+          return "({ sp_raise_cls(\"NameError\", \"uninitialized constant " + rname + "::" + nname + "\"); " + c_default_val(rt_ic) + "; })"
         end
  # File::SEPARATOR / ALT_SEPARATOR / PATH_SEPARATOR. Issue #891.
         if rname == "File"
