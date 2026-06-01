@@ -21159,6 +21159,55 @@ class Compiler
       emit("  }")
       return rc
     end
+ # `chars`/`bytes`/`codepoints`/`lines` with a block: CRuby yields each
+ # element and returns the receiver (self), unlike the no-block form
+ # which returns the element array. Build the array, iterate it yielding
+ # each element to the block, then return self.
+    if @nd_block[nid] >= 0 && (mname == "chars" || mname == "bytes" || mname == "codepoints" || mname == "lines")
+      @needs_gc = 1
+      self_tmp_sb = new_temp
+      arr_tmp_sb = new_temp
+      i_tmp_sb = new_temp
+      emit("  const char *" + self_tmp_sb + " = " + rc + ";")
+      str_elem_sb = (mname == "chars" || mname == "lines")
+      if mname == "chars"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + arr_tmp_sb + " = sp_str_split(" + self_tmp_sb + ", \"\");")
+      elsif mname == "lines"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + arr_tmp_sb + " = sp_str_lines(" + self_tmp_sb + ");")
+      elsif mname == "bytes"
+        @needs_int_array = 1
+        emit("  sp_IntArray *" + arr_tmp_sb + " = sp_str_bytes(" + self_tmp_sb + ");")
+      else
+        @needs_int_array = 1
+        emit("  sp_IntArray *" + arr_tmp_sb + " = sp_str_codepoints(" + self_tmp_sb + ");")
+      end
+      emit("  SP_GC_ROOT(" + arr_tmp_sb + ");")
+      bp_sb = get_block_param(nid, 0)
+      bp_sb = "_x" if bp_sb == ""
+      if str_elem_sb
+        emit("  for (mrb_int " + i_tmp_sb + " = 0; " + i_tmp_sb + " < sp_StrArray_length(" + arr_tmp_sb + "); " + i_tmp_sb + "++) {")
+        emit("    const char *lv_" + bp_sb + " = sp_StrArray_get(" + arr_tmp_sb + ", " + i_tmp_sb + ");")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_sb, "string")
+      else
+        emit("  for (mrb_int " + i_tmp_sb + " = 0; " + i_tmp_sb + " < sp_IntArray_length(" + arr_tmp_sb + "); " + i_tmp_sb + "++) {")
+        emit("    mrb_int lv_" + bp_sb + " = sp_IntArray_get(" + arr_tmp_sb + ", " + i_tmp_sb + ");")
+        @indent = @indent + 1
+        push_scope
+        declare_var(bp_sb, "int")
+      end
+      redo_label_sb = push_redo_label
+      emit_redo_label(redo_label_sb)
+      compile_stmts_body(@nd_body[@nd_block[nid]])
+      pop_redo_label
+      pop_scope
+      @indent = @indent - 1
+      emit("  }")
+      return self_tmp_sb
+    end
     if mname == "length"
  # Only use hoisted length if the receiver matches (otherwise we'd
  # return the wrong string's length).

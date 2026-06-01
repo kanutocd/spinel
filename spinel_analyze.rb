@@ -5239,6 +5239,16 @@ class Compiler
     if mname == "split"
       return "str_array"
     end
+ # `chars`/`bytes`/`codepoints`/`lines` with a block yield each element
+ # and return the receiver (self), not the element array.
+    if @nd_block[nid] >= 0 && (mname == "chars" || mname == "bytes" || mname == "codepoints" || mname == "lines")
+      if recv >= 0
+        rt_sb = infer_type(recv)
+        if rt_sb == "string" || rt_sb == "mutable_str"
+          return "string"
+        end
+      end
+    end
     if mname == "lines"
       return "str_array"
     end
