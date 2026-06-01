@@ -22795,6 +22795,11 @@ class Compiler
  # nil for a finite value, -1 / +1 for -Inf / +Inf (nullable int).
       return "(isinf(" + rc + ") ? (" + rc + " < 0 ? -1 : 1) : SP_INT_NIL)"
     end
+ # Float#zero? (the int form is handled separately). -0.0 == 0.0 is
+ # true in IEEE, matching CRuby's (-0.0).zero? => true.
+    if mname == "zero?"
+      return "((" + rc + ") == 0.0)"
+    end
     if mname == "truncate"
       return compile_float_round_expr(nid, "trunc", rc)
     end
