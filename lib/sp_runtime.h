@@ -1739,17 +1739,22 @@ static inline const char *sp_File_path(sp_File *f) { return f && f->path ? f->pa
 /* Array#inspect for each typed array: `[elem1, elem2, ...]` with each
    element rendered via its own primitive inspect. Matches CRuby's
    Array#inspect output byte-for-byte. Returns a GC-managed C string. */
-static const char*sp_IntArray_inspect(sp_IntArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(a->data[a->start+i]));}sp_String_append(s,"]");return s->data;}
-static const char*sp_FloatArray_inspect(sp_FloatArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_float_inspect(a->data[i]));}sp_String_append(s,"]");return s->data;}
+/* The inspect helpers NULL-guard their receiver: a NULL array can
+   reach here when an unresolved call (e.g. an unsupported Array method)
+   emits a 0 placeholder that flows into `.inspect`, and dereferencing
+   a->len would segfault. Rendering "[]" stops the crash and degrades to
+   the same shape as the empty-array case. */
+static const char*sp_IntArray_inspect(sp_IntArray*a){if(!a)return "[]";sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(a->data[a->start+i]));}sp_String_append(s,"]");return s->data;}
+static const char*sp_FloatArray_inspect(sp_FloatArray*a){if(!a)return "[]";sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_float_inspect(a->data[i]));}sp_String_append(s,"]");return s->data;}
 static mrb_bool sp_FloatArray_eq(sp_FloatArray*a,sp_FloatArray*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(mrb_int i=0;i<a->len;i++)if(a->data[i]!=b->data[i])return FALSE;return TRUE;}
-static const char*sp_StrArray_inspect(sp_StrArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(a->data[i]));}sp_String_append(s,"]");return s->data;}
+static const char*sp_StrArray_inspect(sp_StrArray*a){if(!a)return "[]";sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(a->data[i]));}sp_String_append(s,"]");return s->data;}
 static mrb_bool sp_StrArray_eq(sp_StrArray*a,sp_StrArray*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(mrb_int i=0;i<a->len;i++)if(!sp_str_eq(a->data[i],b->data[i]))return FALSE;return TRUE;}
 /* Symbol arrays share the IntArray representation (sp_sym = mrb_int),
    but each element is rendered as ":name" via sp_sym_to_s. */
-static inline const char*sp_SymArray_inspect(sp_IntArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,":");sp_String_append(s,sp_sym_to_s((sp_sym)a->data[a->start+i]));}sp_String_append(s,"]");return s->data;}
+static inline const char*sp_SymArray_inspect(sp_IntArray*a){if(!a)return "[]";sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,":");sp_String_append(s,sp_sym_to_s((sp_sym)a->data[a->start+i]));}sp_String_append(s,"]");return s->data;}
 /* PtrArray elements are object pointers without a per-element class
    tag, so we render them as `#<Object>` rather than recursing. */
-static const char*sp_PtrArray_inspect(sp_PtrArray*a){sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,"#<Object>");}sp_String_append(s,"]");return s->data;}
+static const char*sp_PtrArray_inspect(sp_PtrArray*a){if(!a)return "[]";sp_String*s=sp_String_new("[");for(mrb_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,"#<Object>");}sp_String_append(s,"]");return s->data;}
 /* Issue #851: Hash#inspect for typed-hash variants beyond
    sym_int_hash. Renders Ruby's `{"k"=>v, ...}` (string keys),
    `{42=>"v", ...}` (int keys), or `{:k=>v, ...}` (sym keys but
