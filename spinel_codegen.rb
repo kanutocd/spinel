@@ -13616,6 +13616,15 @@ class Compiler
  # is what makes the gate actually effective.
     scan_for_argv(@root_id)
     emit_raw("int main(int argc,char**argv){")
+ # Debug builds: turn on the runtime's native backtrace so sp_raise_cls
+ # snapshots the C stack at each raise and Exception#backtrace formats it.
+    if @debug
+      bt_path = @source_file_path
+      if bt_path == nil || bt_path == ""
+        bt_path = "source.rb"
+      end
+      emit_raw("  sp_bt_enabled = 1; sp_bt_srcfile = \"" + bt_path + "\";")
+    end
  # Gate the ARGV ingest: sp_argv is BSS-zero-initialized
  # (len=0, data=NULL), and sp_mark_externals' loop reads
  # `sp_argv.len` first so an unused-ARGV program never
@@ -18479,8 +18488,15 @@ class Compiler
  # the deferred `caller` portion of #878). Return an empty
  # str_array instead of nil so callers' `.first` / `.length`
  # don't crash.
+ #
+ # Debug builds (--debug): the runtime captured a native backtrace at the
+ # raise (sp_raise_cls -> backtrace()), so return that formatted instead of
+ # empty. Non-debug keeps the empty array (sp_bt_enabled stays 0).
         @needs_str_array = 1
         @needs_gc = 1
+        if @debug
+          return "sp_backtrace_captured()"
+        end
         return "sp_StrArray_new()"
       end
       if mname == "is_a?" || mname == "kind_of?"

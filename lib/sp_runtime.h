@@ -27,6 +27,25 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
+
+/* Opt-in native backtrace (spinel --debug). In a -g, non-inlined build the
+   sp_<method> symbols are present, so sp_raise_cls can snapshot the live C
+   stack at raise time and Exception#backtrace / caller format it into a
+   Ruby-style backtrace — no per-method shadow frames needed. Off unless the
+   generated main() sets sp_bt_enabled (debug builds), so non-debug behaviour
+   and cost are unchanged. execinfo is POSIX-ish; absent on Windows. */
+#if !defined(_WIN32)
+#include <execinfo.h>
+#define SP_BT_AVAILABLE 1
+#else
+#define SP_BT_AVAILABLE 0
+#endif
+static int sp_bt_enabled = 0;          /* set to 1 by debug-build main() */
+static const char *sp_bt_srcfile = ""; /* toplevel .rb path, set by debug main() */
+#if SP_BT_AVAILABLE
+static void *sp_bt_buf[256];       /* frames captured at the last raise */
+static int sp_bt_n = 0;
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -3318,7 +3337,107 @@ static const char *sp_exc_msg[SP_EXC_STACK_MAX];
 static volatile int sp_exc_top = 0;
 static const char *sp_exc_cls[SP_EXC_STACK_MAX];
 static volatile const char *sp_last_exc_cls = sp_str_empty;
-void sp_raise_cls(const char *cls, const char *msg) { if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
+/* ---- Native backtrace formatting (spinel --debug) ---------------------- */
+/* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
+   A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
+   (top-level) or sp_<Class>_<method>, which don't match. Heuristic — a leaf
+   runtime frame may occasionally slip through; refine with an emitted
+   user-method allowlist later. */
+#if SP_BT_AVAILABLE
+static int sp_bt_is_runtime(const char *n) {
+  static const char *pfx[] = {
+    "int_", "str_", "float_", "sym_", "gc_", "bigint", "sprintf", "raise",
+    "exc_", "range", "utf8", "oom", "bt_", "backtrace", "caller", "StrArray",
+    "IntArray", "FloatArray", "PtrArray", "PolyArray", "Str", "Int", "Float",
+    "Hash", "Range", "Complex", "Rational", "Sym", "alloc", "free", "to_s",
+    "dup", "new", "pack", "unpack", "regex", "re_",
+    /* arithmetic/runtime helpers that can raise and sit between the raise
+       and the user frame (ZeroDivisionError via sp_idiv/sp_imod, etc.) */
+    "idiv", "imod", "gcd", "fdiv", "ipow", "iclamp", "div_", "mod_", 0
+  };
+  for (int i = 0; pfx[i]; i++) {
+    size_t l = strlen(pfx[i]);
+    if (strncmp(n, pfx[i], l) == 0) return 1;
+  }
+  return 0;
+}
+
+/* macOS backtrace_symbols line: "<idx> <image> <addr> <symbol> + <off>".
+   Extract the symbol token; NULL if it isn't a keepable user frame. */
+static const char *sp_bt_symbol(const char *line) {
+  const char *p = strstr(line, "0x");           /* the address */
+  if (!p) return 0;
+  while (*p && *p != ' ') p++;                   /* skip the address */
+  while (*p == ' ') p++;                          /* to the symbol */
+  if (!*p) return 0;
+  const char *end = p;
+  while (*end && *end != ' ') end++;             /* symbol ends at space/" +" */
+  size_t len = (size_t)(end - p);
+  if (len == 0 || len > 250) return 0;
+  char sym[256];
+  memcpy(sym, p, len); sym[len] = 0;
+  if (strcmp(sym, "main") == 0) return strdup("<main>");
+  if (strncmp(sym, "sp_", 3) != 0) return 0;     /* skip non-Spinel frames */
+  const char *name = sym + 3;
+  if (sp_bt_is_runtime(name)) return 0;
+  /* sp_Class_method -> Class#method (heuristic: split first '_' after an
+     initial uppercase segment); else just the stripped name. */
+  char out[256];
+  if (name[0] >= 'A' && name[0] <= 'Z') {
+    const char *u = strchr(name, '_');
+    if (u) {
+      size_t cl = (size_t)(u - name);
+      memcpy(out, name, cl);
+      out[cl] = '#';
+      strcpy(out + cl + 1, u + 1);
+      return strdup(out);
+    }
+  }
+  return strdup(name);
+}
+
+static sp_StrArray *sp_bt_format(void **buf, int n) {
+  sp_StrArray *a = sp_StrArray_new();
+  if (!sp_bt_enabled || n <= 0) return a;
+  char **syms = backtrace_symbols(buf, n);
+  if (!syms) return a;
+  const char *src = (sp_bt_srcfile && sp_bt_srcfile[0]) ? sp_bt_srcfile : "(spinel)";
+  for (int i = 0; i < n; i++) {
+    const char *name = sp_bt_symbol(syms[i]);
+    if (!name) continue;
+    sp_StrArray_push(a, sp_sprintf("%s:in `%s'", src, name));
+  }
+  free(syms);
+  return a;
+}
+#endif
+
+/* Backtrace captured at the most recent raise (for Exception#backtrace). */
+static sp_StrArray *sp_backtrace_captured(void) {
+#if SP_BT_AVAILABLE
+  return sp_bt_format(sp_bt_buf, sp_bt_n);
+#else
+  return sp_StrArray_new();
+#endif
+}
+
+/* The current stack, captured now (for Kernel#caller). */
+static sp_StrArray *sp_caller_now(void) {
+#if SP_BT_AVAILABLE
+  if (!sp_bt_enabled) return sp_StrArray_new();
+  void *buf[256];
+  int n = backtrace(buf, 256);
+  return sp_bt_format(buf, n);
+#else
+  return sp_StrArray_new();
+#endif
+}
+
+void sp_raise_cls(const char *cls, const char *msg) {
+#if SP_BT_AVAILABLE
+  if (sp_bt_enabled) sp_bt_n = backtrace(sp_bt_buf, 256);
+#endif
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
 
 /* Issue #781: bridge between the regex compile-error path (which lives
