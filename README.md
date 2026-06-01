@@ -82,7 +82,24 @@ RUBY
 ./spinel app.rb -c           # generates app.c only
 ./spinel app.rb -S           # prints C to stdout
 ./spinel app.rb --rbs sig    # seed inference from .rbs files under sig/
+./spinel app.rb --int-overflow=promote   # overflow promotes to Bigint (CRuby-compatible)
 ```
+
+#### Integer overflow
+
+Integers are native fixed-width words. `--int-overflow=MODE` selects how
+`+`/`-`/`*` behave when a result exceeds that width:
+
+- `raise` (default) -- raise on overflow. Safe (never silently wrong or
+  undefined), but `9223372036854775807 + 1` raises instead of returning a
+  Bignum.
+- `wrap` -- silent two's-complement wrap. Fastest, no check.
+- `promote` -- escalate to arbitrary-precision `Integer` (Bigint), matching
+  CRuby. `9223372036854775807 + 1` returns `9223372036854775808`.
+
+In the default mode, integer locals that an obvious growth pattern would
+overflow (e.g. a `q = q * k` accumulator) are still auto-promoted to Bigint;
+`promote` extends that to every integer operation.
 
 ### RBS type signatures
 
@@ -245,8 +262,9 @@ iterations (csv_process: 4 M allocations eliminated).
 `scan(/re/)`, `split(/re/)`.
 
 **Bigint**: Arbitrary precision integers via mruby-bigint. Auto-promoted
-from loop multiplication patterns (e.g. `q = q * k`). Linked as static
-library -- only included when used.
+from loop multiplication patterns (e.g. `q = q * k`), or from every integer
+operation under `--int-overflow=promote` (see [Integer overflow](#integer-overflow)).
+Linked as static library -- only included when used.
 
 **Fiber**: Cooperative concurrency via `ucontext_t`. `Fiber.new`,
 `Fiber#resume`, `Fiber.yield` with value passing. Captures free
