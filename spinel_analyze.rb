@@ -5540,6 +5540,12 @@ class Compiler
         if is_hash_type(rt) == 1
           return rt
         end
+ # `[[k,v], ...].to_h` on an array of pairs builds a hash; keys and
+ # values keep their boxed types, so the result is a poly_poly_hash.
+        if rt == "poly_array"
+          @needs_poly_poly_hash = 1
+          return "poly_poly_hash"
+        end
       end
     end
     if mname == "fdiv"

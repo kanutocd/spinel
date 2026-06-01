@@ -24581,6 +24581,27 @@ class Compiler
       if mname == "to_a"
         return rc
       end
+ # `[[k,v], ...].to_h` -- build a hash from 2-element pairs. Each pair
+ # is a poly-boxed inner array; key/value are extracted as poly and
+ # stored in a poly_poly_hash (boxed key/value types preserved).
+      if mname == "to_h"
+        @needs_poly_poly_hash = 1
+        @needs_rb_value = 1
+        @needs_gc = 1
+        src_th = new_temp
+        h_th = new_temp
+        i_th = new_temp
+        pair_th = new_temp
+        emit("  sp_PolyArray *" + src_th + " = " + rc + ";")
+        emit("  SP_GC_ROOT(" + src_th + ");")
+        emit("  sp_PolyPolyHash *" + h_th + " = sp_PolyPolyHash_new();")
+        emit("  SP_GC_ROOT(" + h_th + ");")
+        emit("  for (mrb_int " + i_th + " = 0; " + i_th + " < sp_PolyArray_length(" + src_th + "); " + i_th + "++) {")
+        emit("    sp_PolyArray *" + pair_th + " = (sp_PolyArray *)sp_PolyArray_get(" + src_th + ", " + i_th + ").v.p;")
+        emit("    sp_PolyPolyHash_set(" + h_th + ", sp_PolyArray_get(" + pair_th + ", 0), sp_PolyArray_get(" + pair_th + ", 1));")
+        emit("  }")
+        return h_th
+      end
       if mname == "include?"
         args_id_pinc = @nd_arguments[nid]
         if args_id_pinc >= 0
@@ -37454,6 +37475,12 @@ class Compiler
     if mname == "sort!"
       if recv >= 0
         rt = infer_type(recv)
+ # Block-comparator form: sort the receiver in place using the
+ # block's <=> return (was silently ignored, leaving a default sort).
+        if @nd_block[nid] >= 0 && (rt == "int_array" || rt == "str_array" || rt == "float_array")
+          compile_sort_bang_block(nid, rt)
+          return 1
+        end
         if rt == "int_array"
           rc = compile_expr_gc_rooted(recv)
           emit("  sp_IntArray_sort_bang(" + rc + ");")
@@ -37478,6 +37505,51 @@ class Compiler
       end
     end
     0
+  end
+
+ # Array#sort! { |a,b| ... }: sort the receiver in place using the block
+ # as the comparator (bubble sort driven by the block's <=> return).
+ # Uses sp_<T>Array_get/set so any internal start offset is respected.
+  def compile_sort_bang_block(nid, rt)
+    rc = compile_expr_gc_rooted(@nd_receiver[nid])
+    pfx = array_c_prefix(rt)
+    et = elem_type_of_array(rt)
+    ct = c_type(et)
+    bp_a = get_block_param(nid, 0)
+    bp_a = "_a" if bp_a == ""
+    bp_b = get_block_param(nid, 1)
+    bp_b = "_b" if bp_b == ""
+    n_sb = new_temp
+    i_sb = new_temp
+    j_sb = new_temp
+    cmp_sb = new_temp
+    emit("  { mrb_int " + n_sb + " = sp_" + pfx + "_length(" + rc + ");")
+    emit("  for (mrb_int " + i_sb + " = 0; " + i_sb + " < " + n_sb + " - 1; " + i_sb + "++)")
+    emit("    for (mrb_int " + j_sb + " = 0; " + j_sb + " < " + n_sb + " - 1 - " + i_sb + "; " + j_sb + "++) {")
+    emit("      " + ct + " lv_" + bp_a + " = sp_" + pfx + "_get(" + rc + ", " + j_sb + ");")
+    emit("      " + ct + " lv_" + bp_b + " = sp_" + pfx + "_get(" + rc + ", " + j_sb + " + 1);")
+    @indent = @indent + 1
+    push_scope
+    declare_var(bp_a, et)
+    declare_var(bp_b, et)
+    bbody_sb = @nd_body[@nd_block[nid]]
+    bexpr_sb = "0"
+    if bbody_sb >= 0
+      bs_sb = get_stmts(bbody_sb)
+      if bs_sb.length > 0
+        k_sb = 0
+        while k_sb < bs_sb.length - 1
+          compile_stmt(bs_sb[k_sb])
+          k_sb = k_sb + 1
+        end
+        bexpr_sb = compile_expr(bs_sb.last)
+      end
+    end
+    pop_scope
+    @indent = @indent - 1
+    emit("      mrb_int " + cmp_sb + " = " + bexpr_sb + ";")
+    emit("      if (" + cmp_sb + " > 0) { sp_" + pfx + "_set(" + rc + ", " + j_sb + ", lv_" + bp_b + "); sp_" + pfx + "_set(" + rc + ", " + j_sb + " + 1, lv_" + bp_a + "); }")
+    emit("    } }")
   end
 
   def compile_block_iteration_stmt(nid, mname, recv)
