@@ -14493,6 +14493,9 @@ class Compiler
       if rname == "RUBY_ENGINE"
         return "(&(\"\\xff\" \"spinel\")[1])"
       end
+      if rname == "RUBY_DESCRIPTION"
+        return "sp_str_concat(SPL(\"spinel \"), sp_str_concat(SPL(\"4.0.0 \"), sp_ruby_platform_str()))"
+      end
       if rname == "RUBY_PLATFORM"
         return "sp_ruby_platform_str()"
       end
@@ -22068,6 +22071,19 @@ class Compiler
       rtmp_mx = new_temp
       emit("  sp_Range " + rtmp_mx + " = " + rc + ";")
       return "(" + rtmp_mx + ".last - " + rtmp_mx + ".excl)"
+    end
+ # `minmax` -> [min, max] = [first, last - excl] as a 2-element array.
+    if mname == "minmax" && (@nd_arguments[nid] < 0 || get_args(@nd_arguments[nid]).length == 0) && @nd_block[nid] < 0
+      @needs_int_array = 1
+      @needs_gc = 1
+      rtmp_mm = new_temp
+      atmp_mm = new_temp
+      emit("  sp_Range " + rtmp_mm + " = " + rc + ";")
+      emit("  sp_IntArray *" + atmp_mm + " = sp_IntArray_new();")
+      emit("  SP_GC_ROOT(" + atmp_mm + ");")
+      emit("  sp_IntArray_push(" + atmp_mm + ", " + rtmp_mm + ".first);")
+      emit("  sp_IntArray_push(" + atmp_mm + ", " + rtmp_mm + ".last - " + rtmp_mm + ".excl);")
+      return atmp_mm
     end
  # String-range form: `("a".."z").include?("m")`. sp_Range only
  # holds int fields, so a string-typed RangeNode receiver can't

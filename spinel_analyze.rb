@@ -2490,7 +2490,7 @@ class Compiler
       end
  # Issue #890: RUBY_VERSION / RUBY_PLATFORM / RUBY_ENGINE are
  # built-in string constants provided by the runtime.
-      if @nd_name[nid] == "RUBY_VERSION" || @nd_name[nid] == "RUBY_PLATFORM" || @nd_name[nid] == "RUBY_ENGINE"
+      if @nd_name[nid] == "RUBY_VERSION" || @nd_name[nid] == "RUBY_PLATFORM" || @nd_name[nid] == "RUBY_ENGINE" || @nd_name[nid] == "RUBY_DESCRIPTION"
         return "string"
       end
       rname = resolve_const_read_name(@nd_name[nid])
@@ -4424,6 +4424,12 @@ class Compiler
  # Class#name -- the class's source name as
  # a string. Aliases `.to_s` at the runtime helper level
  # (sp_class_to_s), so the return type is the same.
+ # Symbol#id2name is an alias for #to_s: the symbol's name as a String.
+ # Codegen already routes it to sp_sym_to_s; without this the result
+ # mis-types to int and prints the raw symbol id.
+    if mname == "id2name" && recv >= 0 && infer_type(recv) == "symbol"
+      return "string"
+    end
     if mname == "name"
       if recv >= 0 && infer_type(recv) == "encoding"
         return "string"
@@ -5518,6 +5524,11 @@ class Compiler
     if mname == "minmax"
       if recv >= 0
         rt = infer_type(recv)
+ # A Range materializes [min, max] as a 2-element int_array (codegen
+ # builds it from .first / .last - .excl).
+        if rt == "range"
+          return "int_array"
+        end
         et = elem_type_of_array(rt)
         return "tuple:" + et + "," + et
       end
