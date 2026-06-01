@@ -37642,6 +37642,13 @@ class Compiler
       end
     end
 
+    if mname == "each_index"
+      if @nd_block[nid] >= 0
+        compile_each_index_block(nid)
+        return 1
+      end
+    end
+
  # `hash.each_value { |v| ... }` for poly_poly_hash. Other hash
  # shapes can be added here once they surface; the underlying
  # representation is the same `vals[order[i]]` walk.
@@ -41891,6 +41898,35 @@ class Compiler
     push_scope
     declare_var(bp1, elem_type_of_array(rt))
     declare_var(bp2, "int")
+    redo_label = push_redo_label
+    emit_redo_label(redo_label)
+    compile_stmts_body(@nd_body[@nd_block[nid]])
+    pop_redo_label
+    pop_scope
+    @indent = @indent - 1
+    emit("  }")
+    @in_loop = old
+  end
+
+ # Array#each_index { |i| ... }: yield each index 0..len-1. Like
+ # each_with_index but with only the index bound (no element). Returns
+ # the receiver in CRuby; the statement form discards that.
+  def compile_each_index_block(nid)
+    old = @in_loop
+    @in_loop = 1
+    rt = infer_type(@nd_receiver[nid])
+    rc = compile_expr_gc_rooted(@nd_receiver[nid])
+    bp1 = get_block_param(nid, 0)
+    if bp1 == ""
+      bp1 = "_i"
+    end
+    tmp = new_temp
+    pfx = array_c_prefix(rt)
+    emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_" + pfx + "_length(" + rc + "); " + tmp + "++) {")
+    emit("    mrb_int lv_" + bp1 + " = " + tmp + ";")
+    @indent = @indent + 1
+    push_scope
+    declare_var(bp1, "int")
     redo_label = push_redo_label
     emit_redo_label(redo_label)
     compile_stmts_body(@nd_body[@nd_block[nid]])
