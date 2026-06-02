@@ -128,6 +128,14 @@ ifeq ($(YJIT),1)
   BOOTSTRAP_RUBY := $(BOOTSTRAP_RUBY) --yjit
 endif
 
+# FAST_BOOTSTRAP: how `make all` rebuilds the compiler backend.
+#   auto (default) -- use the previous compiled binaries (stage0) via
+#                     tools/fast-bootstrap (~3.5x faster than the CRuby round);
+#                     falls back to CRuby when stage0 is missing/unusable.
+#   0              -- always use the CRuby authority round.
+# `make bootstrap` always forces the CRuby round regardless of this.
+FAST_BOOTSTRAP ?= auto
+
 # Prism library: prefer vendor/prism (fetched via `make deps`), then
 # fall back to the Prism gem if one is installed. Override by setting
 # PRISM_DIR=/path/to/prism on the command line.
@@ -160,7 +168,7 @@ NODE_TABLE_LOADER_STAMP := build/stamps/node_table_loader.rb.stamp
 COMPILER_HELPERS_STAMP := build/stamps/compiler_helpers.rb.stamp
 PARSE_STAMP   := build/stamps/spinel_parse.c.stamp
 
-.PHONY: all parse bootstrap codegen rbs_extract rbs-test regen-rbs-expected test retest fast-test clean-test-results regen-expected bench optcarrot clean install uninstall deps FORCE
+.PHONY: all parse bootstrap bootstrap-fixpoint fast-bootstrap codegen rbs_extract rbs-test regen-rbs-expected test retest fast-test clean-test-results regen-expected bench optcarrot clean install uninstall deps FORCE
 
 # `make all` includes spinel_rbs_extract when vendor/rbs has been
 # fetched (via `make deps`). Without vendor/rbs the extractor is
@@ -365,11 +373,20 @@ build/analyze1.c: build/analyze.ast build/analyze.ir $(CODEGEN_STAMP) $(NODE_TAB
 build/codegen1.c: build/codegen.ast build/codegen.ir $(CODEGEN_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP)
 	$(BOOTSTRAP_RUBY) spinel_codegen.rb build/codegen.ast build/codegen.ir build/codegen1.c
 
+ifeq ($(FAST_BOOTSTRAP),auto)
+# Default: rebuild BOTH compiler binaries from the previous binaries (stage0)
+# via tools/fast-bootstrap, gated on the source stamps. Grouped target (&:)
+# runs the helper once for both. Helper falls back to the CRuby rules
+# (FAST_BOOTSTRAP=0) when stage0 is missing or can't compile the source.
+spinel_analyze$(EXE) spinel_codegen$(EXE) &: $(ANALYZE_STAMP) $(CODEGEN_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP) $(SP_RT_LIB) | spinel_parse$(EXE)
+	@CC='$(CC)' EXE='$(EXE)' BOOTSTRAP_CFLAGS='$(BOOTSTRAP_CFLAGS)' SP_RT_LIB='$(SP_RT_LIB)' LDFLAGS='$(LDFLAGS)' sh tools/fast-bootstrap
+else
 spinel_analyze$(EXE): build/analyze1.c $(SP_RT_LIB)
 	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/analyze1.c $(SP_RT_LIB) $(LDFLAGS) -lm -o spinel_analyze$(EXE)
 
 spinel_codegen$(EXE): build/codegen1.c $(SP_RT_LIB)
 	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/codegen1.c $(SP_RT_LIB) $(LDFLAGS) -lm -o spinel_codegen$(EXE)
+endif
 
 # ---- Self-hosting verification ----
 # After CRuby builds spinel_{analyze,codegen}, run them on each
@@ -415,13 +432,27 @@ build/codegen3.ir: build/codegen.ast build/bin2_analyze$(EXE)
 build/codegen3.c: build/codegen.ast build/codegen3.ir build/bin2_codegen$(EXE)
 	./build/bin2_codegen$(EXE) build/codegen.ast build/codegen3.ir build/codegen3.c
 
-bootstrap: build/analyze3.c build/codegen3.c
+# bootstrap: the CRuby-seeded self-host fixpoint AUTHORITY (CI/release). Always
+# rebuilds the compiler via the CRuby round (forces FAST_BOOTSTRAP=0, never the
+# fast path), then verifies round2 == round3 byte-for-byte.
+bootstrap:
+	@$(MAKE) --no-print-directory FAST_BOOTSTRAP=0 bootstrap-fixpoint
+
+bootstrap-fixpoint: build/analyze3.c build/codegen3.c
 	@diff build/analyze2.ir build/analyze3.ir > /dev/null && echo "analyze.rb: IR fixpoint OK" || (echo "BOOTSTRAP FAILED: analyze.rb IR diverged" && exit 1)
 	@diff build/analyze2.c  build/analyze3.c  > /dev/null && echo "analyze.rb: C fixpoint OK"  || (echo "BOOTSTRAP FAILED: analyze.rb C diverged"  && exit 1)
 	@diff build/codegen2.ir build/codegen3.ir > /dev/null && echo "codegen.rb: IR fixpoint OK" || (echo "BOOTSTRAP FAILED: codegen.rb IR diverged" && exit 1)
 	@diff build/codegen2.c  build/codegen3.c  > /dev/null && echo "codegen.rb: C fixpoint OK"  || (echo "BOOTSTRAP FAILED: codegen.rb C diverged"  && exit 1)
 	cp build/bin2_analyze$(EXE) spinel_analyze$(EXE)
 	cp build/bin2_codegen$(EXE) spinel_codegen$(EXE)
+
+# fast-bootstrap: rebuild the compiler from the PREVIOUS compiled binaries
+# (stage0) instead of the slow CRuby round, then atomically promote. Speed
+# path: no self-host fixpoint (that is `make bootstrap`). Falls back to the
+# CRuby authority path when stage0 is missing or can't compile the current
+# source. See tools/fast-bootstrap.
+fast-bootstrap: spinel_parse$(EXE) $(SP_RT_LIB)
+	@CC='$(CC)' EXE='$(EXE)' BOOTSTRAP_CFLAGS='$(BOOTSTRAP_CFLAGS)' SP_RT_LIB='$(SP_RT_LIB)' LDFLAGS='$(LDFLAGS)' sh tools/fast-bootstrap
 
 # ---- Test ----
 

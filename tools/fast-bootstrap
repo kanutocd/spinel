@@ -1,0 +1,74 @@
+#!/bin/sh
+# fast-bootstrap: rebuild the compiler backend using the PREVIOUS compiled
+# spinel_analyze / spinel_codegen binaries (stage0) instead of the slow CRuby
+# bootstrap round. Speed-priority variant: one stage0 round, then atomic
+# promotion. No fixed-point verification (that is `make bootstrap`).
+#
+# Correctness model: stage0 is the immediately-previous self-hosted compiler.
+# For ordinary edits it compiles the current source correctly. If stage0 is
+# missing, or cannot generate/compile the current source, we exit 42 so the
+# Makefile falls back to the CRuby authority path. The residual risk -- stage0
+# silently MIS-compiling the new source without erroring -- is caught by
+# `make test`, `make bootstrap`, and CI. Use `make bootstrap` when in doubt.
+#
+# All intermediates stay under build/fast-bootstrap/. Canonical build/ and the
+# top-level binaries are touched ONLY on full success, so a failure leaves a
+# clean slate for the CRuby fallback.
+#
+# Env (passed by the Makefile): CC, EXE, BOOTSTRAP_CFLAGS, SP_RT_LIB, LDFLAGS.
+
+CC="${CC:-cc}"
+EXE="${EXE:-}"
+BOOTSTRAP_CFLAGS="${BOOTSTRAP_CFLAGS:--O3 -flto=auto -Wno-all}"
+SP_RT_LIB="${SP_RT_LIB:-lib/libspinel_rt.a}"
+LDFLAGS="${LDFLAGS:-}"
+
+A="spinel_analyze${EXE}"
+G="spinel_codegen${EXE}"
+P="spinel_parse${EXE}"
+FB="build/fast-bootstrap"
+
+fallback() {
+    echo "fast-bootstrap: $1 -- falling back to the CRuby authority path" >&2
+    # Delegate to the normal Make rules, which rebuild the compiler from
+    # CRuby. `exec` so this script's exit status IS the fallback build's.
+    exec make FAST_BOOTSTRAP=0 spinel_analyze${EXE} spinel_codegen${EXE}
+}
+
+# --- stage0 eligibility ---
+[ -x "./$A" ] && [ -x "./$G" ] && [ -x "./$P" ] || fallback "stage0 binaries missing"
+[ -f "$SP_RT_LIB" ] || fallback "runtime lib $SP_RT_LIB missing"
+
+mkdir -p "$FB" build || fallback "cannot create build dirs"
+echo "fast-bootstrap: using existing $A / $G as stage0"
+
+# --- stage1 generation (all intermediates isolated in $FB) ---
+for u in analyze codegen; do
+    "./$P" "spinel_${u}.rb"   "$FB/${u}.ast"                          || fallback "parse spinel_${u}.rb failed"
+    "./$A" "$FB/${u}.ast"     "$FB/${u}.ir"                           || fallback "stage0 analyze of spinel_${u}.rb failed"
+    "./$G" "$FB/${u}.ast"     "$FB/${u}.ir" "$FB/${u}1.c"             || fallback "stage0 codegen of spinel_${u}.rb failed"
+done
+
+# --- compile stage1 binaries (top-level untouched) ---
+$CC $BOOTSTRAP_CFLAGS -Ilib "$FB/analyze1.c" "$SP_RT_LIB" $LDFLAGS -lm -o "$FB/analyze.stage1${EXE}" \
+    || fallback "stage1 analyze cc failed"
+$CC $BOOTSTRAP_CFLAGS -Ilib "$FB/codegen1.c" "$SP_RT_LIB" $LDFLAGS -lm -o "$FB/codegen.stage1${EXE}" \
+    || fallback "stage1 codegen cc failed"
+
+# --- cheap smoke check: stage1 must analyze + codegen the (large) codegen AST
+# and emit non-empty C. Catches a stage1 that links but crashes / emits junk.
+"$FB/analyze.stage1${EXE}" "$FB/codegen.ast" "$FB/smoke.ir"               || fallback "stage1 analyze smoke failed"
+"$FB/codegen.stage1${EXE}" "$FB/codegen.ast" "$FB/smoke.ir" "$FB/smoke.c" || fallback "stage1 codegen smoke failed"
+[ -s "$FB/smoke.c" ] || fallback "stage1 produced empty output"
+
+# --- success: publish intermediates to canonical build/ (keeps Make's graph
+# consistent so a later `make all`/`make test` sees the compiler up-to-date),
+# then atomically promote the binaries. ---
+cp -f "$FB/analyze.ast" build/analyze.ast && cp -f "$FB/codegen.ast" build/codegen.ast || fallback "publish ast failed"
+cp -f "$FB/analyze.ir"  build/analyze.ir  && cp -f "$FB/codegen.ir"  build/codegen.ir  || fallback "publish ir failed"
+cp -f "$FB/analyze1.c"  build/analyze1.c  && cp -f "$FB/codegen1.c"  build/codegen1.c  || fallback "publish c failed"
+mv -f "$FB/analyze.stage1${EXE}" "./$A" || fallback "promote analyze failed"
+mv -f "$FB/codegen.stage1${EXE}" "./$G" || fallback "promote codegen failed"
+rm -f "$FB/smoke.ir" "$FB/smoke.c"
+echo "fast-bootstrap: promoted stage1 $A / $G (CRuby round skipped)"
+exit 0
