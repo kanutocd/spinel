@@ -19131,8 +19131,24 @@ class Compiler
               cand_owner = p[1].to_i
               cand_rt = cls_method_return(cand_owner, mname)
               if c_type(cand_rt) != base_rt_c
-                rt_ok = 0
-                ol = ovr_list.length
+                # Covariant object return: the override returns a proper
+                # subtype of the base's declared return (e.g. an RBS base
+                # `() -> Base` with a subclass `() -> Sub`, or `self`-
+                # returning per-model primitives). The C types differ
+                # (sp_Sub* vs sp_Base*) but the dispatch is still valid —
+                # the switch arm upcasts the result to the base C type.
+                # Without this, an RBS signature on the base method
+                # suppresses dispatch entirely (matz/spinel#1277).
+                base_bt = base_type(base_rt)
+                cand_bt = base_type(cand_rt)
+                if is_obj_type(base_bt) == 1 && is_obj_type(cand_bt) == 1 &&
+                   cls_is_descendant(find_class_idx(cand_bt[4, cand_bt.length - 4]),
+                                     find_class_idx(base_bt[4, base_bt.length - 4])) == 1
+                  ol = ol + 1
+                else
+                  rt_ok = 0
+                  ol = ovr_list.length
+                end
               else
                 ol = ol + 1
               end
@@ -19158,7 +19174,11 @@ class Compiler
                 cand_name = @cls_names[cand_owner2]
                 cand_recv = "(sp_" + cand_name + " *)" + self_expr
                 cand_call = "sp_" + cand_name + "_" + sanitize_name(mname) + "(" + cand_recv + build_call_tail(ca, bp, yargs) + ")"
-                emit("    case " + cand_cid.to_s + "LL: " + tmp + " = " + cand_call + "; break;")
+                # Upcast the override result to the base return C type:
+                # with a covariant object return the arm's call yields a
+                # subtype pointer (sp_Sub *) while tmp is the base type
+                # (sp_Base *). A no-op when the types already match.
+                emit("    case " + cand_cid.to_s + "LL: " + tmp + " = (" + rt_c + ")" + cand_call + "; break;")
                 ol2 = ol2 + 1
               end
               emit("    default: " + tmp + " = " + default_call + "; break;")
