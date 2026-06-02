@@ -19131,8 +19131,30 @@ class Compiler
               cand_owner = p[1].to_i
               cand_rt = cls_method_return(cand_owner, mname)
               if c_type(cand_rt) != base_rt_c
-                rt_ok = 0
-                ol = ovr_list.length
+                # Covariant object return: the override returns a proper
+                # subtype of the base's declared return (e.g. an RBS base
+                # `() -> Base` with a subclass `() -> Sub`, or `self`-
+                # returning per-model primitives). The C types differ
+                # (sp_Sub* vs sp_Base*) but the dispatch is still valid —
+                # the switch arm upcasts the result to the base C type.
+                # Without this, an RBS signature on the base method
+                # suppresses dispatch entirely (matz/spinel#1277).
+                base_bt = base_type(base_rt)
+                cand_bt = base_type(cand_rt)
+                covariant = 0
+                if is_obj_type(base_bt) == 1 && is_obj_type(cand_bt) == 1
+                  # Strip the "obj_" prefix (codebase idiom) to name the
+                  # classes, then test the subtype relationship.
+                  base_cls = find_class_idx(base_bt[4, base_bt.length - 4])
+                  cand_cls = find_class_idx(cand_bt[4, cand_bt.length - 4])
+                  covariant = cls_is_descendant(cand_cls, base_cls)
+                end
+                if covariant == 1
+                  ol = ol + 1
+                else
+                  rt_ok = 0
+                  ol = ovr_list.length
+                end
               else
                 ol = ol + 1
               end
@@ -19158,7 +19180,17 @@ class Compiler
                 cand_name = @cls_names[cand_owner2]
                 cand_recv = "(sp_" + cand_name + " *)" + self_expr
                 cand_call = "sp_" + cand_name + "_" + sanitize_name(mname) + "(" + cand_recv + build_call_tail(ca, bp, yargs) + ")"
-                emit("    case " + cand_cid.to_s + "LL: " + tmp + " = " + cand_call + "; break;")
+                # Upcast covariant object returns to the base C type: the
+                # arm's call yields a subtype pointer (sp_Sub *) while tmp is
+                # the base type (sp_Base *). Only emit the cast when the C
+                # types actually differ, so an exact-match arm keeps full
+                # compiler diagnostics (matz/spinel#1277).
+                cand_arm_rt = cls_method_return(cand_owner2, mname)
+                arm_val = cand_call
+                if c_type(cand_arm_rt) != rt_c
+                  arm_val = "(" + rt_c + ")" + cand_call
+                end
+                emit("    case " + cand_cid.to_s + "LL: " + tmp + " = " + arm_val + "; break;")
                 ol2 = ol2 + 1
               end
               emit("    default: " + tmp + " = " + default_call + "; break;")
