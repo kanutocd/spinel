@@ -18008,6 +18008,12 @@ class Compiler
       if mname == "to_f"
         return "({ sp_Time _t = " + rc + "; (mrb_float)_t.tv_sec + (mrb_float)_t.tv_nsec / 1e9; })"
       end
+ # Time#to_s -- the local "YYYY-MM-DD HH:MM:SS +ZZZZ" form (no
+ # subsecond fraction). sp_time_inspect_v already renders exactly
+ # this; Time#inspect (which adds nanoseconds) is a separate case.
+      if mname == "to_s"
+        return "sp_time_inspect_v(" + rc + ")"
+      end
  # Time#iso8601 / Time#strftime — format the time as a
  # string. iso8601 is a no-arg fixed format (the canonical
  # "%Y-%m-%dT%H:%M:%S%z" with the colon-separated offset
@@ -42596,6 +42602,23 @@ class Compiler
       if at == "curried"
  # A fully-applied curried proc materialises to its (int) result.
         emit("  printf(\"%lld" + bsl_n + "\", (long long)sp_lam_to_int(" + val + "));")
+        k = k + 1
+        next
+      end
+ # `puts nil` and `puts nil.itself` print a single empty line. Gate on
+ # the *syntactic* form (a nil literal, or `.itself` on a nil receiver)
+ # rather than the inferred "nil" type: a module/ivar accessor can infer
+ # as "nil" while carrying a real int value, and printing those as empty
+ # would silently drop the value. Definite-nil forms
+ # compile to `0`, so the int arm below would otherwise print `0`.
+      puts_nil_lit = 0
+      if @nd_type[aid] == "NilNode"
+        puts_nil_lit = 1
+      elsif @nd_type[aid] == "CallNode" && @nd_name[aid] == "itself" && @nd_receiver[aid] >= 0 && infer_type(@nd_receiver[aid]) == "nil"
+        puts_nil_lit = 1
+      end
+      if puts_nil_lit == 1
+        emit("  (void)(" + val + "); putchar('" + bsl_n + "');")
         k = k + 1
         next
       end

@@ -4565,7 +4565,7 @@ class Compiler
  # methods sharing the names (rare in idiomatic Ruby; possible
  # if a class wraps date arithmetic) still flow through normal
  # resolution.
-    if mname == "iso8601" || mname == "strftime"
+    if mname == "iso8601" || mname == "strftime" || mname == "to_s"
       if recv >= 0 && infer_type(recv) == "time"
         return "string"
       end
