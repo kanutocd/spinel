@@ -3611,6 +3611,30 @@ class Compiler
       end
     end
 
+ # `hash[k] = v` (hash element write) — same Ruby semantics: the
+ # assignment expression evaluates to v. Mirrors the attr-writer arm
+ # above so `x = (h[k] = v)` types `x` from the value, not the int
+ # default. int-/string-valued variants store a fixed type; poly-valued
+ # variants carry the value's natural type through.
+    if mname == "[]=" && recv >= 0
+      rt_haw = base_type(infer_type(recv))
+      if is_hash_type(rt_haw) == 1
+        args_id_haw = @nd_arguments[nid]
+        if args_id_haw >= 0
+          arg_ids_haw = get_args(args_id_haw)
+          if arg_ids_haw.length >= 2
+            if rt_haw == "str_int_hash" || rt_haw == "sym_int_hash" || rt_haw == "int_int_hash"
+              return "int"
+            end
+            if rt_haw == "str_str_hash" || rt_haw == "sym_str_hash" || rt_haw == "int_str_hash"
+              return "string"
+            end
+            return infer_type(arg_ids_haw[arg_ids_haw.length - 1])
+          end
+        end
+      end
+    end
+
  # User-defined top-level method (bare call): take precedence over
  # name-based builtin inference so `def minmax(a,b); ... end; minmax(1,2)`
  # binds to the user def instead of Array#minmax's tuple return.

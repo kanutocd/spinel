@@ -512,6 +512,9 @@ class Compiler
  # exception path of a `begin..ensure..end`.
     @ensure_emit_depth = 0
     @needs_mutable_str = 0
+ # Ruby type of the value temp produced by the last compile_hash_set_expr,
+ # so callers can box / type the assigned-value result it returns.
+    @hash_set_expr_vtype = ""
     @needs_rb_value = 0
     @needs_regexp = 0
     @needs_rand = 0
@@ -34954,6 +34957,28 @@ class Compiler
  # vt=="string" inside the modifier-if body and skip the
  # sym_poly_hash literal arm. See #615.
       vt = find_var_declared_type(lname)
+ # `x = (h[k] = v)`: expression-form hash []= mutates the hash and
+ # yields the assigned value. Emit the set as statements and assign the
+ # value temp. Paired with the analyzer's []= type arm so lv_x's slot
+ # type already matches the temp's natural type.
+      ev_eff_lw = @nd_expression[nid]
+      if ev_eff_lw >= 0 && @nd_type[ev_eff_lw] == "ParenthesesNode"
+        pb_lw = @nd_body[ev_eff_lw]
+        if pb_lw >= 0
+          ps_lw = get_stmts(pb_lw)
+          if ps_lw.length == 1
+            ev_eff_lw = ps_lw[0]
+          end
+        end
+      end
+      if ev_eff_lw >= 0 && @nd_type[ev_eff_lw] == "CallNode" && @nd_name[ev_eff_lw] == "[]="
+        set_tmp_lw = compile_hash_set_expr(ev_eff_lw)
+        if set_tmp_lw != ""
+          emit("  " + vref + " = " + set_tmp_lw + ";")
+          set_var_type(lname, @hash_set_expr_vtype)
+          return
+        end
+      end
  # Empty array literal: create the correct array type. Returning
  # early here also preserves the scope's already-promoted type
  # , #85) — the fall-through path below would clobber
@@ -40793,7 +40818,20 @@ class Compiler
         k = k + 1
       end
       if bs.length > 0
-        bexpr = box_expr_to_poly(bs.last)
+ # A value-producing hash `[]=` as the block's final expression (the
+ # `Hash.new { |h, k| h[k] = 0 }` shape) can't go through compile_expr
+ # -- expression-form hash []= isn't resolved there. Emit the set as
+ # statements and box the assigned-value temp as the proc's return.
+        last_set = bs.last
+        set_tmp = ""
+        if @nd_type[last_set] == "CallNode" && @nd_name[last_set] == "[]="
+          set_tmp = compile_hash_set_expr(last_set)
+        end
+        if set_tmp != ""
+          bexpr = box_value_to_poly(@hash_set_expr_vtype, set_tmp)
+        else
+          bexpr = box_expr_to_poly(bs.last)
+        end
       end
     end
     body_lines = @out_lines.join(10.chr)
@@ -40814,6 +40852,123 @@ class Compiler
     fn = fn + "  return " + bexpr + ";" + 10.chr + "}" + 10.chr
     @deferred_lambda = @deferred_lambda + fn
     fname
+  end
+
+ # Expression-form hash `[]=`: Ruby's `(h[k] = v)` mutates the hash AND
+ # evaluates to `v`. Emit the set as ordinary statements (a value temp,
+ # then sp_*Hash_set) and return the C temp holding the assigned value in
+ # its natural type -- no GCC statement expression. @hash_set_expr_vtype is
+ # set to that temp's Ruby type so the caller can box / type the result.
+ # Returns "" when recv is not a supported hash; caller falls back then.
+  def compile_hash_set_expr(nid)
+    recv = @nd_receiver[nid]
+    rt = infer_type(recv)
+    if @nd_type[recv] == "LocalVariableReadNode"
+      decl_rt = find_var_declared_type(@nd_name[recv])
+      if decl_rt != "" && decl_rt != rt && is_hash_type(decl_rt) == 1
+        rt = decl_rt
+      end
+    end
+    if is_nullable_pointer_type(rt) == 1 && is_nullable_type(rt) == 1
+      rt = base_type(rt)
+    end
+    if is_hash_type(rt) == 0
+      return ""
+    end
+    setter = hash_setter_cname(rt)
+    if setter == ""
+      return ""
+    end
+    args_id = @nd_arguments[nid]
+    if args_id < 0
+      return ""
+    end
+    arg_ids = get_args(args_id)
+    if arg_ids.length != 2
+      return ""
+    end
+    key_id = arg_ids[0]
+    val_id = arg_ids[1]
+    vt = infer_type(val_id)
+ # Determine the value group and bail (return "" -> caller falls back)
+ # BEFORE emitting anything, so a partial emit never escapes. An
+ # int-/string-valued hash whose value isn't coercible to that type is
+ # the empty-`{}`-not-promoted shape (e.g. an array stored into an
+ # un-promoted str_int_hash); the statement form mishandles it too, so
+ # leave it on the existing path rather than forcing a bad cast.
+    group = "poly"
+    if rt == "int_int_hash" || rt == "str_int_hash" || rt == "sym_int_hash"
+      group = "int"
+      if vt != "" && vt != "int" && vt != "bool" && vt != "bigint" && vt != "poly"
+        return ""
+      end
+    elsif rt == "int_str_hash" || rt == "str_str_hash" || rt == "sym_str_hash"
+      group = "str"
+      if vt != "" && vt != "string" && vt != "mutable_str" && vt != "poly"
+        return ""
+      end
+    end
+    rc = compile_expr_gc_rooted(recv)
+ # `h[k] = v` on a frozen hash raises FrozenError, mirroring
+ # compile_bracket_assign's statement-form guard.
+    @needs_setjmp = 1
+    emit("  if (sp_gc_is_frozen(" + rc + ")) sp_raise_frozen_hash();")
+    key = compile_hash_key_for_set(rt, key_id)
+    tmp = new_temp
+    if group == "int"
+      emit("  mrb_int " + tmp + " = " + compile_expr_as_int(val_id) + ";")
+      emit("  " + setter + "(" + rc + ", " + key + ", " + tmp + ");")
+      @hash_set_expr_vtype = "int"
+      return tmp
+    end
+    if group == "str"
+      emit("  const char *" + tmp + " = " + compile_expr_as_string(val_id) + ";")
+      emit("  " + setter + "(" + rc + ", " + key + ", " + tmp + ");")
+      @hash_set_expr_vtype = "string"
+      return tmp
+    end
+ # poly-valued hashes: temp keeps the value's NATURAL type (so the
+ # consuming slot gets `int` for `h[k] = 2`, not `poly`); box only as
+ # the setter argument.
+    emit("  " + c_type(vt) + " " + tmp + " = " + compile_expr_gc_rooted(val_id) + ";")
+    emit("  " + setter + "(" + rc + ", " + key + ", " + box_value_to_poly(vt, tmp) + ");")
+    @hash_set_expr_vtype = vt
+    tmp
+  end
+
+ # Key expression for a hash `[]=`, matching compile_bracket_assign's
+ # per-variant key conversion.
+  def compile_hash_key_for_set(rt, key_id)
+    if rt == "str_int_hash" || rt == "str_str_hash" || rt == "str_poly_hash"
+      return compile_expr_as_string(key_id)
+    end
+    if rt == "poly_poly_hash"
+      return box_expr_to_poly(key_id)
+    end
+    k = compile_expr(key_id)
+    if infer_type(key_id) == "poly"
+      if rt == "sym_int_hash" || rt == "sym_str_hash" || rt == "sym_poly_hash"
+        return "(" + k + ").v.sym"
+      end
+      if rt == "int_int_hash" || rt == "int_str_hash"
+        return "(" + k + ").v.i"
+      end
+    end
+    k
+  end
+
+ # sp_*Hash_set C name for a typed-hash variant, or "" if unsupported.
+  def hash_setter_cname(rt)
+    return "sp_IntIntHash_set" if rt == "int_int_hash"
+    return "sp_IntStrHash_set" if rt == "int_str_hash"
+    return "sp_StrIntHash_set" if rt == "str_int_hash"
+    return "sp_StrStrHash_set" if rt == "str_str_hash"
+    return "sp_StrPolyHash_set" if rt == "str_poly_hash"
+    return "sp_SymIntHash_set" if rt == "sym_int_hash"
+    return "sp_SymStrHash_set" if rt == "sym_str_hash"
+    return "sp_SymPolyHash_set" if rt == "sym_poly_hash"
+    return "sp_PolyPolyHash_set" if rt == "poly_poly_hash"
+    ""
   end
 
   def compile_proc_literal(nid, blk_param_types = "", lambda_flag = 0)
