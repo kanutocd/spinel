@@ -6980,6 +6980,9 @@ class Compiler
           if mname == "home" || mname == "pwd" || mname == "getwd"
             return "string"
           end
+          if mname == "exist?"
+            return "bool"
+          end
         end
         if rcname == "Integer"
           if mname == "sqrt"
@@ -9717,6 +9720,18 @@ class Compiler
         on = symbol_node_literal(@nd_old_name[sid])
         if nn != "" && on != ""
           collect_class_method_alias(ci, nn, on)
+        end
+      end
+ # `alias_method :new, :old` -- the method-call form of `alias`.
+ # Same effect: copy the source method's slot under the new name.
+      if @nd_type[sid] == "CallNode" && @nd_receiver[sid] < 0 && @nd_name[sid] == "alias_method"
+        am_args = get_args(@nd_arguments[sid])
+        if am_args.length == 2
+          nn_am = symbol_node_literal(am_args[0])
+          on_am = symbol_node_literal(am_args[1])
+          if nn_am != "" && on_am != ""
+            collect_class_method_alias(ci, nn_am, on_am)
+          end
         end
       end
       if @nd_type[sid] == "UndefNode"

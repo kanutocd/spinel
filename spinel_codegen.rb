@@ -27703,6 +27703,9 @@ class Compiler
         if mname == "pwd" || mname == "getwd"
           return "sp_dir_pwd()"
         end
+        if mname == "exist?"
+          return "sp_file_directory(" + compile_arg0(nid) + ")"
+        end
       end
       if rcname == "StringScanner"
         if mname == "new"
