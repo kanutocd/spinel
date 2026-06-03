@@ -222,6 +222,7 @@ const char *sp_sprintf(const char *fmt, ...);
 #include "sp_core.h"
 
 static sp_Range sp_range_new(mrb_int f,mrb_int l,mrb_int e){sp_Range r;r.first=f;r.last=l;r.excl=e;return r;}
+static mrb_bool sp_range_eq(sp_Range a,sp_Range b){return a.first==b.first&&a.last==b.last&&a.excl==b.excl;}
 /* `Range#include?`/`#cover?` on the boxed (SP_TAG_OBJ cls_id
    SP_BUILTIN_RANGE) Range value. The direct sp_Range typed path
    inlines this same check via compile_range_method_expr; poly-recv

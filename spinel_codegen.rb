@@ -8889,6 +8889,7 @@ class Compiler
     emit_raw("static const char*sp_int_chr(mrb_int n){char*s=(char*)malloc(2);s[0]=(char)n;s[1]=0;return s;}")
     emit_raw("typedef struct{mrb_int first;mrb_int last;mrb_int excl;}sp_Range;")
     emit_raw("static sp_Range sp_range_new(mrb_int f,mrb_int l,mrb_int e){sp_Range r;r.first=f;r.last=l;r.excl=e;return r;}")
+    emit_raw("static mrb_bool sp_range_eq(sp_Range a,sp_Range b){return a.first==b.first&&a.last==b.last&&a.excl==b.excl;}")
     if @needs_system == 1
       emit_raw("static int sp_last_status = 0;")
     end
@@ -18508,6 +18509,27 @@ class Compiler
       if mname == "inspect"
         return "(" + rc + " ? \"true\" : \"false\")"
       end
+ # TrueClass#=== / FalseClass#=== is case equality, i.e. plain `==`:
+ # true only when the argument is a boolean with the same value.
+      if mname == "==="
+        args_be = @nd_arguments[nid]
+        if args_be >= 0
+          a_be = get_args(args_be)
+          if a_be.length >= 1
+            at_be = base_type(infer_type(a_be[0]))
+            if at_be == "bool"
+              return "(" + rc + " == " + compile_expr(a_be[0]) + ")"
+            end
+            if at_be == "poly"
+              @needs_rb_value = 1
+              t_be = new_temp
+              emit("  sp_RbVal " + t_be + " = " + compile_expr(a_be[0]) + ";")
+              return "(" + t_be + ".tag == SP_TAG_BOOL && " + t_be + ".v.b == " + rc + ")"
+            end
+          end
+        end
+        return "FALSE"
+      end
     end
 
  # nil methods (receiver inferred as "nil" — only .inspect and .to_s
@@ -22910,6 +22932,24 @@ class Compiler
  # Exclusive range excludes `last`: upper bound is `last - excl`.
       return "(" + arg + " >= " + tmp + ".first && " + arg + " <= " + tmp + ".last - " + tmp + ".excl)"
     end
+ # Range#== / #eql?: two ranges are equal when their first, last, and
+ # exclusivity all match. A non-range argument is never equal. Without
+ # this, `(1..5) == (1..5)` compiled to a raw `sp_Range == sp_Range`,
+ # which is not a valid C comparison.
+    if mname == "==" || mname == "eql?"
+      args_re = @nd_arguments[nid]
+      if args_re >= 0
+        a_re = get_args(args_re)
+        if a_re.length >= 1 && base_type(infer_type(a_re[0])) == "range"
+          self_re = new_temp
+          other_re = new_temp
+          emit("  sp_Range " + self_re + " = " + rc + ";")
+          emit("  sp_Range " + other_re + " = " + compile_expr(a_re[0]) + ";")
+          return "(" + self_re + ".first == " + other_re + ".first && " + self_re + ".last == " + other_re + ".last && " + self_re + ".excl == " + other_re + ".excl)"
+        end
+      end
+      return "FALSE"
+    end
     if mname == "overlap?"
  # `(a..b).overlap?(c..d)` for two numeric ranges reduces to
  # `a <= d && c <= b`. The arg must itself be a range (literal
@@ -22928,6 +22968,24 @@ class Compiler
         end
       end
       return "FALSE"
+    end
+ # Range#each without a block returns an Enumerator in CRuby; spinel
+ # materializes the element array so `.to_a` / `.map` / chaining work.
+ # Same lowering as #to_a's integer path.
+    if mname == "each" && @nd_block[nid] < 0
+      @needs_int_array = 1
+      @needs_gc = 1
+      range_nid_e = resolve_literal_range_recv(nid)
+      if range_nid_e >= 0
+        rright_e = compile_expr(@nd_right[range_nid_e])
+        if range_excl_end(range_nid_e) == 1
+          rright_e = "(" + rright_e + ") - 1"
+        end
+        return "sp_IntArray_from_range(" + compile_expr(@nd_left[range_nid_e]) + ", " + rright_e + ")"
+      end
+      rtmp_e = new_temp
+      emit("  sp_Range " + rtmp_e + " = " + rc + ";")
+      return "sp_IntArray_from_range(" + rtmp_e + ".first, " + rtmp_e + ".last - " + rtmp_e + ".excl)"
     end
     if mname == "to_a"
       range_nid = resolve_literal_range_recv(nid)
@@ -31468,6 +31526,19 @@ class Compiler
         return "(" + time_cmp_expr(le_t, re_t) + " == 0)"
       end
       return "(" + time_cmp_expr(le_t, re_t) + " != 0)"
+    end
+ # Range == Range / != — equal first, last, and exclusivity. sp_Range
+ # is a value-type struct, so plain C `==` is invalid; route through
+ # sp_range_eq. A range only compares equal to another range.
+    if lt == "range" && at == "range"
+      le_rg = compile_expr(recv)
+      re_rg = arg_id >= 0 ? compile_expr(arg_id) : "((sp_Range){0,0,0})"
+      if op == "=="
+        return "sp_range_eq(" + le_rg + ", " + re_rg + ")"
+      end
+      return "(!sp_range_eq(" + le_rg + ", " + re_rg + "))"
+    elsif (lt == "range" || at == "range") && lt != "poly" && at != "poly"
+      return op == "==" ? "FALSE" : "TRUE"
     end
  # Cross-type prim-vs-obj. Integer#== / Float#== fall back to
  # `other == self` via num_equal (numeric.c); String, Symbol,

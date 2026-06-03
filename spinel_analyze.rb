@@ -4269,6 +4269,9 @@ class Compiler
     if mname == "=="
       return "bool"
     end
+    if mname == "===" || mname == "eql?"
+      return "bool"
+    end
     if mname == "!="
       return "bool"
     end
@@ -7294,6 +7297,14 @@ class Compiler
         return infer_type(recv)
       end
       return "string"
+    end
+ # Range#each without a block materializes to an int_array (matches
+ # the codegen lowering); the block form returns the receiver.
+    if mname == "each" && recv >= 0 && @nd_block[nid] < 0
+      if base_type(infer_type(recv)) == "range"
+        @needs_int_array = 1
+        return "int_array"
+      end
     end
     if mname == "to_a"
       if recv >= 0
