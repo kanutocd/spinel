@@ -264,6 +264,16 @@ trap 'rm -f "$AST_TMP" "$IR_TMP" "$EVAL_TMP" "$SEED_TMP"; [ -n "$C_TMP_DIR" ] &&
 if [ "$DEBUG" -eq 1 ]; then
   export SPINEL_DEBUG=1
   EXTRA_FLAGS="$EXTRA_FLAGS -g"
+  # Native Exception#backtrace on Linux: glibc's backtrace_symbols only
+  # resolves frames whose symbols are in the dynamic symbol table. Debug
+  # builds emit user methods with external linkage; -rdynamic exports them
+  # so backtrace_symbols can name them. macOS resolves via the Mach-O symbol
+  # table already; Windows has no backtrace (SP_BT_AVAILABLE=0) and -rdynamic
+  # is ELF-only — so it's a Linux/BSD-only flag (skip Darwin *and* MinGW/Cygwin).
+  case "$(uname -s 2>/dev/null)" in
+    Darwin|MINGW*|MSYS*|CYGWIN*) ;;
+    *) EXTRA_FLAGS="$EXTRA_FLAGS -rdynamic" ;;
+  esac
 fi
 
 # Step 1: Parse. spinel_parse is C-only; build it via `make parse`

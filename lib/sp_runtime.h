@@ -27,6 +27,25 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
+
+/* Opt-in native backtrace (spinel --debug). In a -g, non-inlined build the
+   sp_<method> symbols are present, so sp_raise_cls can snapshot the live C
+   stack at raise time and Exception#backtrace / caller format it into a
+   Ruby-style backtrace — no per-method shadow frames needed. Off unless the
+   generated main() sets sp_bt_enabled (debug builds), so non-debug behaviour
+   and cost are unchanged. execinfo is POSIX-ish; absent on Windows. */
+#if !defined(_WIN32)
+#include <execinfo.h>
+#define SP_BT_AVAILABLE 1
+#else
+#define SP_BT_AVAILABLE 0
+#endif
+static int sp_bt_enabled = 0;          /* set to 1 by debug-build main() */
+static const char *sp_bt_srcfile = ""; /* toplevel .rb path, set by debug main() */
+#if SP_BT_AVAILABLE
+static void *sp_bt_buf[256];       /* frames captured at the last raise */
+static int sp_bt_n = 0;
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -3398,7 +3417,143 @@ static const char *sp_exc_msg[SP_EXC_STACK_MAX];
 static volatile int sp_exc_top = 0;
 static const char *sp_exc_cls[SP_EXC_STACK_MAX];
 static volatile const char *sp_last_exc_cls = sp_str_empty;
-void sp_raise_cls(const char *cls, const char *msg) { if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
+/* ---- Native backtrace formatting (spinel --debug) ---------------------- */
+/* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
+   A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
+   (top-level) or sp_<Class>_<method>, which don't match. Heuristic — a leaf
+   runtime frame may occasionally slip through; refine with an emitted
+   user-method allowlist later. */
+#if SP_BT_AVAILABLE
+static int sp_bt_is_runtime(const char *n) {
+  static const char *pfx[] = {
+    "int_", "str_", "float_", "sym_", "gc_", "bigint", "sprintf", "raise",
+    "exc_", "range", "utf8", "oom", "bt_", "backtrace", "caller", "StrArray",
+    "IntArray", "FloatArray", "PtrArray", "PolyArray", "Str", "Int", "Float",
+    "Hash", "Range", "Complex", "Rational", "Sym", "alloc", "free", "to_s",
+    "dup", "new", "pack", "unpack", "regex", "re_",
+    /* arithmetic/runtime helpers that can raise and sit between the raise
+       and the user frame (ZeroDivisionError via sp_idiv/sp_imod, etc.) */
+    "idiv", "imod", "gcd", "fdiv", "ipow", "iclamp", "div_", "mod_", 0
+  };
+  for (int i = 0; pfx[i]; i++) {
+    size_t l = strlen(pfx[i]);
+    if (strncmp(n, pfx[i], l) == 0) return 1;
+  }
+  return 0;
+}
+
+/* Extract the symbol token from a backtrace_symbols line. Two formats:
+     - glibc/Linux: "<module>(<symbol>+0x<off>) [0x<addr>]". The symbol is
+       empty for unresolved frames (static or stripped fns) -> skip.
+     - macOS:       "<idx> <image> <addr> <symbol> + <off>".
+   Returns NULL if it isn't a keepable user frame. Detect Linux by the '('
+   that delimits the symbol (the macOS format has none). */
+static const char *sp_bt_symbol(const char *line) {
+  char sym[256];
+  const char *lp = strchr(line, '(');
+  if (lp) {                                       /* glibc/Linux paren form */
+    const char *p = lp + 1;
+    const char *end = p;
+    while (*end && *end != '+' && *end != ')') end++;
+    size_t len = (size_t)(end - p);
+    if (len == 0 || len > 250) return 0;          /* unresolved (static/stripped) */
+    memcpy(sym, p, len); sym[len] = 0;
+  } else {                                        /* macOS: "<idx> <image> <addr> <symbol> + <off>" */
+    /* The symbol is the token just before the " + <off>" delimiter. Parse
+       backward from the last " + " rather than forward from "0x" — an image
+       path containing "0x" (e.g. /path/0x_proj/bin) would otherwise misparse. */
+    const char *plus = 0, *q = line;
+    while ((q = strstr(q, " + ")) != 0) { plus = q; q += 3; }
+    if (!plus) return 0;
+    const char *end = plus;
+    const char *p = end;
+    while (p > line && p[-1] != ' ') p--;          /* back up to the symbol's start */
+    size_t len = (size_t)(end - p);
+    if (len == 0 || len > 250) return 0;
+    memcpy(sym, p, len); sym[len] = 0;
+  }
+  if (strcmp(sym, "main") == 0) return strdup("<main>");
+  if (strncmp(sym, "sp_", 3) != 0) return 0;     /* skip non-Spinel frames */
+  const char *name = sym + 3;
+  if (sp_bt_is_runtime(name)) return 0;
+  /* De-mangle sp_<Class>_<method> back to Ruby. A Spinel symbol is a path of
+     CamelCase class segments (each from a `::`, joined by `_`) followed by the
+     method; the method is the first segment that starts lowercase. A literal
+     `cls` segment marks a singleton method:
+       sp_Helper_cls_boom          -> Helper.boom
+       sp_Tep_Url_parse_query      -> Tep::Url#parse_query
+       sp_Tep_AuthOAuth2_cls_find  -> Tep::AuthOAuth2.find
+       sp_toplevel                 -> toplevel   (top-level method, no class)
+     (Method names stay sanitized — e.g. enabled? is enabled_p; reversing that
+     needs the emitted name table, a separate refinement.) */
+  const char *mstart = 0;   /* first lowercase-starting segment = the method */
+  for (const char *p = name; *p; p++) {
+    int seg_start = (p == name) || (p[-1] == '_');
+    if (seg_start && *p >= 'a' && *p <= 'z') { mstart = p; break; }
+  }
+  if (!mstart) return strdup(name);            /* all-uppercase: leave as-is */
+  if (mstart == name) {                        /* no class path: top-level */
+    if (strncmp(name, "cls_", 4) == 0) return strdup(name + 4);  /* top-level singleton */
+    return strdup(name);
+  }
+  char out[256]; size_t o = 0;
+  const char *meth; char sep;
+  if (strncmp(mstart, "cls_", 4) == 0) { meth = mstart + 4; sep = '.'; }  /* singleton */
+  else                                 { meth = mstart;     sep = '#'; }  /* instance */
+  for (const char *p = name; p < mstart - 1 && o + 2 < sizeof(out); p++) {
+    if (*p == '_') { out[o++] = ':'; out[o++] = ':'; }   /* class-path `_` was a `::` */
+    else out[o++] = *p;
+  }
+  if (o + 1 < sizeof(out)) out[o++] = sep;
+  size_t ml = strlen(meth);
+  if (o + ml < sizeof(out)) { memcpy(out + o, meth, ml); o += ml; }
+  out[o] = 0;
+  return strdup(out);
+}
+
+static sp_StrArray *sp_bt_format(void **buf, int n) {
+  sp_StrArray *a = sp_StrArray_new();
+  if (!sp_bt_enabled || n <= 0) return a;
+  char **syms = backtrace_symbols(buf, n);
+  if (!syms) return a;
+  const char *src = (sp_bt_srcfile && sp_bt_srcfile[0]) ? sp_bt_srcfile : "(spinel)";
+  for (int i = 0; i < n; i++) {
+    char *name = (char *)sp_bt_symbol(syms[i]);  /* always strdup'd; free after use */
+    if (!name) continue;
+    sp_StrArray_push(a, sp_sprintf("%s:in `%s'", src, name));
+    free(name);
+  }
+  free(syms);
+  return a;
+}
+#endif
+
+/* Backtrace captured at the most recent raise (for Exception#backtrace). */
+static sp_StrArray *sp_backtrace_captured(void) {
+#if SP_BT_AVAILABLE
+  return sp_bt_format(sp_bt_buf, sp_bt_n);
+#else
+  return sp_StrArray_new();
+#endif
+}
+
+/* The current stack, captured now (for Kernel#caller). */
+static sp_StrArray *sp_caller_now(void) {
+#if SP_BT_AVAILABLE
+  if (!sp_bt_enabled) return sp_StrArray_new();
+  void *buf[256];
+  int n = backtrace(buf, 256);
+  return sp_bt_format(buf, n);
+#else
+  return sp_StrArray_new();
+#endif
+}
+
+void sp_raise_cls(const char *cls, const char *msg) {
+#if SP_BT_AVAILABLE
+  if (sp_bt_enabled) sp_bt_n = backtrace(sp_bt_buf, 256);
+#endif
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
 
 /* Issue #781: bridge between the regex compile-error path (which lives

@@ -10001,10 +10001,16 @@ class Compiler
   def method_linkage_named(body_id, has_yield, mname)
  # Debug builds: never promote to `static inline`. An inlined method has
  # no distinct frame after the C compiler runs, so a native debugger
- # can't break on it or show it in a backtrace. Keep every method a real
- # `static` function for faithful stepping (paired with cc -O0).
+ # can't break on it or show it in a backtrace. Emit each method with
+ # *external* linkage (not `static`): glibc's backtrace_symbols can only
+ # resolve a frame to a name if its symbol is in the dynamic symbol table,
+ # which `static` functions never reach even under -rdynamic. External +
+ # -rdynamic (added by the wrapper for debug builds) is what makes native
+ # Exception#backtrace name user frames on Linux. macOS resolves via the
+ # Mach-O symbol table regardless, so it was already fine; this just brings
+ # Linux to parity. Paired with cc -O0 for faithful stepping.
     if @debug
-      return "static "
+      return ""
     end
     if has_yield == 1
       return "static "
@@ -10717,7 +10723,7 @@ class Compiler
           if j < cm_returns.length
             rt = cm_returns[j]
           end
-          emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(i, j) + ");")
+          emit_raw((@debug ? "" : "static ") + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(i, j) + ");")
           j = j + 1
         end
       end
@@ -12217,6 +12223,14 @@ class Compiler
       emit_raw(cm_linkage + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mname) + "(sp_" + cname + " self" + build_params_str(pnames, ptypes) + yp + ") {")
     else
       emit_raw(cm_linkage + c_type(rt) + " sp_" + cname + "_" + sanitize_name(mname) + "(sp_" + cname + " *self" + build_params_str(pnames, ptypes) + yp + ") {")
+      # Debug-only null-receiver guard: a method called on a nil heap receiver is
+      # a hard NULL deref in a release build (CRuby raises NoMethodError) — the
+      # silent-crash class behind matz/spinel#1259. In --debug, fault loudly with
+      # the Ruby error instead of segfaulting deep in the callee. Zero effect on
+      # release output (gated on @debug); pointer-self methods only.
+      if @debug
+        emit_raw("  if (!self) sp_raise_cls(\"NoMethodError\", \"undefined method '" + mname + "' for nil\");")
+      end
     end
 
     push_scope
@@ -12317,7 +12331,10 @@ class Compiler
     saved_hp_names_len_mb = @heap_promoted_names.length
     saved_hp_cells_len_mb = @heap_promoted_cells.length
 
-    emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(mname) + "(" + build_params_decl(pnames, ptypes) + ") {")
+    # Debug: external linkage (not static) so -rdynamic exports the symbol and
+    # class/singleton methods resolve in native backtraces, same as instance
+    # methods. Release stays `static` (output unchanged).
+    emit_raw((@debug ? "" : "static ") + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(mname) + "(" + build_params_decl(pnames, ptypes) + ") {")
 
     push_scope
     j = 0
@@ -13632,6 +13649,15 @@ class Compiler
  # is what makes the gate actually effective.
     scan_for_argv(@root_id)
     emit_raw("int main(int argc,char**argv){")
+ # Debug builds: turn on the runtime's native backtrace so sp_raise_cls
+ # snapshots the C stack at each raise and Exception#backtrace formats it.
+    if @debug
+      bt_path = @source_file_path
+      if bt_path == nil || bt_path == ""
+        bt_path = "source.rb"
+      end
+      emit_raw("  sp_bt_enabled = 1; sp_bt_srcfile = \"" + bt_path + "\";")
+    end
  # Gate the ARGV ingest: sp_argv is BSS-zero-initialized
  # (len=0, data=NULL), and sp_mark_externals' loop reads
  # `sp_argv.len` first so an unused-ARGV program never
@@ -18495,8 +18521,15 @@ class Compiler
  # the deferred `caller` portion of #878). Return an empty
  # str_array instead of nil so callers' `.first` / `.length`
  # don't crash.
+ #
+ # Debug builds (--debug): the runtime captured a native backtrace at the
+ # raise (sp_raise_cls -> backtrace()), so return that formatted instead of
+ # empty. Non-debug keeps the empty array (sp_bt_enabled stays 0).
         @needs_str_array = 1
         @needs_gc = 1
+        if @debug
+          return "sp_backtrace_captured()"
+        end
         return "sp_StrArray_new()"
       end
       if mname == "is_a?" || mname == "kind_of?"
