@@ -1517,7 +1517,7 @@ class Compiler
     if t == "ConstantReadNode"
       return resolve_const_read_name(@nd_name[nid])
     end
-    if t == "ConstantPathNode"
+    if t == "ConstantPathNode" || t == "ConstantPathTargetNode"
       leaf = @nd_name[nid]
       parent = @nd_receiver[nid]
       if parent < 0
@@ -36502,6 +36502,18 @@ class Compiler
  # GlobalVariableWriteNode but without an embedded expression --
  # the value is supplied by the caller.
       emit("  " + sanitize_gvar(@nd_name[tid]) + " = " + value_expr + ";")
+    end
+    if @nd_type[tid] == "ClassVariableTargetNode"
+ # `@@a, @@b = 1, 2`. Same storage as ClassVariableWriteNode; the
+ # cvar slot is registered by collect_cvars' masgn-target scan.
+      emit("  cvar_" + cvar_qname(@current_class_idx, @nd_name[tid]) + " = " + value_expr + ";")
+    end
+    if @nd_type[tid] == "ConstantPathTargetNode"
+ # `a, M::X = 1, 2`. Assign the qualified constant's slot.
+      cpn_t = resolve_const_ref_name(tid)
+      if cpn_t != "" && find_const_idx(cpn_t) >= 0
+        emit("  cst_" + cpn_t + " = " + value_expr + ";")
+      end
     end
     if @nd_type[tid] == "MultiTargetNode"
  # Nested LHS: `a, (b, c), d = 1, [2, 3], 4`. The slot of the

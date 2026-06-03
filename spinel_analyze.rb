@@ -9344,6 +9344,36 @@ class Compiler
       val_t = infer_type(@nd_expression[nid])
       register_cvar(qname, val_t)
     end
+ # Class-variable targets in a destructuring assignment
+ # (`@@a, @@b = 1, 2`) register and fold their init the same as a
+ # plain write, so the static decl pass emits an initialized slot.
+    if t == "MultiWriteNode"
+      val_id_cv = @nd_expression[nid]
+      has_array_rhs_cv = (val_id_cv >= 0 && @nd_type[val_id_cv] == "ArrayNode")
+      lefts_cv = parse_id_list(@nd_targets[nid])
+      i_cv = 0
+      lefts_cv.each { |tid_cv|
+        if @nd_type[tid_cv] == "ClassVariableTargetNode"
+          qn_cv = cvar_qname(class_idx, @nd_name[tid_cv])
+          register_cvar(qn_cv, multi_write_target_type(val_id_cv, i_cv))
+ # Fold the i-th literal RHS element into the static init. Index
+ # the parse_id_list result directly (an int node-id list) so the
+ # node-id passed to try_fold_cvar_init never widens to string.
+          if has_array_rhs_cv
+            relems_cv = parse_id_list(@nd_elements[val_id_cv])
+            if i_cv < relems_cv.length
+              try_fold_cvar_init(qn_cv, relems_cv[i_cv])
+            end
+          end
+        end
+        i_cv = i_cv + 1
+      }
+      parse_id_list(@nd_rights[nid]).each { |tid_cv|
+        if @nd_type[tid_cv] == "ClassVariableTargetNode"
+          register_cvar(cvar_qname(class_idx, @nd_name[tid_cv]), "int")
+        end
+      }
+    end
     cs = []
     push_child_ids(nid, cs)
     k = 0
