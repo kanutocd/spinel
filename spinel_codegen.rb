@@ -26086,6 +26086,45 @@ class Compiler
         return ce
       end
     end
+ # Hash#values_at(k, ...) / #fetch_values(k, ...). Each key looks up its
+ # value (boxed into a poly_array). values_at pushes a boxed nil for a
+ # missing key; fetch_values raises KeyError instead.
+    if (mname == "values_at" || mname == "fetch_values") && is_hash_type(recv_type) == 1
+      vah = hash_fetch_block_info(recv_type)
+      if vah != nil
+        @needs_poly_array = 1
+        @needs_rb_value = 1
+        @needs_gc = 1
+        kct_va = "mrb_int"
+        if recv_type.start_with?("sym_")
+          kct_va = "sp_sym"
+        elsif recv_type.start_with?("str_")
+          kct_va = "const char *"
+        end
+        tmp_va = new_temp
+        emit("  sp_PolyArray *" + tmp_va + " = sp_PolyArray_new();")
+        args_id_va = @nd_arguments[nid]
+        if args_id_va >= 0
+          aids_va = get_args(args_id_va)
+          jva = 0
+          while jva < aids_va.length
+            kt_va = new_temp
+            emit("  " + kct_va + " " + kt_va + " = " + compile_expr(aids_va[jva]) + ";")
+            emit("  if (" + vah[2] + "(" + rc + ", " + kt_va + ")) {")
+            emit("    sp_PolyArray_push(" + tmp_va + ", " + box_value_to_poly(vah[0], vah[3] + "(" + rc + ", " + kt_va + ")") + ");")
+            emit("  } else {")
+            if mname == "fetch_values"
+              emit("    sp_raise_cls(\"KeyError\", \"key not found\");")
+            else
+              emit("    sp_PolyArray_push(" + tmp_va + ", sp_box_nil());")
+            end
+            emit("  }")
+            jva = jva + 1
+          end
+        end
+        return tmp_va
+      end
+    end
  # Hash#fetch(k) { |k| default } — block form. `compile_body_into`
  # walks the block body emitting all statements; the final
  # expression assigns into a temp that we return. The non-block

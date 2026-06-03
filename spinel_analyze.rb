@@ -4187,6 +4187,21 @@ class Compiler
         if is_array_type(rt_va) == 1
           return rt_va
         end
+ # `hash.values_at(...)` collects the looked-up values, with nil for
+ # missing keys, into a boxed poly_array.
+        if is_hash_type(rt_va) == 1
+          return "poly_array"
+        end
+      end
+    end
+    if mname == "fetch_values"
+ # `hash.fetch_values(...)` is values_at that raises on a missing key;
+ # the present-key values are boxed into a poly_array.
+      if recv >= 0
+        rt_fv = infer_type(recv)
+        if is_hash_type(rt_fv) == 1
+          return "poly_array"
+        end
       end
     end
     if mname == "combination" || mname == "permutation" || mname == "repeated_combination"
