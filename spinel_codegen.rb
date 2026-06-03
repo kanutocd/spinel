@@ -5948,6 +5948,21 @@ class Compiler
     nil
   end
 
+ # Per-variant info for typed-hash iteration: returns a 5-tuple
+ # [key_type, val_type, key_c_type, val_c_type, value_getter] or
+ # nil for the unsupported variants (poly_poly_hash is handled
+ # by its own slot-based walker). Used by each_key / each_value.
+  def hash_iter_variant_info(t)
+    if t == "sym_int_hash"; return ["symbol", "int", "sp_sym", "mrb_int", "sp_SymIntHash_get"]; end
+    if t == "sym_str_hash"; return ["symbol", "string", "sp_sym", "const char *", "sp_SymStrHash_get"]; end
+    if t == "sym_poly_hash"; return ["symbol", "poly", "sp_sym", "sp_RbVal", "sp_SymPolyHash_get"]; end
+    if t == "str_int_hash"; return ["string", "int", "const char *", "mrb_int", "sp_StrIntHash_get"]; end
+    if t == "str_str_hash"; return ["string", "string", "const char *", "const char *", "sp_StrStrHash_get"]; end
+    if t == "str_poly_hash"; return ["string", "poly", "const char *", "sp_RbVal", "sp_StrPolyHash_get"]; end
+    if t == "int_str_hash"; return ["int", "string", "mrb_int", "const char *", "sp_IntStrHash_get"]; end
+    if t == "int_int_hash"; return ["int", "int", "mrb_int", "mrb_int", "sp_IntIntHash_get"]; end
+    nil
+  end
 
  # CRuby returns nil for static mismatches (e.g. `{a: 1}.dig("a")`)
  # since no key compares equal — Hash#dig short-circuits to nil here.
@@ -39713,9 +39728,9 @@ class Compiler
       end
     end
 
- # `hash.each_value { |v| ... }` for poly_poly_hash. Other hash
- # shapes can be added here once they surface; the underlying
- # representation is the same `vals[order[i]]` walk.
+ # `hash.each_value { |v| ... }`. poly_poly_hash has its own
+ # slot-based walk (`vals[order[i]]`); every other variant is
+ # dispatched through hash_iter_variant_info below.
     if mname == "each_value" && recv >= 0 && @nd_block[nid] >= 0
       rt_ev = infer_type(recv)
       if rt_ev == "poly_poly_hash"
@@ -39745,28 +39760,15 @@ class Compiler
         emit("  }")
         return 1
       end
- # Issue #851: each_value on the common typed-hash variants.
- # The shape is the same: walk h->order[i] and dispatch the
- # variant's _get. Only int and string value parts here; the
- # poly variants flow through the poly_poly_hash arm above
- # already after boxing.
-      pfx_ev = ""
-      vty_ev = ""
-      vtag_ev = ""
-      if rt_ev == "sym_int_hash"
-        pfx_ev = "SymIntHash"; vty_ev = "mrb_int"; vtag_ev = "int"
-        @needs_sym_int_hash = 1
-      elsif rt_ev == "str_int_hash"
-        pfx_ev = "StrIntHash"; vty_ev = "mrb_int"; vtag_ev = "int"
-        @needs_str_int_hash = 1
-      elsif rt_ev == "int_str_hash"
-        pfx_ev = "IntStrHash"; vty_ev = "const char *"; vtag_ev = "string"
-      elsif rt_ev == "str_str_hash"
-        pfx_ev = "StrStrHash"; vty_ev = "const char *"; vtag_ev = "string"
-      elsif rt_ev == "sym_str_hash"
-        pfx_ev = "SymStrHash"; vty_ev = "const char *"; vtag_ev = "string"
-      end
-      if pfx_ev != ""
+ # each_value on the typed-hash variants, dispatched through the
+ # shared hash_iter_variant_info helper (the same map that drives
+ # each_key). Walk h->order[i] and read the value via the variant's
+ # _get. Covers int, string, and poly value parts; poly_poly_hash is
+ # handled by its own slot-based arm above.
+      hv_ev2 = hash_iter_variant_info(rt_ev)
+      if hv_ev2 != nil
+        @needs_sym_int_hash = 1 if rt_ev == "sym_int_hash"
+        @needs_str_int_hash = 1 if rt_ev == "str_int_hash"
         rc_ev2 = compile_expr_gc_rooted(recv)
         bp_ev2 = get_block_param(nid, 0)
         if bp_ev2 == ""
@@ -39774,11 +39776,81 @@ class Compiler
         end
         tmp_ev2 = new_temp
         emit("  for (mrb_int " + tmp_ev2 + " = 0; " + tmp_ev2 + " < " + rc_ev2 + "->len; " + tmp_ev2 + "++) {")
-        emit("    " + vty_ev + " lv_" + bp_ev2 + " = sp_" + pfx_ev + "_get(" + rc_ev2 + ", " + rc_ev2 + "->order[" + tmp_ev2 + "]);")
+        emit("    " + hv_ev2[3] + " lv_" + bp_ev2 + " = " + hv_ev2[4] + "(" + rc_ev2 + ", " + rc_ev2 + "->order[" + tmp_ev2 + "]);")
         @indent = @indent + 1
         push_scope
-        declare_var(bp_ev2, vtag_ev)
+        declare_var(bp_ev2, hv_ev2[1])
         compile_stmts_body(@nd_body[@nd_block[nid]])
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        return 1
+      end
+    end
+
+ # `hash.each_key { |k| ... }` for typed hash variants. Walks
+ # h->order in insertion order and binds the key. Sym-keyed
+ # variants cast back to sp_sym (order stores the underlying
+ # mrb_int); str-keyed pass through as const char *.
+    if mname == "each_key" && recv >= 0 && @nd_block[nid] >= 0
+      rt_ek = infer_type(recv)
+      hv_ek = hash_iter_variant_info(rt_ek)
+      if hv_ek != nil
+        rc_ek = compile_expr_gc_rooted(recv)
+        bp_ek = get_block_param(nid, 0)
+        has_bp_ek = 1
+        if bp_ek == ""
+          has_bp_ek = 0
+          bp_ek = "_k"
+        end
+        tmp_ek = new_temp
+        emit("  for (mrb_int " + tmp_ek + " = 0; " + tmp_ek + " < " + rc_ek + "->len; " + tmp_ek + "++) {")
+        if has_bp_ek == 1
+          if hv_ek[0] == "symbol"
+            emit("    sp_sym lv_" + bp_ek + " = (sp_sym)" + rc_ek + "->order[" + tmp_ek + "];")
+          else
+            emit("    " + hv_ek[2] + " lv_" + bp_ek + " = " + rc_ek + "->order[" + tmp_ek + "];")
+          end
+        end
+        @indent = @indent + 1
+        push_scope
+        if has_bp_ek == 1
+          declare_var(bp_ek, hv_ek[0])
+        end
+        redo_label_ek = push_redo_label
+        emit_redo_label(redo_label_ek)
+        compile_stmts_body(@nd_body[@nd_block[nid]])
+        pop_redo_label
+        pop_scope
+        @indent = @indent - 1
+        emit("  }")
+        return 1
+      end
+ # poly_poly_hash each_key: the helper returns nil for it (keys and
+ # values are sp_RbVal indexed by the slot in h->order). Mirrors the
+ # each_value poly arm above but binds h->keys[order[i]].
+      if rt_ek == "poly_poly_hash"
+        rc_pk = compile_expr_gc_rooted(recv)
+        bp_pk = get_block_param(nid, 0)
+        has_bp_pk = 1
+        if bp_pk == ""
+          has_bp_pk = 0
+          bp_pk = "_k"
+        end
+        tmp_pk = new_temp
+        emit("  for (mrb_int " + tmp_pk + " = 0; " + tmp_pk + " < " + rc_pk + "->len; " + tmp_pk + "++) {")
+        if has_bp_pk == 1
+          emit("    sp_RbVal lv_" + bp_pk + " = " + rc_pk + "->keys[" + rc_pk + "->order[" + tmp_pk + "]];")
+        end
+        @indent = @indent + 1
+        push_scope
+        if has_bp_pk == 1
+          declare_var(bp_pk, "poly")
+        end
+        redo_label_pk = push_redo_label
+        emit_redo_label(redo_label_pk)
+        compile_stmts_body(@nd_body[@nd_block[nid]])
+        pop_redo_label
         pop_scope
         @indent = @indent - 1
         emit("  }")
