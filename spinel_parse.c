@@ -1688,7 +1688,11 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
     {
       char *trail = end + 1;
       while (*trail == ' ' || *trail == '\t') trail++;
-      if (*trail != '\n' && *trail != ';' && *trail != '\0' && *trail != '#') {
+      /* `\r` is part of a CRLF line ending, not a modifier: treat it as a
+         statement boundary so Windows sources keep the normal inlining
+         path. */
+      if (*trail != '\n' && *trail != '\r' && *trail != ';' &&
+          *trail != '\0' && *trail != '#') {
         free(content);
         size_t rl_len = (size_t)((end + 1) - pos);   /* the `require 'x'` span */
         size_t result_len = strlen(result);
