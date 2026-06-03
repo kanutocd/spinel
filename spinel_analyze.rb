@@ -357,6 +357,10 @@ class Compiler
     @implicit_new_site_classes = "".split(",", -1)
     @implicit_new_local_names = "".split(",", -1)
     @implicit_new_local_classes = "".split(",", -1)
+    @implicit_new_signature_keys = "".split(",", -1)
+    @implicit_new_signature_classes = "".split(",", -1)
+    @implicit_new_site_arg_type_ids = []
+    @implicit_new_site_arg_type_csvs = "".split(",", -1)
 
  # ---- Constants (parallel arrays) ----
     @const_names = "".split(",", -1)
@@ -2090,6 +2094,28 @@ class Compiler
     end
     @cls_meth_return_cache[ck] = "int"
     "int"
+  end
+
+  def cls_method_return_uncached(ci, mname)
+    names = @cls_meth_names[ci].split(";", -1)
+    returns = @cls_meth_returns[ci].split(";", -1)
+    j = 0
+    while j < names.length
+      if names[j] == mname
+        if j < returns.length
+          return returns[j]
+        end
+        return "int"
+      end
+      j = j + 1
+    end
+    if @cls_parents[ci] != ""
+      pi = find_class_idx(@cls_parents[ci])
+      if pi >= 0
+        return cls_method_return_uncached(pi, mname)
+      end
+    end
+    ""
   end
 
  # Get ivar type from class
@@ -8748,6 +8774,7 @@ class Compiler
 
  # Pass 3: infer return types
     infer_all_returns
+
   end
 
   def rewrite_instance_eval_calls
@@ -9489,6 +9516,9 @@ class Compiler
     if ci < 0 || ci >= @cls_names.length
       return 0
     end
+    if @cls_names[ci].index("__implicit_")
+      return 0
+    end
     if @cls_is_value_type[ci] == 1
       return 0
     end
@@ -9507,6 +9537,68 @@ class Compiler
     node_contains_empty_array_ivar_write(bid)
   end
 
+  def node_contains_param_ivar_write(nid, pnames)
+    if nid < 0
+      return 0
+    end
+    t = @nd_type[nid]
+    if t == "DefNode" || t == "ClassNode" || t == "ModuleNode" || t == "SingletonClassNode"
+      return 0
+    end
+    if t == "InstanceVariableWriteNode"
+      expr = @nd_expression[nid]
+      if expr >= 0 && @nd_type[expr] == "LocalVariableReadNode"
+        pname = @nd_name[expr]
+        pk = 0
+        while pk < pnames.length
+          if pnames[pk] == pname
+            return 1
+          end
+          pk = pk + 1
+        end
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      if node_contains_param_ivar_write(cs[k], pnames) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
+  def implicit_holder_specializable_class?(ci)
+    if ci < 0 || ci >= @cls_names.length
+      return 0
+    end
+    if @cls_names[ci].index("__implicit_")
+      return 0
+    end
+    if @cls_is_value_type[ci] == 1
+      return 0
+    end
+    init_idx = cls_find_method_direct(ci, "initialize")
+    if init_idx < 0
+      return 0
+    end
+    pnames = cls_meth_pnames_get(ci, init_idx)
+    if pnames.length == 0
+      return 0
+    end
+    bodies = @cls_meth_bodies[ci].split(";", -1)
+    if init_idx >= bodies.length
+      return 0
+    end
+    bid = bodies[init_idx].to_i
+    if bid < 0
+      return 0
+    end
+    node_contains_param_ivar_write(bid, pnames)
+  end
+
   def collect_implicit_new_site_candidates(nid, site_ids, site_classes)
     if nid < 0
       return
@@ -9523,10 +9615,8 @@ class Compiler
             if args_id >= 0
               argc = get_args(args_id).length
             end
-            if argc == 0
-              site_ids.push(nid)
-              site_classes.push(cname)
-            end
+            site_ids.push(nid)
+            site_classes.push(cname)
           end
         end
       end
@@ -9550,6 +9640,17 @@ class Compiler
       k = k + 1
     end
     count
+  end
+
+  def implicit_new_site_arg_count(nid)
+    if nid < 0 || @nd_type[nid] != "CallNode"
+      return 0
+    end
+    args_id = @nd_arguments[nid]
+    if args_id < 0
+      return 0
+    end
+    get_args(args_id).length
   end
 
   def implicit_candidate_new_class(nid)
@@ -9699,7 +9800,14 @@ class Compiler
     elsif t == "ArrayNode" || t == "HashNode" || t == "KeywordHashNode"
       mark_implicit_candidate_expr_escape(nid, local_names, local_classes, escaping_classes)
       return
-    elsif t == "InstanceVariableWriteNode" || t == "GlobalVariableWriteNode" || t == "ClassVariableWriteNode" || t == "ConstantWriteNode"
+    elsif t == "InstanceVariableWriteNode"
+ # Direct `@helper = Helper.new` initialization stays local to the
+ # owning class: normalize_implicit_new_ivar_inits rewrites that ivar
+ # slot to the synthetic class. Other ivar writes still recurse below.
+      if implicit_candidate_new_class(@nd_expression[nid]) == ""
+        mark_implicit_candidate_expr_escape(@nd_expression[nid], local_names, local_classes, escaping_classes)
+      end
+    elsif t == "GlobalVariableWriteNode" || t == "ClassVariableWriteNode" || t == "ConstantWriteNode"
       mark_implicit_candidate_expr_escape(@nd_expression[nid], local_names, local_classes, escaping_classes)
     end
     cs = []
@@ -9759,6 +9867,271 @@ class Compiler
       k = k + 1
     end
     0
+  end
+
+  def implicit_new_site_arg_types(nid)
+    ck = 0
+    while ck < @implicit_new_site_arg_type_ids.length
+      if @implicit_new_site_arg_type_ids[ck] == nid
+        return @implicit_new_site_arg_type_csvs[ck].split(",", -1)
+      end
+      ck = ck + 1
+    end
+    result = "".split(",", -1)
+    if nid < 0 || @nd_type[nid] != "CallNode"
+      return result
+    end
+    args_id = @nd_arguments[nid]
+    if args_id < 0
+      return result
+    end
+    arg_ids = get_args(args_id)
+    k = 0
+    while k < arg_ids.length
+      at = infer_type(arg_ids[k])
+      if at == ""
+        at = "int"
+      end
+      result.push(at)
+      k = k + 1
+    end
+    result
+  end
+
+  def record_implicit_new_site_arg_types(nid, arg_types)
+    csv = arg_types.join(",")
+    k = 0
+    while k < @implicit_new_site_arg_type_ids.length
+      if @implicit_new_site_arg_type_ids[k] == nid
+        @implicit_new_site_arg_type_csvs[k] = csv
+        return
+      end
+      k = k + 1
+    end
+    @implicit_new_site_arg_type_ids.push(nid)
+    @implicit_new_site_arg_type_csvs.push(csv)
+  end
+
+  def local_env_get(names, types, name)
+    k = 0
+    while k < names.length
+      if names[k] == name
+        return types[k]
+      end
+      k = k + 1
+    end
+    ""
+  end
+
+  def local_env_put(names, types, name, typ)
+    k = 0
+    while k < names.length
+      if names[k] == name
+        types[k] = typ
+        return
+      end
+      k = k + 1
+    end
+    names.push(name)
+    types.push(typ)
+  end
+
+  def infer_type_with_local_env(nid, names, types)
+    if nid < 0
+      return "int"
+    end
+    if @nd_type[nid] == "LocalVariableReadNode"
+      vt = local_env_get(names, types, @nd_name[nid])
+      if vt != ""
+        return vt
+      end
+    end
+    if @nd_type[nid] == "InstanceVariableReadNode" && @current_class_idx >= 0
+      ivt = cls_ivar_type(@current_class_idx, @nd_name[nid])
+      if ivt != ""
+        return ivt
+      end
+    end
+    if @nd_type[nid] == "CallNode"
+      recv = @nd_receiver[nid]
+      if recv >= 0
+        rt = infer_type_with_local_env(recv, names, types)
+        cname = constructor_class_name(recv)
+        if cname != ""
+          cci = find_class_idx(cname)
+          if cci >= 0
+            cmret = cls_cmethod_return_inherited(cci, @nd_name[nid])
+            if cmret != ""
+              return cmret
+            end
+          end
+        end
+        if is_obj_type(rt) == 1
+          ci = find_class_idx(rt[4, rt.length - 4])
+          if ci >= 0
+            direct_ret = cls_method_return_uncached(ci, @nd_name[nid])
+            if direct_ret != ""
+              return direct_ret
+            end
+            owner = find_method_owner(ci, @nd_name[nid])
+            if owner != ""
+              oi = find_class_idx(owner)
+              if oi >= 0
+                owner_ret = cls_method_return_uncached(oi, @nd_name[nid])
+                if owner_ret != ""
+                  return owner_ret
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    infer_type(nid)
+  end
+
+  def cache_implicit_new_site_arg_types_in(nid, names, types)
+    if nid < 0
+      return
+    end
+    t = @nd_type[nid]
+    if t == "DefNode" || t == "ClassNode" || t == "ModuleNode" || t == "SingletonClassNode"
+      return
+    end
+    if t == "LocalVariableWriteNode"
+      env_t = infer_type_with_local_env(@nd_expression[nid], names, types)
+      local_env_put(names, types, @nd_name[nid], env_t)
+    end
+    if t == "CallNode" && @nd_name[nid] == "new"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        arg_ids = get_args(args_id)
+        arg_types = "".split(",", -1)
+        k = 0
+        while k < arg_ids.length
+          at = infer_type_with_local_env(arg_ids[k], names, types)
+          if at == ""
+            at = "int"
+          end
+          arg_types.push(at)
+          k = k + 1
+        end
+        record_implicit_new_site_arg_types(nid, arg_types)
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      cache_implicit_new_site_arg_types_in(cs[k], names, types)
+      k = k + 1
+    end
+  end
+
+  def cache_implicit_new_site_arg_types_with_method_scopes
+    ci = 0
+    while ci < @cls_names.length
+      @current_class_idx = ci
+      bodies = @cls_meth_bodies[ci].split(";", -1)
+      mi = 0
+      while mi < bodies.length
+        bid = bodies[mi].to_i
+        if bid >= 0
+          push_scope
+          pnames = cls_meth_pnames_get(ci, mi)
+          ptypes = cls_meth_ptypes_get(ci, mi)
+          pk = 0
+          while pk < pnames.length
+            pt = "int"
+            if pk < ptypes.length
+              pt = ptypes[pk]
+            end
+            declare_var(pnames[pk], pt)
+            pk = pk + 1
+          end
+          lnames = "".split(",", -1)
+          ltypes = "".split(",", -1)
+          scan_locals_first_type(bid, lnames, ltypes, pnames)
+          lk = 0
+          while lk < lnames.length
+            declare_var(lnames[lk], ltypes[lk])
+            lk = lk + 1
+          end
+          cache_names = "".split(",", -1)
+          cache_types = "".split(",", -1)
+          ck = 0
+          while ck < pnames.length
+            cache_names.push(pnames[ck])
+            ck = ck + 1
+          end
+          ck = 0
+          while ck < ptypes.length
+            cache_types.push(ptypes[ck])
+            ck = ck + 1
+          end
+          cache_implicit_new_site_arg_types_in(bid, cache_names, cache_types)
+          pop_scope
+        end
+        mi = mi + 1
+      end
+      @current_class_idx = -1
+      ci = ci + 1
+    end
+  end
+
+  def refine_implicit_new_holder_specializations(rounds)
+    r = 0
+    while r < rounds
+      @cls_meth_return_cache = {}
+      cache_implicit_new_site_arg_types_with_method_scopes
+      collect_implicit_new_specializations
+      @cls_meth_return_cache = {}
+      infer_all_returns
+      r = r + 1
+    end
+  end
+
+  def implicit_new_site_has_obj_arg?(nid)
+    arg_types = implicit_new_site_arg_types(nid)
+    k = 0
+    while k < arg_types.length
+      bt = base_type(arg_types[k])
+      if is_obj_type(bt) == 1 && is_array_type(bt) == 0
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
+  def implicit_new_site_obj_signature_key(cname, nid)
+    arg_types = implicit_new_site_arg_types(nid)
+    key = cname + "|" + arg_types.length.to_s
+    k = 0
+    while k < arg_types.length
+      bt = base_type(arg_types[k])
+      if is_obj_type(bt) == 1 && is_array_type(bt) == 0
+        key = key + "|" + k.to_s + ":" + bt
+      end
+      k = k + 1
+    end
+    key
+  end
+
+  def implicit_new_signature_class(key)
+    k = 0
+    while k < @implicit_new_signature_keys.length
+      if @implicit_new_signature_keys[k] == key
+        return @implicit_new_signature_classes[k]
+      end
+      k = k + 1
+    end
+    ""
+  end
+
+  def register_implicit_new_signature_class(key, cname)
+    @implicit_new_signature_keys.push(key)
+    @implicit_new_signature_classes.push(cname)
   end
 
   def copy_cls_rest_entries_for_implicit_specialization(old_name, new_name)
@@ -9872,6 +10245,67 @@ class Compiler
     end
   end
 
+  def specialize_implicit_holder_param_ivars(spec_ci, site_id)
+    init_idx = cls_find_method_direct(spec_ci, "initialize")
+    if init_idx < 0
+      return
+    end
+    pnames = cls_meth_pnames_get(spec_ci, init_idx)
+    ptypes = implicit_new_site_arg_types(site_id)
+    if ptypes.length == 0
+      return
+    end
+    cls_meth_ptypes_put(spec_ci, init_idx, ptypes)
+    bodies = @cls_meth_bodies[spec_ci].split(";", -1)
+    if init_idx >= bodies.length
+      return
+    end
+    bid = bodies[init_idx].to_i
+    if bid < 0
+      return
+    end
+    specialize_implicit_holder_param_ivars_in(bid, spec_ci, pnames, ptypes)
+  end
+
+  def specialize_implicit_holder_param_ivars_in(nid, spec_ci, pnames, ptypes)
+    if nid < 0
+      return
+    end
+    t = @nd_type[nid]
+    if t == "DefNode" || t == "ClassNode" || t == "ModuleNode" || t == "SingletonClassNode"
+      return
+    end
+    if t == "InstanceVariableWriteNode"
+      expr = @nd_expression[nid]
+      if expr >= 0 && @nd_type[expr] == "LocalVariableReadNode"
+        pname = @nd_name[expr]
+        pi = 0
+        while pi < pnames.length
+          if pnames[pi] == pname
+            if pi < ptypes.length && ptypes[pi] != ""
+              iname = @nd_name[nid]
+              if ivar_exists(spec_ci, iname) == 1
+                replace_ivar_type(spec_ci, iname, ptypes[pi])
+              else
+                add_ivar(spec_ci, iname, ptypes[pi], 1)
+              end
+            end
+            pi = pnames.length
+          else
+            pi = pi + 1
+          end
+        end
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      specialize_implicit_holder_param_ivars_in(cs[k], spec_ci, pnames, ptypes)
+      k = k + 1
+    end
+  end
+
   def normalize_implicit_new_ivar_inits(nid, class_idx, module_prefix)
     if nid < 0
       return
@@ -9930,16 +10364,40 @@ class Compiler
     ci = 0
     while ci < original_class_count
       cname = @cls_names[ci]
-      if implicit_specializable_class?(ci) == 1 && implicit_candidate_class_escaped?(escaping_classes, cname) == 0 && count_implicit_new_sites_for_class(site_classes, cname) >= 2
+      if count_implicit_new_sites_for_class(site_classes, cname) >= 2
         k = 0
         while k < site_ids.length
           if site_classes[k] == cname
-            spec_name = cname + "__implicit_" + site_ids[k].to_s
-            if find_class_idx(spec_name) < 0
-              clone_class_slot_for_implicit_new(ci, spec_name)
+            specialize_site = 0
+            holder_site = 0
+            if implicit_specializable_class?(ci) == 1 && implicit_new_site_arg_count(site_ids[k]) == 0 && implicit_candidate_class_escaped?(escaping_classes, cname) == 0
+              specialize_site = 1
+            elsif implicit_holder_specializable_class?(ci) == 1 && implicit_new_site_arg_count(site_ids[k]) > 0 && implicit_new_site_has_obj_arg?(site_ids[k]) == 1
+              specialize_site = 1
+              holder_site = 1
             end
-            @implicit_new_site_ids.push(site_ids[k])
-            @implicit_new_site_classes.push(spec_name)
+            if specialize_site == 1
+              spec_name = cname + "__implicit_" + site_ids[k].to_s
+              if holder_site == 1
+                signature_key = implicit_new_site_obj_signature_key(cname, site_ids[k])
+                existing_spec = implicit_new_signature_class(signature_key)
+                if existing_spec != ""
+                  spec_name = existing_spec
+                else
+                  register_implicit_new_signature_class(signature_key, spec_name)
+                end
+              end
+              spec_ci = find_class_idx(spec_name)
+              if spec_ci < 0
+                clone_class_slot_for_implicit_new(ci, spec_name)
+                spec_ci = find_class_idx(spec_name)
+              end
+              if holder_site == 1 && spec_ci >= 0
+                specialize_implicit_holder_param_ivars(spec_ci, site_ids[k])
+              end
+              @implicit_new_site_ids.push(site_ids[k])
+              @implicit_new_site_classes.push(spec_name)
+            end
           end
           k = k + 1
         end
@@ -15137,6 +15595,17 @@ class Compiler
     end
   end
 
+  def widen_ptypes_from_known_types(arg_types, ptypes)
+    k = 0
+    while k < arg_types.length && k < ptypes.length
+      at = arg_types[k]
+      if at != ""
+        ptypes[k] = unify_call_types(ptypes[k], at, -1)
+      end
+      k = k + 1
+    end
+  end
+
   def scan_new_calls(nid)
     if nid < 0
       return
@@ -15398,7 +15867,11 @@ class Compiler
       if @nd_name[nid] == "new"
         recv = @nd_receiver[nid]
         if recv >= 0
-          cname = constructor_class_name(recv)
+          spec_cname = implicit_new_site_class(nid)
+          cname = spec_cname
+          if spec_cname == ""
+            cname = constructor_class_name(recv)
+          end
           if cname != ""
             ci = find_class_idx(cname)
             if ci >= 0
@@ -15412,7 +15885,11 @@ class Compiler
                     ptypes = cls_meth_ptypes_get(init_ci, init_idx)
                     if ptypes.length > 0
                       pnames = cls_meth_pnames_get(init_ci, init_idx)
-                      widen_ptypes_from_args(arg_ids, pnames, ptypes)
+                      if spec_cname != ""
+                        widen_ptypes_from_known_types(implicit_new_site_arg_types(nid), ptypes)
+                      else
+                        widen_ptypes_from_args(arg_ids, pnames, ptypes)
+                      end
                       cls_meth_ptypes_put(init_ci, init_idx, ptypes)
                     end
                   end
@@ -26089,6 +26566,7 @@ class Compiler
     infer_function_body_call_types
     infer_class_body_call_types
     infer_all_returns
+    refine_implicit_new_holder_specializations(1)
  # Unify imeth return types across override families AFTER
  # the fixpoint converges. Running inside the loop is
  # ineffective because the next iteration's infer_all_returns

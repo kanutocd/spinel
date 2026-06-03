@@ -30775,6 +30775,10 @@ class Compiler
     poly_dispatch_arms_emitted = 0
     i = 0
     while i < @cls_names.length
+      if implicit_specialization_template_class?(i) == 1
+        i = i + 1
+        next
+      end
       if dispatch_narrow_set != "" && poly_dispatch_class_in_set(dispatch_narrow_set, i) == 0
         i = i + 1
         next
@@ -30791,7 +30795,11 @@ class Compiler
           end
         end
       end
-      if midx >= 0
+      if midx >= 0 && cls_meth_is_live(owner_idx, mname) == 0
+ # The class can appear in the global method table even when this
+ # method body was proven dead and therefore not emitted. Do not
+ # generate a poly-dispatch arm that calls an undeclared function.
+      elsif midx >= 0
  # Match each arm to the target method's *fixed* C arity:
  # pad missing trailing slots with default-typed zeros, and
  # truncate extras (when the call site supplies more args than
