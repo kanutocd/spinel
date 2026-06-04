@@ -3237,6 +3237,18 @@ static const char *sp_PolyArray_inspect(sp_PolyArray *a) {
   sp_String_append(s, "]");
   return s->data;
 }
+/* Array#join for a mixed-element (poly) array: to_s each element via
+   sp_poly_to_s and concatenate with sep. Mirrors sp_StrArray_join for
+   the boxed-element case. */
+static const char *sp_PolyArray_join(sp_PolyArray *a, const char *sep) {
+  if (!a) return sp_str_empty;
+  sp_String *s = sp_String_new("");
+  for (mrb_int i = 0; i < a->len; i++) {
+    if (i > 0 && sep) sp_String_append(s, sep);
+    sp_String_append(s, sp_poly_to_s(a->data[i]));
+  }
+  return s->data;
+}
 static mrb_bool sp_PolyArray_eq(sp_PolyArray *a, sp_PolyArray *b) {
   if (!a || !b) return a == b;
   if (a->len != b->len) return FALSE;

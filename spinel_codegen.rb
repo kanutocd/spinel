@@ -26288,6 +26288,16 @@ class Compiler
         end
         return "FALSE"
       end
+ # Array#join on a mixed-element array: each element is to_s'd via
+ # sp_poly_to_s and concatenated with the separator. int_array /
+ # str_array have their own typed join helpers.
+      if mname == "join"
+        jarg = compile_arg0(nid)
+        if jarg == "0"
+          jarg = "\"\""
+        end
+        return "sp_PolyArray_join(" + rc + ", " + jarg + ")"
+      end
       if mname == "assoc" || mname == "rassoc"
         args_id_pa = @nd_arguments[nid]
         if args_id_pa >= 0
