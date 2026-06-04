@@ -14183,6 +14183,120 @@ class Compiler
     end
   end
 
+ # Does class `ci` initialize instance variable `iname` with an empty
+ # `{}` hash literal anywhere in its method bodies? Gates the
+ # empty-hash re-pick so genuinely-typed hash slots (`@h = {"a" => 1}`)
+ # are never re-typed from their declared variant.
+  def class_ivar_init_is_empty_hash(ci, iname)
+    bodies = @cls_meth_bodies[ci].split(";", -1)
+    mj = 0
+    while mj < bodies.length
+      bid = bodies[mj].to_i
+      if bid >= 0 && node_has_empty_hash_ivar_init(bid, iname) == 1
+        return 1
+      end
+      mj = mj + 1
+    end
+    0
+  end
+
+  def node_has_empty_hash_ivar_init(nid, iname)
+    if nid < 0
+      return 0
+    end
+    if @nd_type[nid] == "InstanceVariableWriteNode" && @nd_name[nid] == iname
+      if is_empty_hash_literal(@nd_expression[nid]) == 1
+        return 1
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      if node_has_empty_hash_ivar_init(cs[k], iname) == 1
+        return 1
+      end
+      k = k + 1
+    end
+    0
+  end
+
+ # Re-pick the hash variant of every empty-`{}`-initialized class
+ # instance-variable hash from the key/value types observed at its
+ # `@ivar[k] = v` writes. The one-shot promotion in scan_writer_calls
+ # fires during the fixpoint, before block-local keys converge (a
+ # match-capture `m[1]` still reads as the scan-time `int` default),
+ # and its `cur == str_int_hash` guard then locks the slot. Here, run
+ # post-fixpoint with each method's locals resolved to their converged
+ # types via refine_locals_multi_pass_full (the same scope discipline
+ # walk_and_cache / codegen use), so `m[1]` reads as `string` and the
+ # variant is picked correctly. Placed before the post-fixpoint
+ # infer_all_returns so a `def keys; @h.keys; end` reader re-derives
+ # its return type against the corrected slot.
+  def refine_class_ivar_hash_types
+    ci = 0
+    while ci < @cls_names.length
+      inames = @cls_ivar_names[ci].split(";", -1)
+      itypes = @cls_ivar_types[ci].split(";", -1)
+      eligible = "".split(",", -1)
+      key_sets = []
+      val_sets = []
+      ii = 0
+      while ii < inames.length
+        if inames[ii] != "" && ii < itypes.length && is_hash_type(itypes[ii]) == 1 && class_ivar_init_is_empty_hash(ci, inames[ii]) == 1
+          eligible.push(inames[ii])
+          key_sets.push("".split(",", -1))
+          val_sets.push("".split(",", -1))
+        end
+        ii = ii + 1
+      end
+      if eligible.length > 0
+        bodies = @cls_meth_bodies[ci].split(";", -1)
+        mj = 0
+        while mj < bodies.length
+          bid = bodies[mj].to_i
+          if bid >= 0
+            push_scope
+            pnames = cls_meth_pnames_get(ci, mj)
+            ptypes = cls_meth_ptypes_get(ci, mj)
+            pk = 0
+            while pk < pnames.length
+              pt = "int"
+              if pk < ptypes.length
+                pt = ptypes[pk]
+              end
+              declare_var(pnames[pk], pt)
+              pk = pk + 1
+            end
+            saved_ci = @current_class_idx
+            @current_class_idx = ci
+            lnames = "".split(",", -1)
+            ltypes = "".split(",", -1)
+            refine_locals_multi_pass_full(get_stmts(bid), lnames, ltypes, pnames, 0, 0)
+            ei = 0
+            while ei < eligible.length
+              scan_module_ivar_writes(bid, eligible[ei], key_sets[ei], val_sets[ei])
+              ei = ei + 1
+            end
+            @current_class_idx = saved_ci
+            pop_scope
+          end
+          mj = mj + 1
+        end
+        ei = 0
+        while ei < eligible.length
+          picked = pick_hash_class(key_sets[ei], val_sets[ei])
+          if picked != "" && picked != cls_ivar_type(ci, eligible[ei])
+            replace_ivar_type(ci, eligible[ei], picked)
+            mark_hash_needs(picked)
+          end
+          ei = ei + 1
+        end
+      end
+      ci = ci + 1
+    end
+  end
+
   def refine_module_ivar_types(mname, body_stmts)
     body_stmts.each { |sid|
  # Two shapes both refine the same `@const_types` slot:
@@ -26724,6 +26838,7 @@ class Compiler
  # `def self.add(s); @items << s; end` whose return is now
  # `sp_StrArray *` rather than the placeholder `sp_IntArray *`).
     refine_all_module_ivar_types
+    refine_class_ivar_hash_types
     infer_all_returns
     infer_function_body_call_types
     infer_class_body_call_types
