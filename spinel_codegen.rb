@@ -16547,6 +16547,28 @@ class Compiler
     "0"
   end
 
+ # Equality of a poly_array against a typed (int/str/float) array: box
+ # each typed element and compare via sp_poly_eq, element by element.
+ # Covers `[1, nil, 2].compact == [1, 2]` where compact yields a
+ # poly_array but the literal is an int_array. `poly_c` is the
+ # poly_array side, `typed_c` the typed side.
+  def poly_typed_array_eq(poly_c, typed_c, typed_t)
+    @needs_rb_value = 1
+    tpfx = array_c_prefix(typed_t)
+    box = "sp_box_int"
+    if typed_t == "str_array"
+      box = "sp_box_str"
+    end
+    if typed_t == "float_array"
+      box = "sp_box_float"
+    end
+    pe = new_temp
+    ae = new_temp
+    ie = new_temp
+    re = new_temp
+    "({ sp_PolyArray *" + pe + " = (sp_PolyArray *)(" + poly_c + "); sp_" + tpfx + " *" + ae + " = (sp_" + tpfx + " *)(" + typed_c + "); mrb_bool " + re + "; if (!" + pe + " || !" + ae + ") " + re + " = ((void *)" + pe + " == (void *)" + ae + "); else if (" + pe + "->len != " + ae + "->len) " + re + " = FALSE; else { " + re + " = TRUE; for (mrb_int " + ie + " = 0; " + ie + " < " + pe + "->len; " + ie + "++) { if (!sp_poly_eq(sp_PolyArray_get(" + pe + ", " + ie + "), " + box + "(sp_" + tpfx + "_get(" + ae + ", " + ie + ")))) { " + re + " = FALSE; break; } } } " + re + "; })"
+  end
+
  # Equality of two ptr_array elements (each a `void*` from
  # sp_PtrArray_get) given the static element type. Typed-array elements
  # deep-compare via their own _eq; a nested ptr_array recurses one
@@ -32279,6 +32301,19 @@ class Compiler
           return "(!sp_PolyArray_eq(" + lc + ", " + rhs_pa_tmp + "))"
         end
       end
+    end
+ # poly_array vs a typed (int/str/float) array -- e.g.
+ # `[1, nil, 2].compact == [1, 2]`, where compact yields a poly_array
+ # but the literal stays int_array. Box the typed side per element and
+ # compare through sp_poly_eq. Placed after the all-nil literal arm so
+ # `poly == [nil, nil]` keeps its dedicated nil-boxing path.
+    if lt == "poly_array" && (at == "int_array" || at == "str_array" || at == "float_array")
+      pte = poly_typed_array_eq(lc, rc, at)
+      return op == "==" ? pte : "(!" + pte + ")"
+    end
+    if at == "poly_array" && (lt == "int_array" || lt == "str_array" || lt == "float_array")
+      pte = poly_typed_array_eq(rc, lc, lt)
+      return op == "==" ? pte : "(!" + pte + ")"
     end
  # Hash equality arms. Same shape as the typed-array arms
  # above. Issue #555. Compares by sorted key set + per-key
