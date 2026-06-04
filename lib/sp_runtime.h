@@ -1691,7 +1691,9 @@ static const char *sp_str_scrub(const char *s, const char *repl) {
   size_t rlen = strlen(r);
   size_t bl = sp_str_byte_len(s);
   size_t cap = bl + 64;
-  char *out = sp_str_alloc_raw(cap);
+ /* malloc scratch (grown with realloc on invalid-byte runs); the final
+    string is emitted at the exact length below. */
+  char *out = (char *)malloc(cap);
   size_t olen = 0;
   size_t i = 0;
   while (i < bl) {
@@ -1720,9 +1722,10 @@ static const char *sp_str_scrub(const char *s, const char *repl) {
       i += 1;
     }
   }
-  out[olen] = 0;
-  sp_str_set_len(out, olen);
-  return out;
+  char *res = sp_str_alloc(olen);
+  memcpy(res, out, olen);
+  free(out);
+  return res;
 }
 static const char*sp_str_ljust(const char*s,mrb_int w){if(!s)return sp_str_empty;mrb_int cl=sp_str_length(s);if(cl>=w)return s;size_t bl=strlen(s);size_t pad=(size_t)(w-cl);char*r=sp_str_alloc_raw(bl+pad+1);memcpy(r,s,bl);memset(r+bl,' ',pad);r[bl+pad]=0;return r;}
 static const char*sp_str_rjust(const char*s,mrb_int w){if(!s)return sp_str_empty;mrb_int cl=sp_str_length(s);if(cl>=w)return s;size_t bl=strlen(s);size_t pad=(size_t)(w-cl);char*r=sp_str_alloc_raw(bl+pad+1);memset(r,' ',pad);memcpy(r+pad,s,bl);r[bl+pad]=0;return r;}
@@ -2218,7 +2221,11 @@ static void sp_re_expand_rep(char **out_io, size_t *olen_io, size_t *cap_io,
 static const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const char *rep) {
   int64_t slen = (int64_t)strlen(str); size_t rlen = strlen(rep);
   size_t cap = slen * 2 + rlen * 4 + 64;
-  char *out = sp_str_alloc_raw(cap); size_t olen = 0;
+ /* Build into a plain malloc scratch: the buffer is grown with realloc
+    here and inside sp_re_expand_rep, which is only valid on a real
+    malloc base (a sp_str body pointer is offset past its header). The
+    final string is allocated at the exact length below. */
+  char *out = (char *)malloc(cap); size_t olen = 0;
   int64_t pos = 0; int caps[64];
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, 64);
@@ -2248,10 +2255,12 @@ static const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const ch
     if (olen+rest+1 >= cap) { cap = olen+rest+64; out = (char*)realloc(out, cap); }
     memcpy(out+olen, str+pos, rest); olen += rest;
   }
- /* The buffer is over-allocated (cap has slack); set the string's
-    stored length to the bytes actually written so #length / inspect
-    don't read the trailing slack. */
-  out[olen] = 0; sp_str_set_len(out, olen); return out;
+ /* Emit a string sized to exactly the bytes written (sp_str_alloc sets
+    the length and null-terminates); release the scratch. */
+  char *res = sp_str_alloc(olen);
+  memcpy(res, out, olen);
+  free(out);
+  return res;
 }
 
 /* String#gsub(regex, hash) — per-match hash lookup form. CRuby's
@@ -2261,7 +2270,8 @@ static const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const ch
  * Used by html_escape / json_escape idioms (gsub(/[&<>]/, ESCAPES)). */
 static const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp_StrStrHash *h) {
   int64_t slen = (int64_t)strlen(str);
-  size_t cap = slen * 2 + 64; char *out = sp_str_alloc_raw(cap); size_t olen = 0;
+ /* malloc scratch (realloc-safe); exact-sized string emitted below. */
+  size_t cap = slen * 2 + 64; char *out = (char *)malloc(cap); size_t olen = 0;
   int64_t pos = 0; int caps[64];
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, 64);
@@ -2295,7 +2305,10 @@ static const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *
     if (olen + rest >= cap) { cap = olen + rest + 1; out = (char *)realloc(out, cap); }
     memcpy(out + olen, str + pos, rest); olen += rest;
   }
-  out[olen] = 0; sp_str_set_len(out, olen); return out;
+  char *res = sp_str_alloc(olen);
+  memcpy(res, out, olen);
+  free(out);
+  return res;
 }
 
 /* Issue #910: sub(regex, hash) — same lookup semantics as
@@ -2350,16 +2363,19 @@ static const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const cha
   if (n <= 0 || caps[0] < 0) return str;
   /* Issue #855: expand `\1`..`\9` / `\&` from rep against caps. */
   size_t cap = caps[0] + rlen * 4 + (slen - caps[1]) + 64;
-  char *out = sp_str_alloc_raw(cap);
+ /* malloc scratch: sp_re_expand_rep and the tail grow it with realloc,
+    which needs a real malloc base. Exact-sized string emitted below. */
+  char *out = (char *)malloc(cap);
   memcpy(out, str, caps[0]);
   size_t olen = caps[0];
   sp_re_expand_rep(&out, &olen, &cap, rep, rlen, str, caps, n);
   size_t rest = slen - caps[1];
   if (olen + rest + 1 >= cap) { cap = olen + rest + 64; out = (char*)realloc(out, cap); }
-  memcpy(out+olen, str+caps[1], rest);
-  out[olen+rest] = 0;
-  sp_str_set_len(out, olen + rest);
-  return out;
+  memcpy(out+olen, str+caps[1], rest); olen += rest;
+  char *res = sp_str_alloc(olen);
+  memcpy(res, out, olen);
+  free(out);
+  return res;
 }
 
 static sp_StrArray *sp_re_scan(mrb_regexp_pattern *pat, const char *str) {
