@@ -28035,7 +28035,17 @@ class Compiler
       t = @nd_type[i]
       if t == "SymbolNode"
         sname = @nd_content[i]
-        collect_sym_name_into(local, sname)
+ # The empty symbol `:""` is a real SymbolNode whose content is "".
+ # collect_sym_name_into skips "" (it guards param-name callers that
+ # can pass a blank), so register it directly here; without an entry
+ # compile_symbol_literal falls back to the unemitted sp_sym_intern.
+        if sname == ""
+          if not_in("", local) == 1
+            local.push("")
+          end
+        else
+          collect_sym_name_into(local, sname)
+        end
       end
       if t == "BlockNode"
         collect_proc_param_sym_names(local, i, 0)
