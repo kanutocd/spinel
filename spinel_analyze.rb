@@ -6670,6 +6670,15 @@ class Compiler
           return infer_type(aargs[0])
         end
       end
+ # Seedless reduce/inject (explicit block or `&:sym`, no positional
+ # seed): the accumulator starts as the first element and a
+ # homogeneous fold preserves that type, so the call's result is the
+ # element type, not the scalar-int default. Without this an
+ # int_array-valued fold like `[[..],[..]].inject { |a,b| a & b }`
+ # typed as int and the int_array result was dispatched as a scalar.
+      if (mname == "reduce" || mname == "inject") && recv >= 0
+        return elem_type_of_array(infer_type(recv))
+      end
       return "int"
     end
     if mname == "[]" || (mname == "at" && recv >= 0 && is_array_type(infer_type(recv)) == 1)

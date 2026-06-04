@@ -47687,6 +47687,58 @@ class Compiler
     compile_reduce_block(nid)
   end
 
+ # The symbol of a `reduce(&:sym)` / `inject(&:sym)` symbol-to-proc
+ # block, or "" when the call uses an explicit block / no block.
+  def reduce_block_sym_op(nid)
+    blk = @nd_block[nid]
+    if blk >= 0 && @nd_type[blk] == "BlockArgumentNode"
+      inner = @nd_expression[blk]
+      if inner >= 0 && @nd_type[inner] == "SymbolNode"
+        return @nd_content[inner]
+      end
+    end
+    ""
+  end
+
+ # Lower the symbol-to-proc fold body `acc.<op>(x)`, where both
+ # operands have the array's element type `elem_t`. Returns "" for any
+ # (elem_t, op) we don't model so the caller warns instead of emitting
+ # wrong C.
+  def reduce_sym_dispatch(elem_t, op, acc_c, x_c)
+    if elem_t == "int_array" || elem_t == "str_array" || elem_t == "float_array"
+      apfx = array_c_prefix(elem_t)
+      if op == "&"
+        return "sp_" + apfx + "_intersect(" + acc_c + ", " + x_c + ")"
+      end
+      if op == "|"
+        return "sp_" + apfx + "_union(" + acc_c + ", " + x_c + ")"
+      end
+      if op == "-"
+        return "sp_" + apfx + "_difference(" + acc_c + ", " + x_c + ")"
+      end
+      return ""
+    end
+    if elem_t == "int"
+      if op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^"
+        return "(" + acc_c + " " + op + " " + x_c + ")"
+      end
+      return ""
+    end
+    if elem_t == "float"
+      if op == "+" || op == "-" || op == "*" || op == "/"
+        return "(" + acc_c + " " + op + " " + x_c + ")"
+      end
+      return ""
+    end
+    if elem_t == "string"
+      if op == "+"
+        return "sp_str_concat(" + acc_c + ", " + x_c + ")"
+      end
+      return ""
+    end
+    ""
+  end
+
   def compile_reduce_block(nid)
     old = @in_loop
     @in_loop = 1
@@ -47702,11 +47754,21 @@ class Compiler
         seed_nid = aargs[0]
       end
     end
-    init_val = compile_expr_gc_rooted(seed_nid)
+ # Symbol-to-proc fold operator: either the `&:sym` block arg or a
+ # bare positional `:sym` (the latter only reaches here for non-
+ # int_array receivers; int_array `:sym`/`&:sym` fold inline upstream).
+    sym_op = reduce_block_sym_op(nid)
+    if sym_op == "" && seed_nid >= 0 && @nd_type[seed_nid] == "SymbolNode"
+      sym_op = @nd_content[seed_nid]
+      seed_nid = -1
+    end
+    seedless = (seed_nid < 0) ? 1 : 0
     bp1 = get_block_param(nid, 0)
     bp2 = get_block_param(nid, 1)
+    synth_acc = 0
     if bp1 == ""
       bp1 = "_acc"
+      synth_acc = 1
     end
     if bp2 == ""
       bp2 = "_x"
@@ -47714,21 +47776,34 @@ class Compiler
     rt = infer_type(@nd_receiver[nid])
     pfx = array_c_prefix(rt)
     elem_t = elem_type_of_array(rt)
- # bp1 takes the seed's type. Seed-less form is currently treated as
- # 0-seeded (init_val resolves to "0" via compile_expr(-1)); seed_t
- # falls back to elem_t to keep the type system consistent. This is
- # not true Ruby first-element seeding — known limitation.
+ # bp1 takes the seed's type. A seedless fold seeds the accumulator
+ # with the first element (true Ruby semantics) and iterates from
+ # index 1, so its type is the element type. An empty array yields
+ # the element-type default (typed arrays can't carry nil — same
+ # fallback as the int_array sym fast path).
     seed_t = elem_t
-    if seed_nid >= 0
+    if seedless == 0
       seed_t = infer_type(seed_nid)
+    end
+    loop_start = "0"
+    if seedless == 1
+      init_val = "(sp_" + pfx + "_length(" + rc + ") > 0 ? sp_" + pfx + "_get(" + rc + ", 0) : " + c_default_val(elem_t) + ")"
+      loop_start = "1"
+    else
+      init_val = compile_expr_gc_rooted(seed_nid)
     end
  # See compile_each_slice_block for the typed-shadow + SP_GC_ROOT
  # technique inside a C block scope. reduce additionally needs
  # result_tmp because it's expression-form: the final value must
  # survive past the inner scope's `}` for the caller to consume.
+ # A synthetic `_acc` (from `&:sym`) is not pre-declared via the
+ # body's scope_names, so it takes the same fresh-decl block path.
     outer_t = find_var_type(bp1)
     shadowed = 0
     if outer_t != "" && outer_t != seed_t
+      shadowed = 1
+    end
+    if synth_acc == 1
       shadowed = 1
     end
     acc_expr = "lv_" + bp1
@@ -47751,21 +47826,31 @@ class Compiler
       emit("  lv_" + bp1 + " = " + init_val + ";")
     end
     tmp = new_temp
-    emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_" + pfx + "_length(" + rc + "); " + tmp + "++) {")
+    emit("  for (mrb_int " + tmp + " = " + loop_start + "; " + tmp + " < sp_" + pfx + "_length(" + rc + "); " + tmp + "++) {")
     emit("    " + c_type(elem_t) + " lv_" + bp2 + " = sp_" + pfx + "_get(" + rc + ", " + tmp + ");")
     @indent = @indent + 1
     push_scope
     declare_var(bp1, seed_t)
     declare_var(bp2, elem_t)
-    blk = @nd_block[nid]
-    if blk >= 0
-      body = @nd_body[blk]
-      if body >= 0
-        stmts = get_stmts(body)
-        if stmts.length > 0
-          last = stmts.last
-          val = compile_expr(last)
-          emit("  lv_" + bp1 + " = " + val + ";")
+    if sym_op != ""
+ # `&:sym` / `:sym` form: fold body is `acc = acc.sym(x)`.
+      disp = reduce_sym_dispatch(elem_t, sym_op, "lv_" + bp1, "lv_" + bp2)
+      if disp != ""
+        emit("  lv_" + bp1 + " = " + disp + ";")
+      else
+        warn_unresolved_call(sym_op, elem_t)
+      end
+    else
+      blk = @nd_block[nid]
+      if blk >= 0
+        body = @nd_body[blk]
+        if body >= 0
+          stmts = get_stmts(body)
+          if stmts.length > 0
+            last = stmts.last
+            val = compile_expr(last)
+            emit("  lv_" + bp1 + " = " + val + ";")
+          end
         end
       end
     end
