@@ -50,6 +50,11 @@ EMIT_RBS=0
 EMIT_TYPES=0
 STDOUT_MODE=0
 RUN_MODE=0
+# #line directives are on by default: they cost nothing at runtime (purely a
+# diagnostic directive; the binary is identical modulo line attribution) and
+# let the C toolchain report any compile error on the generated C against the
+# Ruby source line. Opt out with --no-line-map.
+LINE_MAP=1
 OPT_LEVEL="2"
 CC_CMD="cc"
 EXTRA_FLAGS=""
@@ -111,6 +116,14 @@ while [ $# -gt 0 ]; do
                 # the default -O2 gives lossy DWARF; use --debug for
                 # faithful stepping).
                 DEBUG=1; shift ;;
+    --line-map) # Emit `#line` directives so a compile error on the
+                # generated C is reported against the Ruby source line,
+                # without --debug's -O0 / non-inlined / -g cost. On by
+                # default; this flag is kept for explicitness.
+                LINE_MAP=1; shift ;;
+    --no-line-map) # Suppress #line directives (smaller generated C; compile
+                # errors report against out.c instead of the Ruby source).
+                LINE_MAP=0; shift ;;
     -e)         shift
                 if [ "$EVAL_USED" -eq 0 ]; then
                   EVAL_SCRIPT="$1"
@@ -234,6 +247,8 @@ if [ -z "$SOURCE" ]; then
   echo "  --debug     Debug build: step through the .rb in gdb/lldb" >&2
   echo "              (emits #line, keeps methods non-inlined, -g -O0)" >&2
   echo "  -g          Add debug info + #line without forcing -O0" >&2
+  echo "  --no-line-map  Suppress #line directives (smaller C; compile errors" >&2
+  echo "              report against generated C, not the Ruby source)" >&2
   echo "  --cc=CMD    C compiler (default: cc)" >&2
   echo "  -e STR      Inline Ruby source (repeatable; joined with newlines)" >&2
   echo "  --rbs DIR   Seed analyzer with RBS signatures from DIR (advisory)" >&2
@@ -261,6 +276,12 @@ trap 'rm -f "$AST_TMP" "$IR_TMP" "$EVAL_TMP" "$SEED_TMP"; [ -n "$C_TMP_DIR" ] &&
 # Debug mode signal, read by the parser (per-node line stamps) and the
 # codegen (#line emission + non-inlined methods). Must be exported
 # before the parse step below since spinel_parse reads it at init.
+# --line-map: stamp #line directives (parser + codegen) for Ruby-mapped
+# compile errors, but keep the normal optimized build (no -O0/-g/-rdynamic).
+# --debug implies it; SPINEL_DEBUG already turns on the same #line path.
+if [ "$LINE_MAP" -eq 1 ] && [ "$DEBUG" -eq 0 ]; then
+  export SPINEL_LINE_MAP=1
+fi
 if [ "$DEBUG" -eq 1 ]; then
   export SPINEL_DEBUG=1
   EXTRA_FLAGS="$EXTRA_FLAGS -g"

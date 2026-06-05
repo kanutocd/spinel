@@ -60,6 +60,13 @@ class Compiler
  # real (non-inlined) frame, so a native debugger steps through the
  # original Ruby. Off by default -> output byte-for-byte unchanged.
     @debug = (ENV["SPINEL_DEBUG"] == "1")
+ # `--line-map` (SPINEL_LINE_MAP=1): emit `#line` directives in an
+ # otherwise-normal optimized build so the C toolchain attributes any
+ # compile error on the generated C back to the Ruby source line,
+ # without the -O0 / non-inlined / -g cost of a full --debug build.
+ # Only the `#line` emission keys off this; every other @debug-gated
+ # behaviour (external linkage, etc.) stays off.
+    @line_map = (ENV["SPINEL_LINE_MAP"] == "1")
     @last_line_emitted = 0
     @last_file_emitted = ""
  # Debug multi-file map: FILE table (id -> path) populated from the AST's
@@ -3257,7 +3264,7 @@ class Compiler
  # @nd_value). Consecutive duplicates are suppressed so a multi-line
  # statement doesn't reset to the same line repeatedly.
   def emit_line_directive(nid)
-    if @debug == false
+    if @debug == false && @line_map == false
       return
     end
     if nid < 0

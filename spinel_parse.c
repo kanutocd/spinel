@@ -2104,7 +2104,10 @@ int main(int argc, char **argv) {
      PUSH/POP markers used to rebuild the multi-file source map. */
   {
     const char *dbg = getenv("SPINEL_DEBUG");
-    g_emit_line = (dbg != NULL && dbg[0] == '1' && dbg[1] == '\0') ? 1 : 0;
+    const char *lm = getenv("SPINEL_LINE_MAP");
+    int on = (dbg != NULL && dbg[0] == '1' && dbg[1] == '\0')
+          || (lm  != NULL && lm[0]  == '1' && lm[1]  == '\0');
+    g_emit_line = on ? 1 : 0;
   }
 
   /* Resolve require_relative and plain require */
@@ -2130,8 +2133,15 @@ int main(int argc, char **argv) {
     if (la == lb) {
       sp_build_line_map(premap, source_file);
     } else {
-      fprintf(stderr, "spinel_parse: --debug multi-file map disabled "
-                      "(syntax-sugar changed line count)\n");
+      /* Multi-file line attribution unavailable for this program; #line
+         falls back to buffer lines. Only worth a word under an explicit
+         --debug build (faithful stepping matters there); stay silent for
+         the default line-map so normal builds aren't noisy. */
+      const char *dbg = getenv("SPINEL_DEBUG");
+      if (dbg != NULL && dbg[0] == '1' && dbg[1] == '\0') {
+        fprintf(stderr, "spinel_parse: multi-file line map disabled "
+                        "(syntax-sugar changed line count)\n");
+      }
     }
     free(premap);
   }
