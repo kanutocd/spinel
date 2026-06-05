@@ -22192,6 +22192,17 @@ class Compiler
       end
       k = k + 1
     end
+    # The loop above only inspects the top-level return-path types
+    # (explicit returns plus the last statement's already-unified type).
+    # When the int return is buried inside a tail branch expression --
+    # `def [](f); if f==0; @id; else; @name; end; end` unifies the
+    # IfNode to "string", hiding the int @id arm -- recurse into the
+    # branches to find a genuine int and box the whole return to poly.
+    # Runs post-fixpoint, so ivar types are converged (a param-sourced
+    # path ivar reads as its real string type here, not a transient int).
+    if declared_is_ptr == 1 && body_has_genuine_int_return?(body_id) == 1
+      return 1
+    end
     0
   end
 
@@ -22908,6 +22919,158 @@ class Compiler
       j = j + 1
     end
     "int"
+  end
+
+  # When return-unify picks a concrete pointer type for a method that
+  # ALSO genuinely returns an int (an int literal, or a written int
+  # ivar, in tail/return position), the int branch would be silently
+  # mis-returned through the pointer slot. Detect that case so the
+  # caller can box the return to poly. "Genuine" excludes the
+  # unresolved-default int the unify heuristic exists for (a var or
+  # call that merely defaults to int, as in the compiler's own
+  # type-computing helpers); those keep their concrete return.
+  def body_has_genuine_int_return?(body_id)
+    body_genuine_int_returns?(body_id, 1)
+  end
+
+  def body_genuine_int_returns?(body_id, tail)
+    if body_id < 0
+      return 0
+    end
+    stmts = get_stmts(body_id)
+    n = stmts.length
+    if n == 0
+      return 0
+    end
+    gi = 0
+    while gi < n
+      st_tail = 0
+      if gi == n - 1
+        st_tail = tail
+      end
+      if stmt_genuine_int_return?(stmts[gi], st_tail) == 1
+        return 1
+      end
+      gi = gi + 1
+    end
+    0
+  end
+
+  def stmt_genuine_int_return?(nid, tail)
+    if nid < 0
+      return 0
+    end
+    gt = @nd_type[nid]
+    if gt == "ReturnNode"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        a = get_args(args_id)
+        if a.length == 1
+          return leaf_genuine_int?(a[0])
+        end
+      end
+      return 0
+    end
+    if gt == "DefNode"
+      return 0
+    end
+    if gt == "IfNode"
+      if body_genuine_int_returns?(@nd_body[nid], tail) == 1
+        return 1
+      end
+      sub_g = @nd_subsequent[nid]
+      if sub_g >= 0 && stmt_genuine_int_return?(sub_g, tail) == 1
+        return 1
+      end
+      return 0
+    end
+    if gt == "UnlessNode"
+      if body_genuine_int_returns?(@nd_body[nid], tail) == 1
+        return 1
+      end
+      ec_g = @nd_else_clause[nid]
+      if ec_g >= 0 && stmt_genuine_int_return?(ec_g, tail) == 1
+        return 1
+      end
+      return 0
+    end
+    if gt == "ElseNode"
+      return body_genuine_int_returns?(@nd_body[nid], tail)
+    end
+    if gt == "WhileNode"
+      # A loop body's stmts are never the method's implicit tail, but an
+      # explicit `return <int>` inside still counts.
+      return body_genuine_int_returns?(@nd_body[nid], 0)
+    end
+    if gt == "CaseNode"
+      conds_g = parse_id_list(@nd_conditions[nid])
+      kg = 0
+      while kg < conds_g.length
+        wid_g = conds_g[kg]
+        if @nd_type[wid_g] == "WhenNode" && body_genuine_int_returns?(@nd_body[wid_g], tail) == 1
+          return 1
+        end
+        kg = kg + 1
+      end
+      ecn_g = @nd_else_clause[nid]
+      if ecn_g >= 0 && body_genuine_int_returns?(@nd_body[ecn_g], tail) == 1
+        return 1
+      end
+      return 0
+    end
+    if gt == "CaseMatchNode"
+      cm_g = parse_id_list(@nd_conditions[nid])
+      mi = 0
+      while mi < cm_g.length
+        if @nd_type[cm_g[mi]] == "InNode" && body_genuine_int_returns?(@nd_body[cm_g[mi]], tail) == 1
+          return 1
+        end
+        mi = mi + 1
+      end
+      return 0
+    end
+    if gt == "BeginNode"
+      arms_g = begin_node_arm_bodies(nid)
+      bgi = 0
+      while bgi < arms_g.length
+        if body_genuine_int_returns?(arms_g[bgi], tail) == 1
+          return 1
+        end
+        bgi = bgi + 1
+      end
+      return 0
+    end
+    if tail == 1
+      return leaf_genuine_int?(nid)
+    end
+    0
+  end
+
+  # A value node counts as a genuine int only when it is an int literal
+  # or a read of a written int ivar. A plain var/call that merely
+  # infers int (the unresolved default) does NOT count.
+  def leaf_genuine_int?(nid)
+    if nid < 0
+      return 0
+    end
+    lt = @nd_type[nid]
+    if lt == "IntegerNode"
+      return 1
+    end
+    if lt == "InstanceVariableReadNode"
+      # An ivar reads as "int" both when it genuinely stores an int and
+      # when it is never written (the nonexistent-ivar default). Only the
+      # former -- an ivar actually recorded in the class's table -- is a
+      # genuine int return; a never-written ivar (e.g. an optional path
+      # slot only ever compared to nil) must not force a poly box.
+      if @current_class_idx >= 0
+        iname = @nd_name[nid]
+        if ivar_exists(@current_class_idx, iname) == 1 && cls_ivar_type(@current_class_idx, iname) == "int"
+          return 1
+        end
+      end
+    end
+    0
   end
 
   def infer_body_return(body_id)
