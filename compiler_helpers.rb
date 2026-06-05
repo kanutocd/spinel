@@ -284,22 +284,33 @@ class Compiler
       return ""
     end
     mname_eg = @nd_name[expr_id]
-    if mname_eg != "index" && mname_eg != "rindex" && mname_eg != "find_index"
-      return ""
-    end
     recv_eg = @nd_receiver[expr_id]
     if recv_eg < 0
       return ""
     end
-    rt_eg = infer_type(recv_eg)
-    if rt_eg == "string" || rt_eg == "mutable_str"
-      return "int"
-    end
+    if mname_eg == "index" || mname_eg == "rindex" || mname_eg == "find_index"
+      rt_eg = infer_type(recv_eg)
+      if rt_eg == "string" || rt_eg == "mutable_str"
+        return "int"
+      end
  # Array#index family on int_array now returns int? (sentinel-
  # encoded). After `return if h.nil?` the live arm sees the value
  # as a plain int, same as the String#index narrow above.
-    if rt_eg == "int_array"
-      return "int"
+      if rt_eg == "int_array"
+        return "int"
+      end
+      return ""
+    end
+ # Maybe-missing typed-int-hash read `x = h[k]; return if x.nil?`:
+ # the live arm proved the key present, so the read narrows from
+ # int? back to a plain mrb_int. Mirrors the int_array arm above.
+ # No-op until typed-int-hash `[]` returns int? (#801 Phase 4).
+    if mname_eg == "[]"
+      rt_he = base_type(infer_type(recv_eg))
+      if rt_he == "str_int_hash" || rt_he == "sym_int_hash" || rt_he == "int_int_hash"
+        return "int"
+      end
+      return ""
     end
     ""
   end
@@ -615,7 +626,10 @@ class Compiler
  # must treat the result as read-only.
   def parse_id_list(s)
     if @parse_id_cache.key?(s)
-      return @parse_id_pool[@parse_id_cache[s]]
+ # Checked read: the guard proves the key present, so fetch keeps the
+ # static type `int` (not the maybe-missing int? the public `[]` now
+ # yields, #801 Phase 4) and the pool index stays non-null.
+      return @parse_id_pool[@parse_id_cache.fetch(s)]
     end
     result = []
     if s != ""

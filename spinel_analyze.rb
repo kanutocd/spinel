@@ -1958,7 +1958,7 @@ class Compiler
   def cls_method_return(ci, mname)
     ck = ci.to_s + ":" + mname
     if @cls_meth_return_cache.key?(ck)
-      return @cls_meth_return_cache[ck]
+      return @cls_meth_return_cache.fetch(ck)
     end
     names = @cls_meth_names[ci].split(";", -1)
     returns = @cls_meth_returns[ci].split(";", -1)
@@ -2016,7 +2016,7 @@ class Compiler
     end
     ck = ci.to_s + ":" + iname
     if @cls_ivar_type_cache.key?(ck)
-      return @cls_ivar_type_cache[ck]
+      return @cls_ivar_type_cache.fetch(ck)
     end
     names = @cls_ivar_names[ci].split(";", -1)
     types = @cls_ivar_types[ci].split(";", -1)
@@ -5350,6 +5350,12 @@ class Compiler
               end
             end
           end
+ # fetch(k) (no default) raises KeyError on a miss, and fetch(k, int)
+ # carries an int default, so the result is always a present mrb_int
+ # -> plain int (the doc's "checked read"). This keeps the compiler's
+ # own logically-total int-hash table reads non-null under the #801
+ # Phase 4 flip, instead of falling through to the "" default.
+          return "int"
         end
         if rt == "str_str_hash" || rt == "sym_str_hash" || rt == "int_str_hash"
           return "string"
@@ -6788,17 +6794,14 @@ class Compiler
           return tuple_elem_type_at(rt, 0)
         end
  # *StrHash get returns NULL for missing keys (was sp_str_empty).
- # *IntHash `h[k]` still surfaces as "int" here, not "int?": every
- # such read would widen, and unlike the always-nil block params in
- # #997 (which are nullable on every path), a typed-int-hash read is
- # usually a hit, so widening the whole slot to int? cascades
- # int-sentinel arithmetic through legitimate values (the #801
- # Phase 4 concern). So `h[k].inspect` of a *missing* int key prints
- # INT64_MIN's decimal until that narrower follow-up lands. (Block
- # params CAN be int? — see method_yield_min_argc — because there
- # the slot is genuinely never filled.)
+ # *IntHash `h[k]` is maybe-missing, so the public read is int?
+ # (SP_INT_NIL on a miss); see #801 Phase 4. Proven-present reads
+ # (has_key?-guarded / nil-guarded / iteration-key / fetch) narrow
+ # back to a plain int so the compiler's own logically-total table
+ # reads stay non-null and don't cascade the sentinel into the
+ # string-typed infer_type memo.
         if rt == "str_int_hash"
-          return "int"
+          return "int?"
         end
         if rt == "str_str_hash"
           return "string"
@@ -6882,6 +6885,13 @@ class Compiler
  # puzzle 2.
     if mname == "default" && recv >= 0
       rt_d = infer_type(recv)
+ # A str_int_hash with no explicit default carries SP_INT_NIL in
+ # default_v (#801 Phase 4), so `Hash#default` is maybe-nil -> int?,
+ # letting `{}.default` surface Ruby nil instead of the raw sentinel.
+ # Hash.new(N).default is a present int and prints normally.
+      if base_type(rt_d) == "str_int_hash"
+        return "int?"
+      end
       if is_hash_type(rt_d) == 1
         lt_d = hash_leaf_type(rt_d)
         if lt_d != ""
@@ -9152,7 +9162,9 @@ class Compiler
     if @nd_type[recv] == "LocalVariableReadNode"
       vname = @nd_name[recv]
       if local_class.key?(vname)
-        return local_class[vname]
+ # Checked read (guard proves presence): fetch keeps the class-idx
+ # int non-null under the #801 Phase 4 int? flip on hash `[]`.
+        return local_class.fetch(vname)
       end
  # Inside a class instance method, the top-level local_class
  # map is intentionally empty. Fall back to find_var_type so a
@@ -13928,7 +13940,9 @@ class Compiler
         bare = full[plen, full.length - plen]
         existing = -1
         if name_to_idx.key?(bare)
-          existing = name_to_idx[bare]
+ # Checked read (guard proves presence): keep the method-index int
+ # non-null under the #801 Phase 4 int? flip on hash `[]`.
+          existing = name_to_idx.fetch(bare)
         end
         if existing < 0
           @meth_names.push(bare)
@@ -15854,7 +15868,7 @@ class Compiler
       if recv >= 0 && @nd_type[recv] == "ConstantReadNode"
         cname = @nd_name[recv]
         ci = find_class_idx(cname)
-        if ci >= 0 && @cls_ctor_yield_ret[cname] == nil
+        if ci >= 0 && !@cls_ctor_yield_ret.has_key?(cname)
           init_idx = cls_find_method(ci, "initialize")
           if init_idx >= 0 && cls_method_has_yield(ci, init_idx) == 1
             blk = @nd_block[nid]
@@ -15888,11 +15902,14 @@ class Compiler
       return ""
     end
     cn = @cls_names[@current_class_idx]
-    r = @cls_ctor_yield_ret[cn]
-    if r == nil
-      return ""
+ # Guarded fetch keeps this read non-int? under the #801 Phase 4 flip:
+ # @cls_ctor_yield_ret is a string cache that the fixpoint transiently
+ # types str_int_hash; a maybe-missing `[]` would yield a sticky int?
+ # that latches into infer_type's return. fetch yields int/string only.
+    if @cls_ctor_yield_ret.key?(cn)
+      return @cls_ctor_yield_ret.fetch(cn)
     end
-    r
+    ""
   end
 
  # Narrow pre-pass for `rewrite_instance_eval_calls`: walk top-level
@@ -27278,7 +27295,7 @@ class Compiler
       if mi >= 0
         key = mi.to_s
         if @meth_rbs_ptypes.key?(key)
-          rbs_pt = @meth_rbs_ptypes[key]
+          rbs_pt = @meth_rbs_ptypes.fetch(key)
           label = mname
         end
       end
@@ -27299,7 +27316,7 @@ class Compiler
           if rmidx >= 0
             key2 = rci.to_s + "|" + rmidx.to_s
             if @cls_meth_rbs_ptypes.key?(key2)
-              rbs_pt = @cls_meth_rbs_ptypes[key2]
+              rbs_pt = @cls_meth_rbs_ptypes.fetch(key2)
               label = rcname + "#" + mname
             end
           end
@@ -27326,7 +27343,7 @@ class Compiler
           if cmidx >= 0
             key3 = rci.to_s + "|" + cmidx.to_s
             if @cls_cmeth_rbs_ptypes.key?(key3)
-              rbs_pt = @cls_cmeth_rbs_ptypes[key3]
+              rbs_pt = @cls_cmeth_rbs_ptypes.fetch(key3)
               label = rcname + "." + mname
             end
           end
@@ -30268,7 +30285,10 @@ class Compiler
  # Intern a method name to a small integer id, stable for the run.
   def mname_to_id(mname)
     if @mname_id.key?(mname)
-      return @mname_id[mname]
+ # Checked read: the guard proves the key present, so fetch returns
+ # the same value as `[]` but keeps the static type `int` (not the
+ # maybe-missing int? the public `[]` now yields, #801 Phase 4).
+      return @mname_id.fetch(mname)
     end
     mid = @mname_id_next
     @mname_id[mname] = mid
@@ -33244,7 +33264,7 @@ class Compiler
     end
     cache_key = @current_class_idx.to_s + ":" + lv_name
     if @lv_alias_cache.key?(cache_key)
-      return @lv_alias_cache[cache_key]
+      return @lv_alias_cache.fetch(cache_key)
     end
     found = ""
     bodies = @cls_meth_bodies[@current_class_idx].split(";", -1)
@@ -33444,7 +33464,7 @@ class Compiler
     end
     ck = ci.to_s + ":" + iname
     if @ivar_concrete_recover_cache.key?(ck)
-      return @ivar_concrete_recover_cache[ck]
+      return @ivar_concrete_recover_cache.fetch(ck)
     end
     out = ""
     mnames_w = @cls_meth_names[ci].split(";", -1)
@@ -36294,7 +36314,10 @@ class Compiler
       tk = @nd_type[bn]
       if tk == "BlockNode" || tk == "LambdaNode" || tk == "ProcNode"
         body_bn = @nd_body[bn]
-        if ieval_body_set[body_bn.to_s] != nil
+ # Presence test on a marker set (values are always 1). has_key? is
+ # the direct form and avoids reading the maybe-missing int? value
+ # the public `[]` now yields (#801 Phase 4); behaviour-identical.
+        if ieval_body_set.has_key?(body_bn.to_s)
           bn = bn + 1
           next
         end

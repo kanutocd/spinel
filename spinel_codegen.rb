@@ -28047,7 +28047,10 @@ class Compiler
         return out_tmp
       end
       if mname == "[]"
-        return "sp_StrIntHash_get(" + rc + ", " + compile_str_arg0(nid) + ")"
+ # Issue #801 Phase 4: maybe-missing read surfaces nil via SP_INT_NIL.
+ # Storage is identical (mrb_int), so a proven-present read narrowed back
+ # to int by analyze sees the same value; only the miss path differs.
+        return "sp_StrIntHash_get_opt(" + rc + ", " + compile_str_arg0(nid) + ")"
       end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
         return "sp_StrIntHash_has_key(" + rc + ", " + compile_str_arg0(nid) + ")"
@@ -31190,7 +31193,10 @@ class Compiler
     end
     cache_key = @current_class_idx.to_s + ":" + lv_name
     if @lv_alias_cache.key?(cache_key)
-      return @lv_alias_cache[cache_key]
+ # Checked read (guard proves presence): fetch keeps the alias cache
+ # value non-int? under the #801 Phase 4 flip; this str cache is
+ # transiently typed str_int_hash during the fixpoint.
+      return @lv_alias_cache.fetch(cache_key)
     end
     found = ""
     bodies = @cls_meth_bodies[@current_class_idx].split(";", -1)
