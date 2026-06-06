@@ -97,7 +97,7 @@ static const char *sp_sym_to_s(sp_sym id);
    `a / 0`, `a % 0`, `a.divmod(0)`, `a.ceildiv(0)`, and `a.pow(e, 0)` all
    raise ZeroDivisionError instead of triggering C undefined behaviour
    (SIGFPE on x86) or silently returning 0. */
-void sp_raise_cls(const char *cls, const char *msg);
+SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 
 static inline mrb_int sp_idiv(mrb_int a, mrb_int b) {
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
@@ -241,7 +241,7 @@ static inline mrb_int sp_i64_to_int(int64_t v){
 
 /* Forward decls for helpers used across this header (and by the
    string->number parsers that now live in libspinel_rt.a). */
-void sp_raise_cls(const char *cls, const char *msg);
+SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
 const char *sp_sprintf(const char *fmt, ...);
 
 /* String -> number parsers now live in libspinel_rt.a (lib/sp_core.c). */
@@ -3632,7 +3632,7 @@ static sp_StrArray *sp_caller_now(void) {
 #endif
 }
 
-void sp_raise_cls(const char *cls, const char *msg) {
+SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
 #if SP_BT_AVAILABLE
   if (sp_bt_enabled) sp_bt_n = backtrace(sp_bt_buf, 256);
 #endif

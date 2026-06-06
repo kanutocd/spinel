@@ -19,6 +19,23 @@
 #include <stddef.h>
 #include <float.h>   /* DBL_MAX / DBL_MIN / DBL_EPSILON for Float::* constants */
 
+/* Branch-hint / hot-cold attributes. Static approximation of PGO: marking
+   rare paths (raise, dispatch fallbacks) cold lets the C compiler split
+   them out of the hot path's i-cache footprint. No-op on non-GCC/clang. */
+#if defined(__GNUC__) || defined(__clang__)
+# define SP_LIKELY(x)   __builtin_expect(!!(x), 1)
+# define SP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+# define SP_COLD        __attribute__((cold))
+# define SP_NOINLINE    __attribute__((noinline))
+# define SP_NORETURN    __attribute__((noreturn))
+#else
+# define SP_LIKELY(x)   (x)
+# define SP_UNLIKELY(x) (x)
+# define SP_COLD
+# define SP_NOINLINE
+# define SP_NORETURN
+#endif
+
 /* mrb_int follows pointer width (decided at compile time via intptr_t):
    int64_t on 64-bit hosts -- PCs, no behavior change -- and int32_t on
    32-bit embedded targets, where it gives native-word arithmetic, half
