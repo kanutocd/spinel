@@ -31524,7 +31524,7 @@ class Compiler
  # For non-int keys (string, sym, ...) the SP_TAG_INT branch
  # is unreachable at runtime and `(recv.v.i >> key)` is
  # invalid C — `>> const char *` won't compile.
-    if mname == "[]" && arg_compiled.length >= 1 && (arg_types[0] == "int" || arg_types[0] == "poly" || arg_types[0] == "bigint")
+    if mname == "[]" && arg_compiled.length >= 1 && (arg_types[0] == "int" || arg_types[0] == "int?" || arg_types[0] == "poly" || arg_types[0] == "bigint")
       a0_int = arg_compiled[0]
       if arg_types[0] == "poly"
         a0_int = "(" + a0_int + ").v.i"
@@ -31545,8 +31545,8 @@ class Compiler
     if mname == "[]" && arg_compiled.length == 2 && is_poly_ret == 1
       a1_t_idx = arg_types.length > 0 ? arg_types[0] : ""
       a2_t_idx = arg_types.length > 1 ? arg_types[1] : ""
-      if (a1_t_idx == "int" || a1_t_idx == "poly" || base_type(a1_t_idx) == "bigint") &&
-         (a2_t_idx == "int" || a2_t_idx == "poly" || base_type(a2_t_idx) == "bigint")
+      if (a1_t_idx == "int" || a1_t_idx == "int?" || a1_t_idx == "poly" || base_type(a1_t_idx) == "bigint") &&
+         (a2_t_idx == "int" || a2_t_idx == "int?" || a2_t_idx == "poly" || base_type(a2_t_idx) == "bigint")
         a1s_idx = arg_compiled[0]
         if a1_t_idx == "poly"
           a1s_idx = "(" + a1s_idx + ").v.i"
@@ -31933,7 +31933,7 @@ class Compiler
  # runtime (a poly recv carrying a String key would be a hash,
  # not an array) and emitting them produces Wint-conversion
  # warnings — or hard errors under -Werror.
-    a0_is_int = arg_compiled.length >= 1 && (arg_types.length == 0 || arg_types[0] == "int" || arg_types[0] == "poly" || arg_types[0] == "bigint")
+    a0_is_int = arg_compiled.length >= 1 && (arg_types.length == 0 || arg_types[0] == "int" || arg_types[0] == "int?" || arg_types[0] == "poly" || arg_types[0] == "bigint")
  # Hash dispatch arms for `[]` on a poly recv whose runtime
  # storage is a *-Hash variant. The chained `outer[k1][k2]`
  # shape where outer is StrPolyHash lands here — the inner []
