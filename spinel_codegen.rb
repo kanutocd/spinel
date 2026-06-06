@@ -37082,7 +37082,12 @@ class Compiler
         return
       end
       if op == "+"
-        if vt == "string" && infer_type(@nd_expression[nid]) == "string"
+        if base_type(vt) == "string" && base_type(infer_type(@nd_expression[nid])) == "string"
+ # A `const char *`-typed string is still a Ruby String, including the
+ # nullable `string?` slot a method like `mk -> nil | "x"` produces.
+ # `vt OP= rhs` on two such operands must lower to a string concat, not
+ # raw C pointer `+` (invalid operands to binary +). sp_str_concat
+ # treats a NULL (nil) operand as empty. Issue #1341.
           emit("  " + vref + " = sp_str_concat(" + vref + ", " + val + ");")
         elsif vt == "complex" && infer_type(@nd_expression[nid]) == "complex"
  # `+=` on a struct doesn't compile in C; desugar to
