@@ -5134,6 +5134,53 @@ class Compiler
       end
       return "int"
     end
+ # `mutex.synchronize { body }`: single-threaded, so the result is the
+ # block's last-expression value (the lock is trivially held). No block
+ # param to bind -- synchronize yields nothing.
+    if mname == "synchronize"
+      blk = @nd_block[nid]
+      if blk >= 0
+        bbody = @nd_body[blk]
+        if bbody >= 0
+          bbs = get_stmts(bbody)
+          if bbs.length > 0
+            return infer_type(bbs.last)
+          end
+        end
+        return "int"
+      end
+    end
+ # `Thread.new { body }`: single-threaded, so run the block eagerly;
+ # the Thread value is modelled directly as the block's return value.
+ # `t.value` / `t.join` then read that value back (identity below).
+    if mname == "new" && constructor_class_name(recv) == "Thread"
+      blk = @nd_block[nid]
+      if blk >= 0
+        bbody = @nd_body[blk]
+        if bbody >= 0
+          bbs = get_stmts(bbody)
+          if bbs.length > 0
+            return infer_type(bbs.last)
+          end
+        end
+      end
+      return "int"
+    end
+ # `t.value` on a Thread (modelled as its eager block value): return the
+ # receiver's type so the carried value reads back unchanged. In a
+ # single-threaded model the Thread *is* its result value, so `value` is
+ # the identity. A no-arg `value` is otherwise an unresolved call on the
+ # carried scalar; treating it as identity is strictly better than the
+ # int-0 fallback (and `value` on a real Integer is a NoMethodError in
+ # CRuby anyway, so no valid program loses). Restricted to scalar
+ # receivers so a struct/hash/array `value` access is never hijacked.
+    if mname == "value" && recv >= 0 && @nd_arguments[nid] < 0
+      rtv = infer_type(recv)
+      bt = base_type(rtv)
+      if bt == "int" || bt == "string" || bt == "float" || bt == "bool"
+        return rtv
+      end
+    end
  # `StringIO.open(str) { |io| ... }` returns the block's value (and
  # closes the io). Same value-returning-block shape as `then`, but the
  # block param is a freshly-constructed StringIO, not the receiver.

@@ -29474,6 +29474,34 @@ class Compiler
       end
     end
 
+ # Mutex#synchronize / Monitor#synchronize: Spinel is single-threaded,
+ # so the lock is trivially held -- just run the block and return its
+ # value. No receiver-type guard is needed: a `synchronize { ... }`
+ # call with a block is the mutex/monitor critical-section idiom (no
+ # compiler/user code defines a block-taking `synchronize`).
+    if mname == "synchronize"
+      if @nd_block[nid] >= 0
+        return compile_synchronize_expr(nid)
+      end
+    end
+
+ # Thread.new { body }: single-threaded, so run the block eagerly and
+ # model the Thread value as the block's result. `t.value` reads it back.
+    if mname == "new" && constructor_class_name(@nd_receiver[nid]) == "Thread"
+      if @nd_block[nid] >= 0
+        return compile_thread_new_expr(nid)
+      end
+    end
+
+ # `t.value` (no args) on a scalar Thread value: identity. The Thread was
+ # lowered to its eager block result, so reading `.value` just returns it.
+    if mname == "value" && @nd_arguments[nid] < 0
+      r = compile_thread_value_expr(nid)
+      if r != ""
+        return r
+      end
+    end
+
  # StringIO.open(str): with a block, build a StringIO, run the block
  # with it bound, and return the block's value; without a block, just
  # return the constructed StringIO (we do not model the implicit close).
@@ -47198,6 +47226,107 @@ class Compiler
     @indent = @indent - 1
     emit("  }")
     result_tmp
+  end
+
+  def compile_synchronize_expr(nid)
+ # `mutex.synchronize { body }` in a single-threaded model: the lock is
+ # always available, so run the block body and return its last-
+ # expression value. The receiver is evaluated for its side effects
+ # (it is usually a `Mutex.new`/`Monitor.new` that lowered to int 0)
+ # but is not bound to any block param -- synchronize yields no value.
+    recv = @nd_receiver[nid]
+    blk = @nd_block[nid]
+    bbody = @nd_body[blk]
+
+    ret_t = "int"
+    bs = []
+    if bbody >= 0
+      bs = get_stmts(bbody)
+      if bs.length > 0
+        ret_t = infer_type(bs.last)
+      end
+    end
+
+    result_tmp = new_temp
+    emit("  " + c_type(ret_t) + " " + result_tmp + " = " + c_default_val(ret_t) + ";")
+    emit("  {")
+    @indent = @indent + 1
+    push_scope
+ # Evaluate the receiver inside the block for its side effects (e.g. a
+ # `get_lock().synchronize { ... }` where the receiver is a method call).
+ # A bare local/ivar receiver compiles to a side-effect-free reference,
+ # so the discarded `(void)` statement is harmless there.
+    if recv >= 0
+      recv_expr = compile_expr(recv)
+      if recv_expr != ""
+        emit("  (void)(" + recv_expr + ");")
+      end
+    end
+    if bs.length > 0
+      k = 0
+      while k < bs.length - 1
+        compile_stmt(bs[k])
+        k = k + 1
+      end
+      last_expr = compile_expr(bs.last)
+      emit("  " + result_tmp + " = " + last_expr + ";")
+    end
+    pop_scope
+    @indent = @indent - 1
+    emit("  }")
+    result_tmp
+  end
+
+  def compile_thread_new_expr(nid)
+ # `Thread.new { body }`: single-threaded, so run the block body eagerly
+ # and return its last-expression value as the Thread's value. No block
+ # param to bind (`Thread.new` passes its args to the block, but the
+ # reproducer surface and the common defensive-threading idiom take none).
+    blk = @nd_block[nid]
+    bbody = @nd_body[blk]
+
+    ret_t = "int"
+    bs = []
+    if bbody >= 0
+      bs = get_stmts(bbody)
+      if bs.length > 0
+        ret_t = infer_type(bs.last)
+      end
+    end
+
+    result_tmp = new_temp
+    emit("  " + c_type(ret_t) + " " + result_tmp + " = " + c_default_val(ret_t) + ";")
+    emit("  {")
+    @indent = @indent + 1
+    push_scope
+    if bs.length > 0
+      k = 0
+      while k < bs.length - 1
+        compile_stmt(bs[k])
+        k = k + 1
+      end
+      last_expr = compile_expr(bs.last)
+      emit("  " + result_tmp + " = " + last_expr + ";")
+    end
+    pop_scope
+    @indent = @indent - 1
+    emit("  }")
+    result_tmp
+  end
+
+  def compile_thread_value_expr(nid)
+ # `t.value` (no args): the Thread was lowered to its eager block result,
+ # so `.value` is the identity on a scalar receiver. Returns "" (decline)
+ # for non-scalar receivers so a genuine struct/hash `.value` is untouched.
+    recv = @nd_receiver[nid]
+    if recv < 0
+      return ""
+    end
+    bt = base_type(infer_type(recv))
+    if bt == "int" || bt == "string" || bt == "float" || bt == "bool"
+      return compile_expr(recv)
+    end
+    ""
   end
 
   def compile_stringio_open_expr(nid)
