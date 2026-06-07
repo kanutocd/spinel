@@ -5351,6 +5351,35 @@ class Compiler
     if mname == "fetch"
       if recv >= 0
         rt = infer_type(recv)
+ # `hash.fetch(k) { |key| ... }` block form on an int-VALUE hash: on a
+ # miss the result is the block's value, which may be a string (e.g.
+ # `h.fetch(k) { |key| key.to_s }` returns a string from an int-value
+ # hash). Bind the block param to the hash's key type, and when the
+ # block body's last-expr is a string, surface the result as string
+ # (codegen coerces the present-branch int via sp_int_to_s, mirroring
+ # the 2-arg `fetch(k, "default")` convention). Restricted to int-value
+ # variants + string block bodies — the only convertible mismatch; poly
+ # and string-value hashes keep their existing result types below.
+        if @nd_block[nid] >= 0 && (rt == "str_int_hash" || rt == "sym_int_hash" || rt == "int_int_hash")
+          blk_fb = @nd_block[nid]
+          bbody_fb = @nd_body[blk_fb]
+          if bbody_fb >= 0
+            bbs_fb = get_stmts(bbody_fb)
+            if bbs_fb.length > 0
+              key_t_fb = "int"
+              key_t_fb = "string" if rt.start_with?("str_")
+              key_t_fb = "symbol" if rt.start_with?("sym_")
+              bp_fb = get_block_param(nid, 0)
+              push_scope
+              declare_var(bp_fb, key_t_fb) if bp_fb != "" && bp_fb != "_"
+              brt_fb = infer_type(bbs_fb.last)
+              pop_scope
+              if brt_fb == "string"
+                return "string"
+              end
+            end
+          end
+        end
  # Typed-array fetch(i): the element is proven-present (Array#fetch
  # raises IndexError on a miss, it never returns nil), so the result
  # is the plain element type, not the nullable `[]` element type
@@ -33060,6 +33089,13 @@ class Compiler
  # consumer.
                   elsif bk == 1 && @nd_receiver[nid] >= 0 && @nd_type[@nd_receiver[nid]] == "CallNode" && @nd_name[@nd_receiver[nid]] == "with_index" && @nd_block[@nd_receiver[nid]] < 0
                     types.push("int")
+ # `hash.fetch(k) { |key| ... }` yields the missing key. The block
+ # param is the hash's KEY type, not the default int. int-keyed
+ # hashes keep the int default (correct). Mirrors block_param_type_at.
+                  elsif mname == "fetch" && bk == 0 && is_hash_type(recv_type) == 1 && recv_type.start_with?("str_")
+                    types.push("string")
+                  elsif mname == "fetch" && bk == 0 && is_hash_type(recv_type) == 1 && recv_type.start_with?("sym_")
+                    types.push("symbol")
                   elsif mname == "each" || mname == "each_pair" || mname == "map" || mname == "select" || mname == "filter" || mname == "reject" || mname == "find" || mname == "detect" || mname == "any?" || mname == "all?" || mname == "none?" || mname == "one?" || mname == "count" || mname == "min" || mname == "max" || mname == "sum" || mname == "min_by" || mname == "max_by" || mname == "sort_by" || mname == "flat_map" || mname == "filter_map" || mname == "cycle" || mname == "partition"
  # Element iteration: infer block param from collection type
                     if recv_type == "str_array"
@@ -35450,6 +35486,15 @@ class Compiler
  # consumer.
     if pi == 1 && recv >= 0 && @nd_type[recv] == "CallNode" && @nd_name[recv] == "with_index" && @nd_block[recv] < 0
       return "int"
+    end
+ # `hash.fetch(k) { |key| ... }` yields the looked-up (missing) key
+ # to the block. The single block param is the hash's KEY type, not
+ # the default int. Without this, a sym/string-keyed hash types the
+ # param as int and the body (`key.to_s`, `key + "!"`) mis-dispatches
+ # as Integer ops. int-keyed hashes keep the int default (correct).
+    if mname == "fetch" && pi == 0 && is_hash_type(recv_t) == 1
+      return "string" if recv_t.start_with?("str_")
+      return "symbol" if recv_t.start_with?("sym_")
     end
     if mname == "each" || mname == "map" || mname == "flat_map" || mname == "filter" || mname == "select" || mname == "reject" || mname == "find" || mname == "detect" || mname == "find_index" || mname == "find_all" || mname == "count" || mname == "all?" || mname == "any?" || mname == "none?" || mname == "min_by" || mname == "max_by" || mname == "sort_by" || mname == "group_by" || mname == "partition" || mname == "uniq" || mname == "tally" || mname == "drop_while" || mname == "take_while" || mname == "filter_map"
  # `<arr>.group_by(blk).each do |k, rows|` -- the fused emit

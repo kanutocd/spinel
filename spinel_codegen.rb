@@ -27708,9 +27708,34 @@ class Compiler
           if aargs_fb.length >= 1
             key_fb = compile_expr(aargs_fb[0])
             tmp_fb = new_temp
-            emit("  " + fi[1] + " " + tmp_fb + ";")
+ # On an int-VALUE hash the block's value (run on a miss) may be a
+ # string (e.g. `h.fetch(k) { |key| key.to_s }`). Type the result temp
+ # as string and coerce the present-branch int via sp_int_to_s, mirror-
+ # ing the 2-arg `fetch(k, "default")` int->string convention. Limited
+ # to the int-value + string-block case (the only convertible mismatch,
+ # matching the analyze-side return-type widening). All other variants
+ # keep fi[0]/fi[1], preserving the prior poly/string-value behavior.
+            blk_id_fb = @nd_block[nid]
+            body_id_fb = @nd_body[blk_id_fb]
+            body_stmts_fb = body_id_fb >= 0 ? get_stmts(body_id_fb) : []
+            ret_t_fb = fi[0]
+            if fi[0] == "int" && body_stmts_fb.length > 0
+              brt_fb = infer_type(body_stmts_fb.last)
+              if brt_fb == "string"
+                ret_t_fb = "string"
+              end
+            end
+            tmp_ct_fb = fi[1]
+            tmp_ct_fb = c_type(ret_t_fb) if ret_t_fb != fi[0]
+            emit("  " + tmp_ct_fb + " " + tmp_fb + ";")
+            get_fb = fi[3] + "(" + rc + ", " + key_fb + ")"
+ # Coerce the present-branch value to the block-return type when
+ # they differ. int->string is the documented convertible case.
+            if ret_t_fb == "string" && fi[0] == "int"
+              get_fb = "sp_int_to_s(" + get_fb + ")"
+            end
             emit("  if (" + fi[2] + "(" + rc + ", " + key_fb + ")) {")
-            emit("    " + tmp_fb + " = " + fi[3] + "(" + rc + ", " + key_fb + ");")
+            emit("    " + tmp_fb + " = " + get_fb + ";")
             emit("  } else {")
             @indent = @indent + 1
             push_scope
@@ -27721,7 +27746,7 @@ class Compiler
             if bp_fb != ""
               emit("  lv_" + bp_fb + " = " + key_fb + ";")
             end
-            compile_body_into(@nd_body[@nd_block[nid]], tmp_fb, fi[0])
+            compile_body_into(@nd_body[@nd_block[nid]], tmp_fb, ret_t_fb)
             pop_scope
             @indent = @indent - 1
             emit("  }")
