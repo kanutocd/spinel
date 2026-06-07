@@ -3814,6 +3814,15 @@ class Compiler
  # the inherited attr_reader chain so a bare `fmt` in a subclass
  # method body returns the inherited ivar's type rather than the
  # int default (issue #508).
+ # `proc { }` / `lambda { }` are Kernel builtins, not instance methods.
+ # Resolve them before the bare-call arm below, which would otherwise
+ # return cls_method_return's int default for the (undefined)
+ # `proc`/`lambda` method and mistype `p = proc { }` as int inside a
+ # class body (it is correctly typed `proc` at top level). Skip when
+ # the class actually defines such a method.
+    if recv < 0 && (mname == "proc" || mname == "lambda") && @current_class_idx >= 0 && find_method_owner(@current_class_idx, mname) == ""
+      return "proc"
+    end
     if recv < 0 && @current_class_idx >= 0
       if cls_has_attr_reader(@current_class_idx, mname) == 1
         ivt_attr = cls_ivar_type(@current_class_idx, "@" + attr_reader_ivar(@current_class_idx, mname))

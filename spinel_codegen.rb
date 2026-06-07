@@ -21074,7 +21074,15 @@ class Compiler
  # one slot (the proc fn's `_unused` fallback expects args[0]
  # to be addressable).
           ca = compile_proc_call_args(nid)
-          return proc_call_unbox("sp_proc_call(lv_" + rname + ", (mrb_int[]){" + ca + "})", lambda_var_ret_type(rname))
+ # Route the receiver through fiber_var_ref, not a bare `lv_<name>`,
+ # so a proc var captured into a nested proc/fiber body resolves to
+ # its `(*_cap->name)` reference. This is what lets a nested proc
+ # literal call an enclosing method's `&block` param
+ # (`def m(&blk); proc { blk.call }; end`); the raw name would emit
+ # an undeclared `lv_blk` inside the proc fn. Outside a capture
+ # context fiber_var_ref returns `lv_<name>`, so non-captured calls
+ # are unchanged.
+          return proc_call_unbox("sp_proc_call(" + fiber_var_ref(rname) + ", (mrb_int[]){" + ca + "})", lambda_var_ret_type(rname))
         end
       end
 
@@ -51831,12 +51839,39 @@ class Compiler
     rt_inf
   end
 
- # Locate the `<bpname>.call(...)` whose value is the return of method
- # body `bid` (the last statement, optionally wrapped in `return`).
- # Returns the CallNode id or -1. This is the call whose result type a
- # literal-block caller can refine.
-  def find_block_param_call_expr(bid, bpname)
+ # Find the `vname = proc { ... }` / `vname = lambda { ... }` assignment
+ # in body `bid` and return the proc-literal CallNode id (or -1). Used
+ # to trace `pv.call` back to the proc body so a method returning a
+ # captured `&block` indirectly (`p = proc { blk.call }; p.call`) can
+ # still be typed by the block.
+  def find_proc_literal_assign(bid, vname)
     st = get_stmts(bid)
+    k = 0
+    while k < st.length
+      s = st[k]
+      if @nd_type[s] == "LocalVariableWriteNode" && @nd_name[s] == vname
+        ex = @nd_expression[s]
+        if ex >= 0 && @nd_type[ex] == "CallNode" && @nd_receiver[ex] < 0 &&
+           (@nd_name[ex] == "proc" || @nd_name[ex] == "lambda") && @nd_block[ex] >= 0
+          return ex
+        end
+      end
+      k = k + 1
+    end
+    -1
+  end
+
+ # Locate the `<bpname>.call(...)` whose value is the return of the
+ # method whose tail lives in `stmts_body_id`, following a proc-var
+ # indirection (`p = proc { blk.call }; p.call`) up to a small depth.
+ # `decl_body_id` is the method body where proc-var assignments live
+ # (it stays fixed as we recurse into proc bodies, since the procs are
+ # declared there). Returns the CallNode id or -1.
+  def trace_block_call_return(stmts_body_id, bpname, decl_body_id, depth)
+    if depth > 4 || stmts_body_id < 0
+      return -1
+    end
+    st = get_stmts(stmts_body_id)
     if st.length == 0
       return -1
     end
@@ -51852,11 +51887,28 @@ class Compiler
     end
     if @nd_type[last] == "CallNode" && @nd_name[last] == "call"
       r = @nd_receiver[last]
-      if r >= 0 && @nd_type[r] == "LocalVariableReadNode" && @nd_name[r] == bpname
-        return last
+      if r >= 0 && @nd_type[r] == "LocalVariableReadNode"
+        if @nd_name[r] == bpname
+          return last
+        end
+ # `pv.call` where pv is a local proc capturing the block — descend
+ # into pv's proc body and keep looking for the governing blk.call.
+        plit = find_proc_literal_assign(decl_body_id, @nd_name[r])
+        if plit >= 0 && @nd_block[plit] >= 0
+          return trace_block_call_return(@nd_body[@nd_block[plit]], bpname, decl_body_id, depth + 1)
+        end
       end
     end
     -1
+  end
+
+ # Locate the `<bpname>.call(...)` whose value is the return of method
+ # body `bid` (the last statement, optionally wrapped in `return`, and
+ # possibly reached through a `p = proc { blk.call }; p.call` proc-var
+ # indirection). Returns the CallNode id or -1. This is the call whose
+ # result type a literal-block caller can refine.
+  def find_block_param_call_expr(bid, bpname)
+    trace_block_call_return(bid, bpname, bid, 0)
   end
 
  # An `&block`-param method called with a literal block returns the
