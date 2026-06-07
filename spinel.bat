@@ -22,7 +22,7 @@ if "%DIR:~-1%"=="\" set "DIR=%DIR:~0,-1%"
 
 set "PARSE_RB=%DIR%\spinel_parse.rb"
 set "PARSE_BIN=%DIR%\spinel_parse.exe"
-set "CODEGEN_RB=%DIR%\spinel_codegen.rb"
+set "CODEGEN_RB=%DIR%\legacy\spinel_codegen.rb"
 set "CODEGEN_BIN=%DIR%\spinel_codegen.exe"
 
 set "SOURCE="

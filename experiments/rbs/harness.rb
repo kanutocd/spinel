@@ -21,7 +21,7 @@ FIXTURE_RB = File.join(__dir__, "box.rb")
 SEED_FILE  = File.join(__dir__, "box.seed")
 
 PARSE_BIN    = File.join(SPINEL_ROOT, "spinel_parse")
-ANALYZE_RB   = File.join(SPINEL_ROOT, "spinel_analyze.rb")
+ANALYZE_RB   = File.join(SPINEL_ROOT, "legacy", "spinel_analyze.rb")
 
 unless File.executable?(PARSE_BIN)
   abort "spinel_parse not built -- run `make parse` first"

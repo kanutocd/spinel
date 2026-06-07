@@ -2150,13 +2150,12 @@ static char *rewrite_syntax_sugar(char *source) {
 }
 
 /* ---- Main ---- */
-int main(int argc, char **argv) {
-  if (argc < 2) {
-    fprintf(stderr, "Usage: spinel_parse input.rb [output.ast]\n");
-    return 1;
-  }
-
-  const char *source_file = argv[1];
+/* Parse `source_file` and write the text AST to `out`. `argv0` is the
+   invoking program path (used to locate the stdlib for plain `require`s).
+   Returns 0 on success, 1 on read/parse error. Shared by the standalone
+   `main` and the in-process `sp_parse_file_to_text` entry so the Prism
+   walk has exactly one home. */
+static int sp_parse_emit(const char *source_file, const char *argv0, FILE *out) {
   char *source = read_file(source_file);
   if (!source) {
     fprintf(stderr, "spinel_parse: cannot open '%s'\n", source_file);
@@ -2176,7 +2175,7 @@ int main(int argc, char **argv) {
   /* Resolve require_relative and plain require */
   char *resolved = resolve_requires(source, source_file);
   free(source);
-  source = resolve_plain_requires(resolved, argv[0]);
+  source = resolve_plain_requires(resolved, argv0);
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could
@@ -2244,27 +2243,6 @@ int main(int argc, char **argv) {
   int root_id = flatten(root);
 
   /* Output */
-  FILE *out = stdout;
-  if (argc >= 3) {
-    out = fopen(argv[2], "wb");
-    if (!out) {
-      fprintf(stderr, "spinel_parse: cannot write '%s'\n", argv[2]);
-      /* Issue #764: clean up before bailing on the output-open
-         failure. We've allocated source, g_source_file_escaped,
-         lines[], plus parser/root, and registered sp_included_paths
-         entries -- free all to avoid leaking on the way out. */
-      for (size_t i = 0; i < line_count; i++) free(lines[i]);
-      free(lines);
-      pm_node_destroy(&parser, root);
-      pm_parser_free(&parser);
-      free(source);
-      free(g_source_file_escaped);
-      g_source_file_escaped = NULL;
-      sp_includes_free();
-      return 1;
-    }
-  }
-
   fprintf(out, "ROOT %d\n", root_id);
   /* Issue #878: emit the source file path as a top-level fact so
      `__dir__` and similar compile-time helpers can recover it
@@ -2284,8 +2262,6 @@ int main(int argc, char **argv) {
   }
   free(lines);
 
-  if (out != stdout) fclose(out);
-
   pm_node_destroy(&parser, root);
   pm_parser_free(&parser);
   free(source);
@@ -2293,4 +2269,42 @@ int main(int argc, char **argv) {
   g_source_file_escaped = NULL;
   sp_includes_free();
   return 0;
+}
+
+#ifndef SPINEL_PARSE_AS_LIB
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    fprintf(stderr, "Usage: spinel_parse input.rb [output.ast]\n");
+    return 1;
+  }
+  FILE *out = stdout;
+  if (argc >= 3) {
+    out = fopen(argv[2], "wb");
+    if (!out) {
+      fprintf(stderr, "spinel_parse: cannot write '%s'\n", argv[2]);
+      return 1;
+    }
+  }
+  int rc = sp_parse_emit(argv[1], argv[0], out);
+  if (out != stdout) fclose(out);
+  return rc;
+}
+#endif
+
+/* In-process entry for the single-binary C compiler: parse `source_file`
+   and return the text AST as a malloc'd NUL-terminated buffer (caller
+   frees), or NULL on error. `argv0` locates the stdlib for plain requires.
+   Avoids any on-disk intermediate by writing to an in-memory stream. */
+char *sp_parse_file_to_text(const char *source_file, const char *argv0) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *out = open_memstream(&buf, &sz);
+  if (!out) return NULL;
+  int rc = sp_parse_emit(source_file, argv0, out);
+  fclose(out);
+  if (rc != 0) {
+    free(buf);
+    return NULL;
+  }
+  return buf;
 }

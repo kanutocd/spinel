@@ -114,8 +114,8 @@ endif
 # which the bootstrap miniruby can't load.
 REF_RUBY ?= ruby
 
-# Ruby used to run the bootstrap compiler (spinel_analyze.rb /
-# spinel_codegen.rb interpret the compiler on its own source). These
+# Ruby used to run the bootstrap compiler (legacy/spinel_analyze.rb /
+# legacy/spinel_codegen.rb interpret the compiler on its own source). These
 # are long-running, hot-loop-heavy processes — exactly where YJIT
 # amortizes its warmup — so `YJIT=1 make` adds `--yjit` here only.
 # Opt-in because it requires a Ruby built with YJIT (3.3+ default-on,
@@ -168,7 +168,7 @@ NODE_TABLE_LOADER_STAMP := build/stamps/node_table_loader.rb.stamp
 COMPILER_HELPERS_STAMP := build/stamps/compiler_helpers.rb.stamp
 PARSE_STAMP   := build/stamps/spinel_parse.c.stamp
 
-.PHONY: all parse bootstrap bootstrap-fixpoint fast-bootstrap codegen rbs_extract rbs-test analyze-fail-test regen-rbs-expected test retest fast-test clean-test-results regen-expected bench optcarrot gate check gate-legs gate-test gate-bench gate-optcarrot clean install uninstall deps FORCE
+.PHONY: all parse spinelc legacy bootstrap bootstrap-fixpoint fast-bootstrap codegen rbs_extract rbs-test analyze-fail-test regen-rbs-expected test retest fast-test clean-test-results regen-expected bench optcarrot gate check gate-legs gate-test gate-bench gate-optcarrot clean install uninstall deps FORCE
 
 # `make all` includes spinel_rbs_extract when vendor/rbs has been
 # fetched (via `make deps`). Without vendor/rbs the extractor is
@@ -270,12 +270,56 @@ build/stamps/%.stamp: FORCE | build/stamps
 # intermediates, recreating them with fresh mtimes next run.
 .PRECIOUS: build/stamps/%.stamp
 
+build/stamps/spinel_analyze.rb.stamp: FORCE | build/stamps
+	@cmp -s legacy/spinel_analyze.rb $@ 2>/dev/null || cp legacy/spinel_analyze.rb $@
+
+build/stamps/spinel_codegen.rb.stamp: FORCE | build/stamps
+	@cmp -s legacy/spinel_codegen.rb $@ 2>/dev/null || cp legacy/spinel_codegen.rb $@
+
+build/stamps/compiler_helpers.rb.stamp: FORCE | build/stamps
+	@cmp -s legacy/compiler_helpers.rb $@ 2>/dev/null || cp legacy/compiler_helpers.rb $@
+
+build/stamps/node_table_loader.rb.stamp: FORCE | build/stamps
+	@cmp -s legacy/node_table_loader.rb $@ 2>/dev/null || cp legacy/node_table_loader.rb $@
+
 # ---- C Parser ----
 
 parse: spinel_parse$(EXE)
 
 spinel_parse$(EXE): $(PARSE_STAMP) $(PRISM_LIB)
 	$(CC) $(CFLAGS) -I$(PRISM_INC) spinel_parse.c $(PRISM_LIB) -lm -o $@
+
+# ---- C compiler (src/) ----
+# The single-binary C reimplementation of the analyzer + code generator.
+# Reuses spinel_parse.c's Prism walk (compiled with -DSPINEL_PARSE_AS_LIB so
+# its standalone main() drops out and the in-process sp_parse_file_to_text
+# entry is exposed). Source is split across small TUs that link into one
+# binary; see C-SPINEL.md. The binary emits C; a thin driver / the test
+# harness invokes cc to link against libspinel_rt.a.
+
+SPINELC      = build/spinelc$(EXE)
+SPINELC_HDRS = src/node_table.h src/codegen.h
+SPINELC_OBJ  = build/csrc/node_table.o build/csrc/codegen.o build/csrc/main.o
+
+build/csrc:
+	@mkdir -p build/csrc
+
+build/csrc/%.o: src/%.c $(SPINELC_HDRS) | build/csrc
+	$(CC) $(CFLAGS) -Isrc -c $< -o $@
+
+build/csrc/sp_parse_lib.o: spinel_parse.c $(PRISM_LIB) | build/csrc
+	$(CC) $(CFLAGS) -DSPINEL_PARSE_AS_LIB -I$(PRISM_INC) -c spinel_parse.c -o $@
+
+$(SPINELC): $(SPINELC_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB)
+	$(CC) $(CFLAGS) $(SPINELC_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB) -lm $(LDFLAGS) -o $@
+
+spinelc: $(SPINELC)
+
+# ---- Legacy Ruby compiler (regression oracle) ----
+# Builds the self-hosted Ruby analyzer/codegen binaries via the existing
+# bootstrap path. Kept available for IR diffs and .expected regeneration
+# now that test/bench/optcarrot are driven by the C compiler.
+legacy: spinel_analyze$(EXE) spinel_codegen$(EXE)
 
 # ---- RBS extractor ----
 # Reads sig/**/*.rbs, emits the seed-file format spinel_analyze
@@ -372,22 +416,22 @@ codegen: spinel_analyze$(EXE) spinel_codegen$(EXE)
 # corrupted scope tables in the bootstrap fixpoint output. See #620.
 
 build/analyze.ast: $(ANALYZE_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP) spinel_parse$(EXE)
-	./spinel_parse$(EXE) spinel_analyze.rb build/analyze.ast
+	./spinel_parse$(EXE) legacy/spinel_analyze.rb build/analyze.ast
 
 build/codegen.ast: $(CODEGEN_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP) spinel_parse$(EXE)
-	./spinel_parse$(EXE) spinel_codegen.rb build/codegen.ast
+	./spinel_parse$(EXE) legacy/spinel_codegen.rb build/codegen.ast
 
 build/analyze.ir: build/analyze.ast $(ANALYZE_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP)
-	$(BOOTSTRAP_RUBY) spinel_analyze.rb build/analyze.ast build/analyze.ir
+	$(BOOTSTRAP_RUBY) legacy/spinel_analyze.rb build/analyze.ast build/analyze.ir
 
 build/codegen.ir: build/codegen.ast $(ANALYZE_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP)
-	$(BOOTSTRAP_RUBY) spinel_analyze.rb build/codegen.ast build/codegen.ir
+	$(BOOTSTRAP_RUBY) legacy/spinel_analyze.rb build/codegen.ast build/codegen.ir
 
 build/analyze1.c: build/analyze.ast build/analyze.ir $(CODEGEN_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP)
-	$(BOOTSTRAP_RUBY) spinel_codegen.rb build/analyze.ast build/analyze.ir build/analyze1.c
+	$(BOOTSTRAP_RUBY) legacy/spinel_codegen.rb build/analyze.ast build/analyze.ir build/analyze1.c
 
 build/codegen1.c: build/codegen.ast build/codegen.ir $(CODEGEN_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP)
-	$(BOOTSTRAP_RUBY) spinel_codegen.rb build/codegen.ast build/codegen.ir build/codegen1.c
+	$(BOOTSTRAP_RUBY) legacy/spinel_codegen.rb build/codegen.ast build/codegen.ir build/codegen1.c
 
 ifeq ($(FAST_BOOTSTRAP),auto)
 # Default: rebuild BOTH compiler binaries from the previous binaries (stage0)
@@ -608,7 +652,7 @@ analyze-fail-test: spinel_parse$(EXE) spinel_analyze$(EXE)
 # The .ok target is the test's stamp; mtime tracking gives per-test
 # caching for free. Order-only spinel_parse$(EXE) / spinel_analyze$(EXE)
 # / spinel_codegen$(EXE) stop a bootstrap relink from invalidating every test.
-build/test-results/%.ok: test/%.rb $(SP_RT_LIB) $(CODEGEN_STAMP) $(ANALYZE_STAMP) $(NODE_TABLE_LOADER_STAMP) $(COMPILER_HELPERS_STAMP) $(PARSE_STAMP) | spinel_parse$(EXE) spinel_analyze$(EXE) spinel_codegen$(EXE)
+build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINELC)
 	@mkdir -p build/test-results
 	@tmpdir=$$(mktemp -d /tmp/spinel-test.XXXXXX); \
 	ast=$$tmpdir/test.ast; \
@@ -620,9 +664,7 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) $(CODEGEN_STAMP) $(ANALYZE_STAMP
 	args=""; \
 	if [ -f "$<.args" ]; then args=$$(cat "$<.args"); fi; \
 	rm -f "$@.diff"; \
-	./spinel_parse$(EXE) "$<" "$$ast" 2>/dev/null && \
-	./spinel_analyze$(EXE) "$$ast" "$$ir" 2>/dev/null && \
-	./spinel_codegen$(EXE) "$$ast" "$$ir" "$$cfile" 2>/dev/null && \
+	$(SPINELC) "$<" -o "$$cfile" 2>/dev/null && \
 	$(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
 	$(CC) $(CFLAGS) "$$cfile.o" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
@@ -683,7 +725,7 @@ test/%.rb.expected: test/%.rb
 	  rm -f $@.tmp; \
 	fi
 
-bench: spinel_parse$(EXE) $(SP_RT_LIB) spinel_analyze$(EXE) spinel_codegen$(EXE)
+bench: $(SPINELC) $(SP_RT_LIB)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@total=$$(ls benchmark/*.rb | wc -l); \
 	if [ -t 1 ]; then tty=1; else tty=0; fi; \
@@ -692,9 +734,7 @@ bench: spinel_parse$(EXE) $(SP_RT_LIB) spinel_analyze$(EXE) spinel_codegen$(EXE)
 	  i=$$((i+1)); \
 	  bn=$$(basename "$$f" .rb); \
 	  if [ "$$tty" = 1 ]; then printf '\r\033[K  [%d/%d] %s' "$$i" "$$total" "$$bn"; fi; \
-	  $(TIMEOUT10) ./spinel_parse$(EXE) "$$f" /tmp/_sp_b.ast 2>/dev/null && \
-	  $(TIMEOUT10) ./spinel_analyze$(EXE) /tmp/_sp_b.ast /tmp/_sp_b.ir 2>/dev/null && \
-	  $(TIMEOUT10) ./spinel_codegen$(EXE) /tmp/_sp_b.ast /tmp/_sp_b.ir /tmp/_sp_b.c 2>/dev/null && \
+	  $(TIMEOUT10) $(SPINELC) "$$f" -o /tmp/_sp_b.c 2>/dev/null && \
 	  $(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c /tmp/_sp_b.c -o /tmp/_sp_b.c.o 2>/dev/null && \
 	  $(CC) $(CFLAGS) /tmp/_sp_b.c.o $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o /tmp/_sp_b_bin$(EXE) 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
@@ -743,12 +783,13 @@ OPTCARROT_DIR  := build/optcarrot
 OPTCARROT_REPO := https://github.com/mame/optcarrot.git
 OPTCARROT_BRANCH := experiment/spinel
 
-optcarrot: spinel_parse$(EXE) $(SP_RT_LIB) spinel_analyze$(EXE) spinel_codegen$(EXE)
+optcarrot: $(SPINELC) $(SP_RT_LIB)
 	@if [ ! -d $(OPTCARROT_DIR) ]; then \
 	  git clone --depth=1 --branch=$(OPTCARROT_BRANCH) $(OPTCARROT_REPO) $(OPTCARROT_DIR); \
 	fi
 	@ruby $(OPTCARROT_DIR)/tools/pack-for-spinel.rb > build/optcarrot-single.rb
-	@./spinel --int-overflow=wrap build/optcarrot-single.rb -o build/optcarrot-single
+	@$(SPINELC) build/optcarrot-single.rb -o build/optcarrot-single.c
+	@$(CC) $(CFLAGS) -DSP_INT_OVERFLOW_MODE_WRAP -Ilib build/optcarrot-single.c $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o build/optcarrot-single
 	@out=$$($(TIMEOUT60) ./build/optcarrot-single 2>&1); \
 	echo "$$out"; \
 	if echo "$$out" | grep -qE "^fps: [0-9.]+$$" && echo "$$out" | grep -q "^checksum: 59662$$"; then \
@@ -815,9 +856,9 @@ install: all
 	install -m 755 spinel_parse$(EXE)    $(SPNLDIR)/
 	install -m 755 spinel_analyze$(EXE)  $(SPNLDIR)/
 	install -m 755 spinel_codegen$(EXE)  $(SPNLDIR)/
-	install -m 644 node_table_loader.rb  $(SPNLDIR)/
-	install -m 644 spinel_analyze.rb     $(SPNLDIR)/
-	install -m 644 spinel_codegen.rb     $(SPNLDIR)/
+	install -m 644 legacy/node_table_loader.rb  $(SPNLDIR)/
+	install -m 644 legacy/spinel_analyze.rb     $(SPNLDIR)/
+	install -m 644 legacy/spinel_codegen.rb     $(SPNLDIR)/
 	install -m 644 lib/libspinel_rt.a    $(SPNLDIR)/lib/
 	install -m 644 lib/sp_runtime.h      $(SPNLDIR)/lib/
 	install -m 644 lib/sp_types.h        $(SPNLDIR)/lib/

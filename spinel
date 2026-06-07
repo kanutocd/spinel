@@ -26,9 +26,9 @@
 
 DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
 PARSE_BIN="$DIR/spinel_parse"
-ANALYZE_RB="$DIR/spinel_analyze.rb"
+ANALYZE_RB="$DIR/legacy/spinel_analyze.rb"
 ANALYZE_BIN="$DIR/spinel_analyze"
-CODEGEN_RB="$DIR/spinel_codegen.rb"
+CODEGEN_RB="$DIR/legacy/spinel_codegen.rb"
 CODEGEN_BIN="$DIR/spinel_codegen"
 RBS_EXTRACT_BIN="$DIR/spinel_rbs_extract"
 
