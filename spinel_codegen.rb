@@ -4708,6 +4708,29 @@ class Compiler
     if name == "<=>"
       return 1
     end
+ # Bitwise / shift operator methods (`def <<`, `def | / & / ^`). A
+ # `recv OP x` whose receiver class defines them must dispatch through
+ # compile_obj_operator_expr; without this they fall through to
+ # compile_operator_expr and emit a raw C `<<` / `|` on the struct
+ # pointer (invalid operands). `%` is covered by the arithmetic arm
+ # above. Builtin receivers (int / string / array) aren't obj-typed so
+ # compile_obj_operator_expr returns "" and the raw-operator path still
+ # handles them.
+    if name == "<<"
+      return 1
+    end
+    if name == ">>"
+      return 1
+    end
+    if name == "|"
+      return 1
+    end
+    if name == "&"
+      return 1
+    end
+    if name == "^"
+      return 1
+    end
  # Unary operator methods `def -@` / `def +@`. A `-obj` / `+obj`
  # whose receiver class defines them dispatches through
  # compile_obj_operator_expr like the binary operators; without this
@@ -5655,6 +5678,21 @@ class Compiler
     end
     if name == "[]="
       return "_aset"
+    end
+ # Bitwise operator methods. The char-loop fallback below would copy
+ # `|` / `&` / `^` / `%` verbatim into the C identifier (`sp_X_|`),
+ # which isn't a legal C function name.
+    if name == "|"
+      return "_or"
+    end
+    if name == "&"
+      return "_and"
+    end
+    if name == "^"
+      return "_xor"
+    end
+    if name == "%"
+      return "_mod"
     end
  # Unary operator methods. The bare `-@` / `+@` would otherwise emit
  # the literal `@` (and `-`) into the C identifier (`sp_X_-@`).
