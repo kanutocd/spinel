@@ -4639,6 +4639,20 @@ class Compiler
     end
     ci = find_class_idx(cname)
     if ci >= 0
+ # An `include M` adds M (and M's own ancestors) to cname's
+ # ancestor chain, so `is_a?(M)` must see it. @cls_includes[ci]
+ # is a ";"-separated list of included module names; recurse by
+ # name so transitive module includes are covered too.
+      if ci < @cls_includes.length
+        incs = @cls_includes[ci].split(";", -1)
+        k = 0
+        while k < incs.length
+          if incs[k] != "" && is_class_or_ancestor(incs[k], target) == 1
+            return 1
+          end
+          k = k + 1
+        end
+      end
       if @cls_parents[ci] != ""
         return is_class_or_ancestor(@cls_parents[ci], target)
       end
