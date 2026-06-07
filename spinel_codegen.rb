@@ -20660,7 +20660,7 @@ class Compiler
  # one slot (the proc fn's `_unused` fallback expects args[0]
  # to be addressable).
           ca = compile_proc_call_args(nid)
-          return "sp_proc_call(lv_" + rname + ", (mrb_int[]){" + ca + "})"
+          return proc_call_unbox("sp_proc_call(lv_" + rname + ", (mrb_int[]){" + ca + "})", lambda_var_ret_type(rname))
         end
       end
 
@@ -42191,6 +42191,27 @@ class Compiler
           end
         end
       end
+ # `g = lambda { ... }` / `g = proc { ... }` (method-call form, distinct
+ # from the `->{}` LambdaNode above). The block body's last-stmt type is
+ # the proc's return type; record it so `g.call` unboxes the sp_proc_call
+ # mrb_int result back to the real type instead of printing a pointer.
+      if expr >= 0 && @nd_type[expr] == "CallNode" && @nd_receiver[expr] < 0 &&
+         (@nd_name[expr] == "lambda" || @nd_name[expr] == "proc")
+        blk_pl = @nd_block[expr]
+        if blk_pl >= 0
+          pbody = @nd_body[blk_pl]
+          if pbody >= 0
+            pbs = get_stmts(pbody)
+            if pbs.length > 0
+              prt = infer_type(pbs.last)
+              if not_in(vn, @lambda_var_ret_names) == 1
+                @lambda_var_ret_names.push(vn)
+                @lambda_var_ret_types.push(prt)
+              end
+            end
+          end
+        end
+      end
       scan_lambda_ret_types_node(expr)
     end
  # Scan into method bodies to find lambdas returned from methods
@@ -42262,6 +42283,25 @@ class Compiler
       return "&sp_lam_nil_val"
     end
     "sp_lam_int(" + expr + ")"
+  end
+
+ # Unbox an `sp_proc_call(...)` result (declared mrb_int) back to the
+ # proc's recorded return type. The proc-fn ABI round-trips pointer
+ # bodies through `(mrb_int)(uintptr_t)`, so a string/array/hash/obj
+ # return arrives as an integer-encoded pointer; cast it back. int / bool
+ # returns need no cast. Empty vtype (unknown) is left as raw mrb_int.
+  def proc_call_unbox(call_expr, ret_type)
+    if ret_type == ""
+      return call_expr
+    end
+    bt = base_type(ret_type)
+    if bt == "string" || bt == "mutable_str"
+      return "(const char *)(uintptr_t)(" + call_expr + ")"
+    end
+    if type_is_pointer(ret_type) == 1
+      return "(" + c_type(ret_type) + ")(uintptr_t)(" + call_expr + ")"
+    end
+    call_expr
   end
 
   def lam_unbox(expr, vtype)
@@ -42350,7 +42390,10 @@ class Compiler
       return "&sp_lam_nil_val"
     end
     if t == "StringNode"
-      return "sp_lam_int(0)"
+ # Box the string pointer through the sp_Val int slot (lam_box) so a
+ # string-returning arrow lambda round-trips its value; the matching
+ # lam_unbox at the .call site casts it back. Previously stubbed to 0.
+      return lam_box(compile_expr(nid), "string")
     end
     if t == "ConstantReadNode"
       cname = @nd_name[nid]
