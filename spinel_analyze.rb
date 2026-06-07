@@ -2367,6 +2367,33 @@ class Compiler
       end
       return "int"
     end
+    if t == "InstanceVariableWriteNode"
+ # `@x = expr` used as an expression value lowers to the assigned
+ # slot's value (after boxing into the slot), exactly like the
+ # LocalVariableWriteNode arm above. Reporting the ivar slot type
+ # lets a method whose body's last expression is `@x = ...` infer
+ # its return type from the slot -- a poly-boxed @id makes
+ # `def bump = (@id = @id + 1)` return sp_RbVal, not mrb_int -- and
+ # makes `(@x = expr) and rest` type @x from expr rather than from
+ # the boolean `and` result. Falls back to the rhs type when the
+ # slot isn't known yet (early fixpoint / unregistered toplevel).
+      iname_w = @nd_name[nid]
+      cls_ct_w = class_def_ivar_const_type(iname_w)
+      if cls_ct_w != ""
+        return cls_ct_w
+      end
+      if @current_class_idx >= 0
+        ivt_w = cls_ivar_type(@current_class_idx, iname_w)
+        if ivt_w != ""
+          return ivt_w
+        end
+      end
+      tit_w = toplevel_ivar_type(iname_w)
+      if tit_w != ""
+        return tit_w
+      end
+      return infer_type(@nd_expression[nid])
+    end
     if t == "IndexOrWriteNode" || t == "IndexAndWriteNode" || t == "IndexOperatorWriteNode"
  # `recv[k] ||= v` (etc.) as an expression value. The result type
  # is the recv's element type — same shape as Hash#[] / Array#[]
