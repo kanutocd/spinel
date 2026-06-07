@@ -287,6 +287,68 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* scalar receiver methods: evaluate the receiver once into rs, then
+     splice its text (so a literal/complex receiver isn't rebuilt). */
+  if (recv >= 0 && (rt == TY_STRING || rt == TY_INT || rt == TY_FLOAT)) {
+    Buf rs; memset(&rs, 0, sizeof rs);
+    emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    int handled = 1;
+
+    if (rt == TY_STRING) {
+      if      (!strcmp(name, "length") || !strcmp(name, "size")) buf_printf(b, "sp_str_length(%s)", r);
+      else if (!strcmp(name, "upcase"))     buf_printf(b, "sp_str_upcase(%s)", r);
+      else if (!strcmp(name, "downcase"))   buf_printf(b, "sp_str_downcase(%s)", r);
+      else if (!strcmp(name, "capitalize")) buf_printf(b, "sp_str_capitalize(%s)", r);
+      else if (!strcmp(name, "reverse"))    buf_printf(b, "sp_str_reverse(%s)", r);
+      else if (!strcmp(name, "strip"))      buf_printf(b, "sp_str_strip(%s)", r);
+      else if (!strcmp(name, "lstrip"))     buf_printf(b, "sp_str_lstrip(%s)", r);
+      else if (!strcmp(name, "rstrip"))     buf_printf(b, "sp_str_rstrip(%s)", r);
+      else if (!strcmp(name, "chomp"))      buf_printf(b, "sp_str_chomp(%s)", r);
+      else if (!strcmp(name, "chop"))       buf_printf(b, "sp_str_chop(%s)", r);
+      else if (!strcmp(name, "to_s") || !strcmp(name, "to_str") || !strcmp(name, "dup")) buf_puts(b, r);
+      else if (!strcmp(name, "empty?"))     buf_printf(b, "(sp_str_length(%s) == 0)", r);
+      else if (!strcmp(name, "include?") && argc == 1) {
+        buf_printf(b, "sp_str_include(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "start_with?") && argc == 1) {
+        buf_printf(b, "sp_str_start_with(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "end_with?") && argc == 1) {
+        buf_printf(b, "sp_str_end_with(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "index") && argc == 1) {
+        buf_printf(b, "sp_str_index(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "[]") && argc == 1) {
+        buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "split") && argc == 1) {
+        buf_printf(b, "sp_str_split_drop_trailing(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else handled = 0;
+    } else if (rt == TY_INT) {
+      if      (!strcmp(name, "to_s"))   buf_printf(b, "sp_int_to_s(%s)", r);
+      else if (!strcmp(name, "to_f"))   buf_printf(b, "((mrb_float)(%s))", r);
+      else if (!strcmp(name, "to_i") || !strcmp(name, "to_int") || !strcmp(name, "floor") ||
+               !strcmp(name, "ceil") || !strcmp(name, "round")) buf_printf(b, "(%s)", r);
+      else if (!strcmp(name, "abs"))    buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
+      else if (!strcmp(name, "chr"))    buf_printf(b, "sp_int_chr(%s)", r);
+      else if (!strcmp(name, "even?"))  buf_printf(b, "((%s) %% 2 == 0)", r);
+      else if (!strcmp(name, "odd?"))   buf_printf(b, "((%s) %% 2 != 0)", r);
+      else if (!strcmp(name, "zero?"))  buf_printf(b, "((%s) == 0)", r);
+      else if (!strcmp(name, "positive?")) buf_printf(b, "((%s) > 0)", r);
+      else if (!strcmp(name, "negative?")) buf_printf(b, "((%s) < 0)", r);
+      else handled = 0;
+    } else { /* TY_FLOAT */
+      if      (!strcmp(name, "floor")) buf_printf(b, "((mrb_int)floor(%s))", r);
+      else if (!strcmp(name, "ceil"))  buf_printf(b, "((mrb_int)ceil(%s))", r);
+      else if (!strcmp(name, "round")) buf_printf(b, "((mrb_int)round(%s))", r);
+      else if (!strcmp(name, "to_i"))  buf_printf(b, "((mrb_int)(%s))", r);
+      else if (!strcmp(name, "to_f"))  buf_printf(b, "(%s)", r);
+      else if (!strcmp(name, "to_s"))  buf_printf(b, "sp_float_to_s(%s)", r);
+      else if (!strcmp(name, "abs"))   buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
+      else if (!strcmp(name, "zero?")) buf_printf(b, "((%s) == 0.0)", r);
+      else handled = 0;
+    }
+    free(rs.p);
+    if (handled) return;
+  }
+
   unsupported(c, id, "call");
 }
 

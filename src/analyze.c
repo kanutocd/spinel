@@ -67,6 +67,27 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
   }
 
+  /* string receiver methods */
+  if (recv >= 0 && rt == TY_STRING) {
+    if (!strcmp(name, "upcase") || !strcmp(name, "downcase") ||
+        !strcmp(name, "capitalize") || !strcmp(name, "reverse") ||
+        !strcmp(name, "strip") || !strcmp(name, "lstrip") ||
+        !strcmp(name, "rstrip") || !strcmp(name, "chomp") ||
+        !strcmp(name, "chop") || !strcmp(name, "chr")) return TY_STRING;
+    if (!strcmp(name, "[]"))    return TY_STRING;
+    if (!strcmp(name, "index")) return TY_INT;
+    if (!strcmp(name, "split")) return TY_STR_ARRAY;
+  }
+  /* integer receiver methods */
+  if (recv >= 0 && rt == TY_INT) {
+    if (!strcmp(name, "chr")) return TY_STRING;
+  }
+  /* float receiver methods */
+  if (recv >= 0 && rt == TY_FLOAT) {
+    if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
+        !strcmp(name, "round")) return TY_INT;
+  }
+
   if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0)
     return ty_is_numeric(rt) ? rt : TY_UNKNOWN;
   if (!strcmp(name, "!")) return TY_BOOL;
