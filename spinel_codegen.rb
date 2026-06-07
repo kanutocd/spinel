@@ -54158,6 +54158,12 @@ class Compiler
     else
       compiler_state_set_sa(name, val)
     end
+ # Return a plain int: the value is unused, and without a consistent
+ # tail the method's return type unifies the str_array ivar-write
+ # branches with the int compiler_state_set_sa call -> the slot gets
+ # typed sp_StrArray * and the int return trips -Wint-conversion
+ # (gcc warns, clang -Werror fails on the self-host build).
+    0
   end
 
   def ir_set_ia_ivar(name, val)
