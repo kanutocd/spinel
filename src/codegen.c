@@ -41,6 +41,15 @@ static void buf_printf(Buf *b, const char *fmt, ...) {
 }
 static void emit_indent(Buf *b, int n) { for (int i = 0; i < n; i++) buf_puts(b, "  "); }
 
+/* Statement prelude: some expressions (array/hash literals) lower to
+   temp-variable construction that must run before the statement that
+   uses them. While a statement line is being built, g_pre collects those
+   setup lines at g_indent; the statement wrapper flushes g_pre before the
+   line. g_tmp hands out unique temp ids. */
+static Buf *g_pre = NULL;
+static int  g_indent = 0;
+static int  g_tmp = 0;
+
 /* ---- diagnostics ---- */
 
 static void unsupported(Compiler *c, int id, const char *what) {
@@ -54,15 +63,19 @@ static void unsupported(Compiler *c, int id, const char *what) {
 
 static const char *c_type_name(TyKind t) {
   switch (t) {
-    case TY_INT:    return "mrb_int";
-    case TY_FLOAT:  return "mrb_float";
-    case TY_BOOL:   return "mrb_bool";
-    case TY_STRING: return "const char *";
-    default:        return NULL;
+    case TY_INT:         return "mrb_int";
+    case TY_FLOAT:       return "mrb_float";
+    case TY_BOOL:        return "mrb_bool";
+    case TY_STRING:      return "const char *";
+    case TY_INT_ARRAY:   return "sp_IntArray *";
+    case TY_FLOAT_ARRAY: return "sp_FloatArray *";
+    case TY_STR_ARRAY:   return "sp_StrArray *";
+    default:             return NULL;
   }
 }
 static int is_scalar_ret(TyKind t) {
-  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING;
+  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
+         t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY;
 }
 static const char *default_value(TyKind t) {
   switch (t) {
@@ -70,7 +83,19 @@ static const char *default_value(TyKind t) {
     case TY_FLOAT:  return "0.0";
     case TY_BOOL:   return "0";
     case TY_STRING: return "(&(\"\\xff\")[1])";
+    case TY_INT_ARRAY:
+    case TY_FLOAT_ARRAY:
+    case TY_STR_ARRAY: return "NULL";
     default:        return "0";
+  }
+}
+/* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
+static const char *array_kind(TyKind t) {
+  switch (t) {
+    case TY_INT_ARRAY:   return "Int";
+    case TY_FLOAT_ARRAY: return "Float";
+    case TY_STR_ARRAY:   return "Str";
+    default:             return NULL;
   }
 }
 
@@ -100,6 +125,8 @@ static void emit_expr(Compiler *c, int id, Buf *b);
 static void emit_stmt(Compiler *c, int id, Buf *b, int indent);
 static void emit_stmts(Compiler *c, int id, Buf *b, int indent);
 static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
+static int  emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
+static int  emit_output_call(Compiler *c, int id, Buf *b, int indent);
 
 /* ---- calls ---- */
 
@@ -211,7 +238,75 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     unsupported(c, id, "equality");
   }
 
+  /* array value methods */
+  if (recv >= 0 && ty_is_array(rt)) {
+    const char *k = array_kind(rt);
+    if (k) {
+      if (!strcmp(name, "[]") && argc == 1) {
+        buf_printf(b, "sp_%sArray_get(", k);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "length") || !strcmp(name, "size")) && argc == 0) {
+        buf_printf(b, "sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "empty?") && argc == 0) {
+        buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        return;
+      }
+      if (!strcmp(name, "sum") && argc == 0) {
+        buf_printf(b, "sp_%sArray_sum(", k); emit_expr(c, recv, b); buf_puts(b, ", 0)");
+        return;
+      }
+      if (!strcmp(name, "join") && rt == TY_STR_ARRAY && argc == 1) {
+        buf_puts(b, "sp_StrArray_join("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) {
+        buf_printf(b, "sp_%sArray_inspect(", k); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+    }
+  }
+
   unsupported(c, id, "call");
+}
+
+/* Array-mutating calls emitted as statements: a[i]=v, a.push(v), a<<v.
+   Returns 1 if handled. */
+static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!name || recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = array_kind(rt);
+  if (!k) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  const int *argv = NULL;
+  if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+
+  if (!strcmp(name, "[]=") && argc == 2) {
+    emit_indent(b, indent);
+    buf_printf(b, "sp_%sArray_set(", k);
+    emit_expr(c, recv, b); buf_puts(b, ", ");
+    emit_expr(c, argv[0], b); buf_puts(b, ", ");
+    emit_expr(c, argv[1], b); buf_puts(b, ");\n");
+    return 1;
+  }
+  if ((!strcmp(name, "push") || !strcmp(name, "<<")) && argc == 1) {
+    emit_indent(b, indent);
+    buf_printf(b, "sp_%sArray_push(", k);
+    emit_expr(c, recv, b); buf_puts(b, ", ");
+    emit_expr(c, argv[0], b); buf_puts(b, ");\n");
+    return 1;
+  }
+  return 0;
 }
 
 /* ---- interpolation ---- */
@@ -301,6 +396,29 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_puts(b, "("); emit_expr(c, bd[0], b); buf_puts(b, ")");
     return;
   }
+  if (!strcmp(ty, "ArrayNode")) {
+    TyKind at = comp_ntype(c, id);
+    const char *k = array_kind(at);
+    if (!k) unsupported(c, id, "array literal (element type)");
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, t, k);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+    for (int j = 0; j < n; j++) {
+      Buf el; memset(&el, 0, sizeof el);
+      emit_expr(c, els[j], &el);   /* element preludes flow to g_pre first */
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_%sArray_push(_t%d, ", k, t);
+      buf_puts(g_pre, el.p ? el.p : "");
+      buf_puts(g_pre, ");\n");
+      free(el.p);
+    }
+    buf_printf(b, "_t%d", t);
+    return;
+  }
   if (!strcmp(ty, "CallNode")) { emit_call(c, id, b); return; }
 
   unsupported(c, id, "expression");
@@ -354,6 +472,10 @@ static void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "), stdout); putchar('\\n');\n");
   } else if (t == TY_BOOL) {
     buf_puts(b, "puts(("); emit_expr(c, arg, b); buf_puts(b, ") ? \"true\" : \"false\");\n");
+  } else if (ty_is_array(t) && array_kind(t)) {
+    buf_printf(b, "fputs(sp_%sArray_inspect(", array_kind(t));
+    emit_expr(c, arg, b);
+    buf_puts(b, "), stdout); putchar('\\n');\n");
   } else {
     unsupported(c, arg, "p argument");
   }
@@ -488,13 +610,43 @@ static void emit_return(Compiler *c, int id, Buf *b, int indent) {
   else buf_puts(b, "return;\n");
 }
 
+static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent);
+static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent);
+
+/* Wrap a line-emitting statement so any expression preludes are flushed
+   before the line itself. */
+static void emit_with_prelude(Compiler *c, int id, Buf *b, int indent,
+                              void (*inner)(Compiler *, int, Buf *, int)) {
+  Buf *savePre = g_pre;
+  int saveIndent = g_indent;
+  Buf pre;  memset(&pre, 0, sizeof pre);
+  Buf line; memset(&line, 0, sizeof line);
+  g_pre = &pre;
+  g_indent = indent;
+  inner(c, id, &line, indent);
+  g_pre = savePre;
+  g_indent = saveIndent;
+  if (pre.p)  buf_puts(b, pre.p);
+  if (line.p) buf_puts(b, line.p);
+  free(pre.p);
+  free(line.p);
+}
+
 static void emit_stmt(Compiler *c, int id, Buf *b, int indent) {
+  emit_with_prelude(c, id, b, indent, emit_stmt_inner);
+}
+static void emit_stmt_tail(Compiler *c, int id, Buf *b, int indent) {
+  emit_with_prelude(c, id, b, indent, emit_stmt_tail_inner);
+}
+
+static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
   if (!ty) unsupported(c, id, "statement (no type)");
 
   if (!strcmp(ty, "CallNode")) {
     if (emit_output_call(c, id, b, indent)) return;
+    if (emit_array_mutate_stmt(c, id, b, indent)) return;
     emit_indent(b, indent);
     emit_expr(c, id, b);
     buf_puts(b, ";\n");
@@ -513,7 +665,7 @@ static void emit_stmt(Compiler *c, int id, Buf *b, int indent) {
 }
 
 /* Tail position: the value of this statement is the method's return value. */
-static void emit_stmt_tail(Compiler *c, int id, Buf *b, int indent) {
+static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
   if (!ty) unsupported(c, id, "tail statement (no type)");
@@ -571,6 +723,9 @@ static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 
 /* ---- declarations ---- */
 
+/* Heap-managed types need a GC root for their local slot. */
+static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t); }
+
 static void declare_local(Buf *b, LocalVar *lv) {
   switch (lv->type) {
     case TY_INT:    buf_printf(b, "    mrb_int lv_%s = 0;\n", lv->name); break;
@@ -578,6 +733,12 @@ static void declare_local(Buf *b, LocalVar *lv) {
     case TY_BOOL:   buf_printf(b, "    mrb_bool lv_%s = 0;\n", lv->name); break;
     case TY_STRING:
       buf_printf(b, "    const char * lv_%s = (&(\"\\xff\")[1]);\n", lv->name);
+      buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+      break;
+    case TY_INT_ARRAY:
+    case TY_FLOAT_ARRAY:
+    case TY_STR_ARRAY:
+      buf_printf(b, "    %s lv_%s = NULL;\n", c_type_name(lv->type), lv->name);
       buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
       break;
     default:
@@ -588,12 +749,12 @@ static void declare_local(Buf *b, LocalVar *lv) {
 }
 
 /* Declare a scope's locals. Params are already C function parameters, so
-   they only need a GC root (strings); body locals get a full declaration. */
+   they only need a GC root; body locals get a full declaration. */
 static void emit_scope_decls(Scope *s, Buf *b) {
   for (int i = 0; i < s->nlocals; i++) {
     LocalVar *lv = &s->locals[i];
     if (lv->is_param) {
-      if (lv->type == TY_STRING) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+      if (needs_root(lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
     } else {
       declare_local(b, lv);
     }

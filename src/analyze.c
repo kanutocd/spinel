@@ -50,6 +50,23 @@ static TyKind infer_call(Compiler *c, int id) {
     if (mi >= 0) return c->scopes[mi].ret;
   }
 
+  /* array receiver methods */
+  if (recv >= 0 && ty_is_array(rt)) {
+    if (!strcmp(name, "[]"))                          return ty_array_elem(rt);
+    if (!strcmp(name, "length") || !strcmp(name, "size") ||
+        !strcmp(name, "count") || !strcmp(name, "index")) return TY_INT;
+    if (!strcmp(name, "sum"))                         return ty_array_elem(rt);
+    if (!strcmp(name, "first") || !strcmp(name, "last") ||
+        !strcmp(name, "min") || !strcmp(name, "max")) return ty_array_elem(rt);
+    if (!strcmp(name, "join"))                        return TY_STRING;
+    if (!strcmp(name, "inspect") || !strcmp(name, "to_s")) return TY_STRING;
+    if (!strcmp(name, "empty?") || !strcmp(name, "include?")) return TY_BOOL;
+    if (!strcmp(name, "push") || !strcmp(name, "<<") ||
+        !strcmp(name, "reverse") || !strcmp(name, "sort") ||
+        !strcmp(name, "uniq") || !strcmp(name, "to_a"))   return rt;
+    if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
+  }
+
   if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0)
     return ty_is_numeric(rt) ? rt : TY_UNKNOWN;
   if (!strcmp(name, "!")) return TY_BOOL;
@@ -130,6 +147,14 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "ElseNode")) {
     int s = nt_ref(nt, id, "statements");
     return s >= 0 ? infer_type(c, s) : TY_NIL;
+  }
+  if (!strcmp(ty, "ArrayNode")) {
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    if (n == 0) return TY_POLY_ARRAY;
+    TyKind e = TY_UNKNOWN;
+    for (int k = 0; k < n; k++) e = ty_unify(e, infer_type(c, els[k]));
+    return ty_array_of(e);
   }
   if (!strcmp(ty, "CallNode")) return infer_call(c, id);
 

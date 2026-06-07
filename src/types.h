@@ -18,11 +18,18 @@ typedef enum {
   TY_SYMBOL,
   TY_BOOL,
   TY_RANGE,
+  TY_INT_ARRAY,
+  TY_FLOAT_ARRAY,
+  TY_STR_ARRAY,
+  TY_POLY_ARRAY,
   TY_POLY          /* union / top: a value whose static type widened */
 } TyKind;
 
 const char *ty_name(TyKind t);         /* legacy string tag, for diagnostics */
 int ty_is_numeric(TyKind t);           /* INT or FLOAT */
+int ty_is_array(TyKind t);
+TyKind ty_array_of(TyKind elem);       /* element type -> array kind */
+TyKind ty_array_elem(TyKind arr);      /* array kind -> element type */
 /* Merge two observed types into the narrowest type covering both.
    Equal -> same; UNKNOWN acts as identity; otherwise widen to POLY
    (numeric int+float stays POLY for now -- mixed-numeric vars are rare
