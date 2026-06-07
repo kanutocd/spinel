@@ -3364,6 +3364,16 @@ class Compiler
         end
       end
     end
+ # An inlined direct-iexec lift carries the block's value (its last
+ # expression). Resolve it here so `x = recv.instance_exec(...) { ... }`
+ # declares `x` with the block's type rather than the void-lift default.
+    if @nd_type[nid] == "CallNode" && is_iexec_call_name(@nd_name[nid]) == 1
+      mname_it = @nd_name[nid]
+      n_it = mname_it[11, mname_it.length - 11].to_i
+      if iexec_lift_inlined(n_it) == 1
+        return iexec_inline_rettype(n_it)
+      end
+    end
  # `<poly>[idx]` — analyze may cache an optimistic concrete type
  # (e.g. "int" picked from one observed elem kind), but
  # compile_poly_method_call's actual emit widens to sp_RbVal
@@ -6680,7 +6690,11 @@ class Compiler
   def emit_iexec_funcs
     n = 0
     while n < @iexec_class_idxs.length
-      emit_iexec_func(n, @iexec_class_idxs[n], @iexec_body_ids[n])
+ # Inlined lifts (heap receivers) are spliced at their single call
+ # site, so the static function would be unused -- skip it.
+      if iexec_lift_inlined(n) == 0
+        emit_iexec_func(n, @iexec_class_idxs[n], @iexec_body_ids[n])
+      end
       n = n + 1
     end
   end
@@ -6723,6 +6737,214 @@ class Compiler
  # infers the lifted body's last-expression type.
   def compile_iexec_call_expr(nid)
     "(" + compile_iexec_call(nid) + ", " + compile_expr(@nd_receiver[nid]) + ")"
+  end
+
+ # A direct-iexec lift is always inlined at its call site rather than
+ # emitted as a static sp_iexec_<N> function: a heap receiver splices
+ # with a pointer self, a value-type receiver with a by-value-struct self
+ # (compile_iexec_inline picks the form). Each lift has exactly one call
+ # site, so the inlined lift's function is unused and is skipped in
+ # emit_iexec_funcs.
+  def iexec_lift_inlined(n)
+    if n < 0 || n >= @iexec_class_idxs.length
+      return 0
+    end
+    ci = @iexec_class_idxs[n]
+    if ci < 0 || ci >= @cls_is_value_type.length
+      return 0
+    end
+    1
+  end
+
+ # Inferred C type of an inlined iexec block's value (its last
+ # expression), used to declare the result temp in expression position
+ # and to type `x` in `x = recv.instance_exec(...) { ... }`. Block params
+ # are declared from the recorded param types and self is rebound to the
+ # receiver class so ivar / bare-call types resolve correctly.
+  def iexec_inline_rettype(n)
+    ci = @iexec_class_idxs[n]
+    body = @iexec_body_ids[n]
+    if body < 0
+      return "int"
+    end
+    stmts = get_stmts(body)
+    if stmts.length == 0
+      return "int"
+    end
+    last = stmts[stmts.length - 1]
+ # A bare method call against the rebound receiver (e.g. `greet`)
+ # resolves to the receiver class's instance method. Codegen's
+ # cache-miss infer_type defaults such calls to int (block-body nodes
+ # are left uncached by analyze), so read the recorded return type
+ # directly here.
+    if @nd_type[last] == "CallNode" && @nd_receiver[last] < 0
+      owner = find_method_owner(ci, @nd_name[last])
+      if owner != ""
+        rt_m = cls_method_return(find_class_idx(owner), @nd_name[last])
+        if rt_m != "" && rt_m != "void"
+          return rt_m
+        end
+      end
+    end
+    pnames = @iexec_block_pnames[n].split("|")
+    ptypes = @iexec_block_ptypes[n].split("|")
+    saved_ci = @current_class_idx
+    @current_class_idx = ci
+    push_scope
+    k = 0
+    while k < pnames.length
+      if pnames[k] != ""
+        pt = "int"
+        if k < ptypes.length && ptypes[k] != ""
+          pt = ptypes[k]
+        end
+        declare_var(pnames[k], pt)
+      end
+      k = k + 1
+    end
+    rt = infer_type(last)
+    pop_scope
+    @current_class_idx = saved_ci
+    if rt == "" || rt == "void"
+      return "poly"
+    end
+    rt
+  end
+
+ # Inline a direct iexec lift at its call site: rebind self to the
+ # receiver and splice the recorded block body, binding the call-site
+ # args to the block params. Returns "" in statement position; in
+ # expression position emits the body via compile_body_into and returns
+ # the result temp. Mirrors compile_instance_exec_inlined_stmt (the
+ # trampoline-shape sibling) but sources body / params / param-types from
+ # the @iexec_* registry instead of the live block node.
+  def compile_iexec_inline(nid, n, want_value)
+    ci = @iexec_class_idxs[n]
+    cname = @cls_names[ci]
+    body = @iexec_body_ids[n]
+    pnames = @iexec_block_pnames[n].split("|")
+    ptypes = @iexec_block_ptypes[n].split("|")
+    recv = @nd_receiver[nid]
+    arg_ids = []
+    args_id = @nd_arguments[nid]
+    if args_id >= 0
+      arg_ids = get_args(args_id)
+    end
+    rc = recv < 0 ? self_expr : compile_expr_gc_rooted(recv)
+    self_var = new_temp
+    vt = 0
+    if ci >= 0 && ci < @cls_is_value_type.length && @cls_is_value_type[ci] == 1
+      vt = 1
+    end
+    if vt == 1
+ # Value-type receiver: self is a by-value struct copy, not a pointer.
+ # self_arrow emits `.` (keyed on @current_class_idx, rebound to ci
+ # below); the struct holds only scalar fields, so no transient GC root.
+      emit("  sp_" + cname + " " + self_var + " = " + rc + ";")
+    else
+      emit("  sp_" + cname + " *" + self_var + " = (sp_" + cname + " *)" + rc + ";")
+      if @in_gc_scope == 1
+        emit("  SP_GC_ROOT(" + self_var + ");")
+      end
+    end
+    push_scope
+    @block_counter = @block_counter + 1
+    suffix = "_ix" + @block_counter.to_s
+    map_from = "".split(",")
+    map_to = "".split(",")
+ # Evaluate call-site args BEFORE rebinding self -- they live in the
+ # outer scope, not the splice context.
+    k = 0
+    while k < pnames.length
+      if pnames[k] != ""
+        pt = "int"
+        if k < ptypes.length && ptypes[k] != ""
+          pt = ptypes[k]
+        end
+        val_c = "0"
+        if k < arg_ids.length
+          val_c = compile_expr(arg_ids[k])
+        end
+        tname = pnames[k] + suffix
+        emit("  " + c_type(pt) + " lv_" + tname + " = " + val_c + ";")
+        if type_is_pointer(pt) == 1 && @in_gc_scope == 1
+          emit("  SP_GC_ROOT(lv_" + tname + ");")
+        end
+        map_from.push(pnames[k])
+        map_to.push(tname)
+        declare_var(tname, pt)
+ # Also declare under the original name so find_var_type during the
+ # splice resolves block-param references to the typed slot.
+        declare_var(pnames[k], pt)
+      end
+      k = k + 1
+    end
+ # Declare the block body's own locals (e.g. `t = @v * x`). analyze's
+ # scope precompute for the body excludes the block params -- those are
+ # declared above -- so this only adds body-internal locals. Without it
+ # an assignment inside the body would emit `lv_t = ...` with no prior
+ # declaration.
+    sn_b = @nd_scope_names[body]
+    st_b = @nd_scope_types[body]
+    if sn_b != ""
+      lnames_b = sn_b.split("|", -1)
+      ltypes_b = st_b.split("|", -1)
+      j = 0
+      while j < lnames_b.length
+        ln = lnames_b[j]
+ # Skip names already in scope: block params (declared above) and
+ # captured outer locals (`n` in `n = n + @v`). Re-declaring an
+ # outer local would both shadow the captured slot -- breaking
+ # write-back -- and emit a duplicate C declaration.
+        if ln != "" && find_var_type(ln) == ""
+          lt = "int"
+          if j < ltypes_b.length && ltypes_b[j] != ""
+            lt = ltypes_b[j]
+          end
+          declare_var(ln, lt)
+          emit("  " + c_type(lt) + " lv_" + ln + ";")
+          if type_is_pointer(lt) == 1 && @in_gc_scope == 1
+            emit("  SP_GC_ROOT(lv_" + ln + ");")
+          end
+        end
+        j = j + 1
+      end
+    end
+    saved_self_override = @self_override
+    @self_override = self_var
+ # For a value-type receiver, rebind @current_class_idx to ci so
+ # self_arrow emits `.` (not `->`) for ivar refs in the spliced body.
+ # Scoped to value types; the heap path keeps @current_class_idx
+ # unchanged so its generated C stays byte-identical.
+    saved_cci = @current_class_idx
+    if vt == 1
+      @current_class_idx = ci
+    end
+    saved_in_rmf = @inline_rename_map_from
+    saved_in_rmt = @inline_rename_map_to
+    @inline_rename_map_from = map_from
+    @inline_rename_map_to = map_to
+    ret = ""
+    if want_value == 1
+      rtype = iexec_inline_rettype(n)
+      ret = new_temp
+      emit("  " + c_type(rtype) + " " + ret + ";")
+      saved_isv = @instance_eval_self_var
+      saved_ist = @instance_eval_self_type
+      @instance_eval_self_var = self_var
+      @instance_eval_self_type = cname
+      compile_body_into(body, ret, rtype)
+      @instance_eval_self_var = saved_isv
+      @instance_eval_self_type = saved_ist
+    else
+      splice_block_with_self_rebound(body, self_var, cname)
+    end
+    @inline_rename_map_from = saved_in_rmf
+    @inline_rename_map_to = saved_in_rmt
+    @self_override = saved_self_override
+    @current_class_idx = saved_cci
+    pop_scope
+    ret
   end
 
   def emit_iexec_func(n, ci, bid)
@@ -11213,6 +11435,11 @@ class Compiler
  # via @iexec_block_ptypes.
     n = 0
     while n < @iexec_class_idxs.length
+ # Inlined lifts have no static function -- skip the forward-declare.
+      if iexec_lift_inlined(n) == 1
+        n = n + 1
+        next
+      end
       icn = @cls_names[@iexec_class_idxs[n]]
       sig = ""
       if @cls_is_value_type[@iexec_class_idxs[n]] == 1
@@ -18582,10 +18809,15 @@ class Compiler
     if is_ieval_call_name(mname) == 1
       return compile_ieval_call_expr(nid)
     end
- # Hoisted instance_exec block (expression context). Same comma-
- # expression wrap as ieval until the void-return baseline is
- # upgraded to a real return value.
+ # Direct instance_exec block (expression context). Heap receivers
+ # are inlined at the call site with a real return value (the block's
+ # last expression); value-typed receivers stay on the void lift's
+ # comma-expression wrap.
     if is_iexec_call_name(mname) == 1
+      n_e = mname[11, mname.length - 11].to_i
+      if iexec_lift_inlined(n_e) == 1
+        return compile_iexec_inline(nid, n_e, 1)
+      end
       return compile_iexec_call_expr(nid)
     end
 
@@ -20285,6 +20517,11 @@ class Compiler
         if cidx >= 0
           owner = find_method_owner(target_ci, mname)
           cast_recv = "(sp_" + owner + " *)" + @instance_eval_self_var
+ # A value-type rebound self is a by-value struct; the method takes
+ # `sp_<owner> self` by value, so pass it directly (no pointer cast).
+          if @cls_is_value_type[target_ci] == 1
+            cast_recv = @instance_eval_self_var
+          end
  # Use compile_typed_call_args so the per-arg expected-type
  # coerce (incl. promote-mode int -> bigint) fires; without
  # it, an int literal arg flows raw into a promoted bigint
@@ -40060,10 +40297,15 @@ class Compiler
       emit("  " + compile_ieval_call(nid) + ";")
       return
     end
- # Hoisted instance_exec block (statement context). The lifted
- # function returns void in the baseline; statement form is just
- # `sp_iexec_<N>(...);`.
+ # Direct instance_exec block (statement context). Heap receivers
+ # are inlined at the call site; value-typed receivers stay on the
+ # void lift's `sp_iexec_<N>(...);` form.
     if is_iexec_call_name(mname) == 1
+      n_s = mname[11, mname.length - 11].to_i
+      if iexec_lift_inlined(n_s) == 1
+        compile_iexec_inline(nid, n_s, 0)
+        return
+      end
       emit("  " + compile_iexec_call(nid) + ";")
       return
     end
