@@ -2103,6 +2103,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       else if (!strcmp(name, "delete") && argc == 1) { buf_printf(b, "sp_str_delete(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "count") && argc == 1) { buf_printf(b, "sp_str_count(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "count") && argc >= 2) {
+        buf_printf(b, "sp_str_count_n(%s, (const char *[]){", r);
+        for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
+        buf_printf(b, "}, %d)", argc);
+      }
       else if (!strcmp(name, "lines") && argc == 0) buf_printf(b, "sp_str_lines(%s)", r);
       else if (!strcmp(name, "bytes") && argc == 0)   buf_printf(b, "sp_str_bytes(%s)", r);
       else if (!strcmp(name, "to_i") && argc == 0)    buf_printf(b, "sp_str_to_i_strict(%s)", r);
