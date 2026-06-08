@@ -176,6 +176,14 @@ static TyKind infer_call(Compiler *c, int id) {
       if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
       if (!strcmp(name, "to_i")) return TY_INT;
       if (!strcmp(name, "to_f")) return TY_FLOAT;
+      /* poly method dispatch: unify the return type over every class that
+         defines `name` (the runtime cls_id picks the impl). */
+      TyKind r = TY_UNKNOWN; int found = 0;
+      for (int k = 0; k < c->nclasses; k++) {
+        int mi = comp_method_in_chain(c, k, name, NULL);
+        if (mi >= 0) { r = found ? ty_unify(r, c->scopes[mi].ret) : c->scopes[mi].ret; found = 1; }
+      }
+      if (found) return r;
     }
   }
 

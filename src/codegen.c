@@ -824,6 +824,39 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* poly method dispatch: switch on the boxed object's cls_id and call the
+     matching class's method (walking the chain for inherited methods),
+     unboxing the pointer. */
+  if (recv >= 0 && rt == TY_POLY && argc == 0) {
+    int ncand = 0;
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_method_in_chain(c, k, name, NULL) >= 0) ncand++;
+    if (ncand > 0) {
+      TyKind ret = comp_ntype(c, id);
+      int tv = ++g_tmp, tr = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+      emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
+      buf_printf(b, " _t%d = %s; switch (_t%d.cls_id) {", tr,
+                 is_scalar_ret(ret) ? default_value(ret) : "0", tv);
+      for (int k = 0; k < c->nclasses; k++) {
+        int defcls = -1;
+        int mi = comp_method_in_chain(c, k, name, &defcls);
+        if (mi < 0) continue;
+        buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)_t%d.v.p); break;",
+                   k, tr, c->classes[defcls].name, mc(c->scopes[mi].name), c->classes[defcls].name, tv);
+      }
+      /* built-in array receivers reaching a length-like poly dispatch */
+      if (!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) {
+        buf_printf(b, " case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY: _t%d = sp_IntArray_length((sp_IntArray *)_t%d.v.p); break;", tr, tv);
+        buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = sp_StrArray_length((sp_StrArray *)_t%d.v.p); break;", tr, tv);
+        buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = sp_FloatArray_length((sp_FloatArray *)_t%d.v.p); break;", tr, tv);
+        buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = sp_PolyArray_length((sp_PolyArray *)_t%d.v.p); break;", tr, tv);
+      }
+      buf_printf(b, " } _t%d; })", tr);
+      return;
+    }
+  }
+
   /* range value methods (evaluate the range once into a temp) */
   if (recv >= 0 && rt == TY_RANGE) {
     static const char *const rmeths[] = {
