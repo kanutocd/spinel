@@ -482,9 +482,10 @@ static inline int sp_utf8_encode(uint32_t cp,char*out){if(cp<0x80){out[0]=(char)
    and return a NUL-terminated string. */
 static const char *sp_int_codepoint_to_str(mrb_int n) {
   char *s = sp_str_alloc_raw(5);
-  if (n < 0 || n > 0x10FFFF) { s[0] = 0; return s; }
+  if (n < 0 || n > 0x10FFFF) { s[0] = 0; sp_str_set_len(s, 0); return s; }
   int len = sp_utf8_encode((uint32_t)n, s);
   s[len] = 0;
+  sp_str_set_len(s, (size_t)len);  /* byte_len must be the encoded length, not the alloc */
   return s;
 }
 /* Direct-mapped pointer-keyed cache for (byte_len, char_len). Populated lazily

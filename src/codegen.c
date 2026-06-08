@@ -932,7 +932,7 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       emit_indent(b, indent);
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat(");
       emit_expr(c, recv, b); buf_puts(b, ", ");
-      if (at == TY_INT) { buf_puts(b, "sp_int_chr("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (at == TY_INT) { buf_puts(b, "sp_int_codepoint_to_str("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else emit_expr(c, argv[0], b);
       buf_puts(b, ");\n");
       return 1;
