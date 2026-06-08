@@ -396,9 +396,11 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "capitalize") || !strcmp(name, "reverse") ||
         !strcmp(name, "strip") || !strcmp(name, "lstrip") ||
         !strcmp(name, "rstrip") || !strcmp(name, "chomp") ||
-        !strcmp(name, "chop") || !strcmp(name, "chr") || !strcmp(name, "clamp")) return TY_STRING;
+        !strcmp(name, "chop") || !strcmp(name, "chr") || !strcmp(name, "clamp") ||
+        !strcmp(name, "squeeze") || !strcmp(name, "tr") || !strcmp(name, "tr_s") ||
+        !strcmp(name, "delete")) return TY_STRING;
     if (!strcmp(name, "[]") || !strcmp(name, "slice")) return TY_STRING;
-    if (!strcmp(name, "index") || !strcmp(name, "to_i")) return TY_INT;
+    if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count")) return TY_INT;
     if (!strcmp(name, "to_f"))  return TY_FLOAT;
     if (!strcmp(name, "split") || !strcmp(name, "lines")) return TY_STR_ARRAY;
     if (!strcmp(name, "bytes")) return TY_INT_ARRAY;
