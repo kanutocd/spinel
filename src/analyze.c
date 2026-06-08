@@ -1,5 +1,6 @@
 #include "analyze.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,9 +57,25 @@ static TyKind infer_call(Compiler *c, int id) {
   /* obj.method(...) -> the method's return type */
   if (recv >= 0 && ty_is_object(rt)) {
     int cid = ty_object_class(rt);
+    ClassInfo *cls = &c->classes[cid];
+    /* attr reader */
+    if (comp_is_reader(cls, name)) {
+      char ivn[256];
+      snprintf(ivn, sizeof ivn, "@%s", name);
+      int iv = comp_ivar_index(cls, ivn);
+      if (iv >= 0) return cls->ivar_types[iv];
+    }
+    /* attr writer: obj.x= returns the assigned value */
+    size_t ln = strlen(name);
+    if (ln >= 2 && name[ln - 1] == '=') {
+      char base[256];
+      if (ln - 1 < sizeof base) {
+        memcpy(base, name, ln - 1); base[ln - 1] = '\0';
+        if (comp_is_writer(cls, base) && argc >= 1) return infer_type(c, argv[0]);
+      }
+    }
     int mi = comp_method_in_class(c, cid, name);
     if (mi >= 0) return c->scopes[mi].ret;
-    /* built-in object queries */
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
   }
 
@@ -338,6 +355,42 @@ static void register_locals(Compiler *c) {
   }
 }
 
+/* Collect attr_reader/attr_writer/attr_accessor declarations in class
+   bodies, registering backing ivars + reader/writer method names. */
+static void register_attrs(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    ClassInfo *cls = &c->classes[ci];
+    int body = nt_ref(nt, cls->def_node, "body");
+    int n = 0;
+    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    for (int k = 0; k < n; k++) {
+      int s = stmts[k];
+      const char *sty = nt_type(nt, s);
+      if (!sty || strcmp(sty, "CallNode")) continue;
+      const char *nm = nt_str(nt, s, "name");
+      if (!nm) continue;
+      int reader = !strcmp(nm, "attr_reader") || !strcmp(nm, "attr_accessor");
+      int writer = !strcmp(nm, "attr_writer") || !strcmp(nm, "attr_accessor");
+      if (!reader && !writer) continue;
+      int args = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      for (int a = 0; a < an; a++) {
+        const char *aty = nt_type(nt, argv[a]);
+        if (!aty || strcmp(aty, "SymbolNode")) continue;
+        const char *base = nt_str(nt, argv[a], "value");
+        if (!base) continue;
+        char ivname[256];
+        snprintf(ivname, sizeof ivname, "@%s", base);
+        comp_ivar_intern(cls, ivname);
+        if (reader) comp_add_reader(cls, base);
+        if (writer) comp_add_writer(cls, base);
+      }
+    }
+  }
+}
+
 /* @ivar types from their assignments across the class's methods. */
 static int infer_ivar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -345,21 +398,41 @@ static int infer_ivar_types(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
-    const char *nm = NULL;
-    TyKind vt = TY_UNKNOWN;
     if (!strcmp(ty, "InstanceVariableWriteNode")) {
-      nm = nt_str(nt, id, "name");
-      vt = infer_type(c, nt_ref(nt, id, "value"));
-    } else {
-      continue;
+      const char *nm = nt_str(nt, id, "name");
+      TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
+      Scope *s = comp_scope_of(c, id);
+      if (!nm || s->class_id < 0) continue;
+      ClassInfo *ci = &c->classes[s->class_id];
+      int iv = comp_ivar_index(ci, nm);
+      if (iv < 0) continue;
+      TyKind merged = ty_unify(ci->ivar_types[iv], vt);
+      if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
+    } else if (!strcmp(ty, "CallNode")) {
+      /* attr-writer assignment: obj.x = v  (CallNode "x=") */
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      size_t ln = nm ? strlen(nm) : 0;
+      if (!nm || recv < 0 || ln < 2 || nm[ln - 1] != '=') continue;
+      TyKind rt = infer_type(c, recv);
+      if (!ty_is_object(rt)) continue;
+      ClassInfo *ci = &c->classes[ty_object_class(rt)];
+      char base[256];
+      if (ln - 1 >= sizeof base) continue;
+      memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
+      if (!comp_is_writer(ci, base)) continue;
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an < 1) continue;
+      char ivname[256];
+      snprintf(ivname, sizeof ivname, "@%s", base);
+      int iv = comp_ivar_index(ci, ivname);
+      if (iv < 0) continue;
+      TyKind vt = infer_type(c, argv[0]);
+      TyKind merged = ty_unify(ci->ivar_types[iv], vt);
+      if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
     }
-    Scope *s = comp_scope_of(c, id);
-    if (!nm || s->class_id < 0) continue;
-    ClassInfo *ci = &c->classes[s->class_id];
-    int iv = comp_ivar_index(ci, nm);
-    if (iv < 0) continue;
-    TyKind merged = ty_unify(ci->ivar_types[iv], vt);
-    if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
   }
   return changed;
 }
@@ -548,6 +621,7 @@ void analyze_program(Compiler *c) {
 
   walk_scope(c, c->nt->root_id, 0, -1);
   register_locals(c);
+  register_attrs(c);
 
   /* intern every symbol literal so codegen can emit the id table */
   for (int id = 0; id < c->nt->count; id++) {

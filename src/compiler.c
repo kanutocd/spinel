@@ -31,6 +31,10 @@ void comp_free(Compiler *c) {
     for (int j = 0; j < c->classes[i].nivars; j++) free(c->classes[i].ivars[j]);
     free(c->classes[i].ivars);
     free(c->classes[i].ivar_types);
+    for (int j = 0; j < c->classes[i].nreaders; j++) free(c->classes[i].readers[j]);
+    free(c->classes[i].readers);
+    for (int j = 0; j < c->classes[i].nwriters; j++) free(c->classes[i].writers[j]);
+    free(c->classes[i].writers);
   }
   free(c->classes);
   free(c->nscope);
@@ -109,6 +113,29 @@ int comp_method_in_class(Compiler *c, int class_id, const char *name) {
         strcmp(c->scopes[s].name, name) == 0) return s;
   return -1;
 }
+
+static int name_in(char **list, int n, const char *name) {
+  for (int i = 0; i < n; i++) if (strcmp(list[i], name) == 0) return 1;
+  return 0;
+}
+void comp_add_reader(ClassInfo *ci, const char *name) {
+  if (name_in(ci->readers, ci->nreaders, name)) return;
+  if (ci->nreaders >= ci->creaders) {
+    ci->creaders = ci->creaders ? ci->creaders * 2 : 4;
+    ci->readers = realloc(ci->readers, sizeof(char *) * (size_t)ci->creaders);
+  }
+  ci->readers[ci->nreaders++] = strdup(name);
+}
+void comp_add_writer(ClassInfo *ci, const char *name) {
+  if (name_in(ci->writers, ci->nwriters, name)) return;
+  if (ci->nwriters >= ci->cwriters) {
+    ci->cwriters = ci->cwriters ? ci->cwriters * 2 : 4;
+    ci->writers = realloc(ci->writers, sizeof(char *) * (size_t)ci->cwriters);
+  }
+  ci->writers[ci->nwriters++] = strdup(name);
+}
+int comp_is_reader(ClassInfo *ci, const char *name) { return name_in(ci->readers, ci->nreaders, name); }
+int comp_is_writer(ClassInfo *ci, const char *name) { return name_in(ci->writers, ci->nwriters, name); }
 
 Scope *comp_scope_of(Compiler *c, int node_id) {
   if (node_id < 0 || node_id >= c->nt->count) return &c->scopes[0];

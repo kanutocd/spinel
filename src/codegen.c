@@ -317,6 +317,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* object method call: sp_<Class>_<m>(&recv, args) */
   if (recv >= 0 && ty_is_object(rt)) {
     int cid = ty_object_class(rt);
+    /* attr reader -> field access (recv).iv_x */
+    if (comp_is_reader(&c->classes[cid], name)) {
+      buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ").iv_%s", name);
+      return;
+    }
     int mi = comp_method_in_class(c, cid, name);
     if (mi >= 0) {
       buf_printf(b, "sp_%s_%s(", c->classes[cid].name, name);
@@ -1186,6 +1191,31 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "CallNode")) {
     if (emit_output_call(c, id, b, indent)) return;
     if (emit_iteration_stmt(c, id, b, indent)) return;
+    /* attr writer: obj.x = v */
+    {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      size_t ln = nm ? strlen(nm) : 0;
+      if (nm && recv >= 0 && ln >= 2 && nm[ln - 1] == '=') {
+        TyKind rt = comp_ntype(c, recv);
+        if (ty_is_object(rt)) {
+          char base[256];
+          if (ln - 1 < sizeof base) {
+            memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
+            if (comp_is_writer(&c->classes[ty_object_class(rt)], base)) {
+              int args = nt_ref(nt, id, "arguments");
+              int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+              if (an >= 1) {
+                emit_indent(b, indent);
+                buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ").iv_%s = ", base);
+                emit_expr(c, argv[0], b); buf_puts(b, ";\n");
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
     if (emit_array_mutate_stmt(c, id, b, indent)) return;
     emit_indent(b, indent);
     emit_expr(c, id, b);

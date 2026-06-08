@@ -40,6 +40,10 @@ typedef struct {
   char **ivars;        /* instance variable names, incl. leading '@' */
   TyKind *ivar_types;
   int nivars, civars;
+  char **readers;      /* attr reader method names (no '@') */
+  int nreaders, creaders;
+  char **writers;      /* attr writer base names (no '@', no '=') */
+  int nwriters, cwriters;
 } ClassInfo;
 
 typedef struct {
@@ -79,6 +83,10 @@ int        comp_ivar_index(ClassInfo *ci, const char *name);  /* -1 if none */
 int        comp_ivar_intern(ClassInfo *ci, const char *name); /* find or add; returns index */
 /* Find the method scope index for class_id + method name, or -1. */
 int        comp_method_in_class(Compiler *c, int class_id, const char *name);
+void       comp_add_reader(ClassInfo *ci, const char *name);
+void       comp_add_writer(ClassInfo *ci, const char *name);
+int        comp_is_reader(ClassInfo *ci, const char *name);
+int        comp_is_writer(ClassInfo *ci, const char *name);
 
 /* Node type cache. */
 static inline TyKind comp_ntype(const Compiler *c, int id) {
