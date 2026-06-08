@@ -323,7 +323,7 @@ static TyKind infer_call(Compiler *c, int id) {
       return TY_BOOL;
     if (rt == TY_POLY) {
       if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
-      if (!strcmp(name, "to_i")) return TY_INT;
+      if (!strcmp(name, "to_i") || !strcmp(name, "length") || !strcmp(name, "size")) return TY_INT;
       if (!strcmp(name, "to_f")) return TY_FLOAT;
       /* poly method dispatch: unify the return type over every class that
          defines `name` (the runtime cls_id picks the impl). */

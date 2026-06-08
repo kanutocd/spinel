@@ -1181,16 +1181,19 @@ static void emit_call(Compiler *c, int id, Buf *b) {
      matching class's method (walking the chain for inherited methods),
      unboxing the pointer. */
   if (recv >= 0 && rt == TY_POLY && argc == 0) {
+    int is_lengthlike = !strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count");
     int ncand = 0;
     for (int k = 0; k < c->nclasses; k++)
       if (comp_method_in_chain(c, k, name, NULL) >= 0 || comp_reader_in_chain(c, k, name, NULL)) ncand++;
-    if (ncand > 0) {
+    if (ncand > 0 || is_lengthlike) {
       TyKind ret = comp_ntype(c, id);
       int tv = ++g_tmp, tr = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
       emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
-      buf_printf(b, " _t%d = %s; switch (_t%d.cls_id) {", tr,
-                 is_scalar_ret(ret) ? default_value(ret) : "0", tv);
+      buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value(ret) : "0");
+      /* a string-tagged poly answers length/size by its char count */
+      if (is_lengthlike) buf_printf(b, "if (_t%d.tag == SP_TAG_STR) _t%d = (mrb_int)sp_str_length(_t%d.v.s); else ", tv, tr, tv);
+      buf_printf(b, "switch (_t%d.cls_id) {", tv);
       for (int k = 0; k < c->nclasses; k++) {
         int defcls = -1;
         int mi = comp_method_in_chain(c, k, name, &defcls);
