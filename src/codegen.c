@@ -1015,6 +1015,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   if (!strcmp(ty, "InterpolatedStringNode")) { emit_interp(c, id, b); return; }
   if (!strcmp(ty, "TrueNode"))  { buf_puts(b, "1"); return; }
   if (!strcmp(ty, "FalseNode")) { buf_puts(b, "0"); return; }
+  if (!strcmp(ty, "NilNode"))   { buf_puts(b, "0"); return; }  /* default in numeric/bool context */
   if (!strcmp(ty, "SymbolNode")) {
     int sid = comp_sym_intern(c, nt_str(nt, id, "value"));
     buf_printf(b, "((sp_sym)%d)", sid);
@@ -1224,9 +1225,17 @@ static int emit_output_call(Compiler *c, int id, Buf *b, int indent) {
 static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   const char *nm = nt_str(c->nt, id, "name");
   int v = nt_ref(c->nt, id, "value");
+  LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
   emit_indent(b, indent);
   buf_printf(b, "lv_%s = ", nm);
-  emit_expr(c, v, b);
+  /* `x = nil` -> the variable's type-appropriate default */
+  const char *vty = nt_type(c->nt, v);
+  if (vty && !strcmp(vty, "NilNode") && lv) {
+    if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
+    else buf_puts(b, default_value(lv->type));
+  } else {
+    emit_expr(c, v, b);
+  }
   buf_puts(b, ";\n");
 }
 
@@ -1456,9 +1465,19 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "LocalVariableOperatorWriteNode")) { emit_op_assign(c, id, b, indent); return; }
   if (!strcmp(ty, "InstanceVariableWriteNode")) {
     const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
     emit_indent(b, indent);
     buf_printf(b, "self->iv_%s = ", nm + 1);
-    emit_expr(c, nt_ref(nt, id, "value"), b);
+    const char *vty = nt_type(nt, v);
+    int sc = comp_scope_of(c, id)->class_id;
+    TyKind ivt = TY_INT;
+    if (sc >= 0) { int iv = comp_ivar_index(&c->classes[sc], nm); if (iv >= 0) ivt = c->classes[sc].ivar_types[iv]; }
+    if (vty && !strcmp(vty, "NilNode")) {
+      if (ivt == TY_RANGE) buf_puts(b, "(sp_Range){0}");
+      else buf_puts(b, default_value(ivt));
+    } else {
+      emit_expr(c, v, b);
+    }
     buf_puts(b, ";\n");
     return;
   }

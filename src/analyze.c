@@ -514,6 +514,7 @@ static int infer_ivar_types(Compiler *c) {
     if (!strcmp(ty, "InstanceVariableWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
+      if (vt == TY_NIL) continue;  /* nil write doesn't pin the ivar type */
       Scope *s = comp_scope_of(c, id);
       if (!nm || s->class_id < 0) continue;
       ClassInfo *ci = &c->classes[s->class_id];
@@ -576,6 +577,9 @@ static int infer_write_types(Compiler *c) {
     if (!strcmp(ty, "LocalVariableWriteNode")) {
       nm = nt_str(nt, id, "name");
       newt = infer_type(c, nt_ref(nt, id, "value"));
+      /* a `x = nil` write doesn't pin the type: nil is the absent/default
+         value, so the variable takes its non-nil assignments' type */
+      if (newt == TY_NIL) newt = TY_UNKNOWN;
     } else if (!strcmp(ty, "LocalVariableOperatorWriteNode")) {
       nm = nt_str(nt, id, "name");
       Scope *s = comp_scope_of(c, id);
