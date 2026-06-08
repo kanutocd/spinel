@@ -384,6 +384,7 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "count")) return TY_INT;
     if (!strcmp(name, "keys"))   return ty_array_of(ty_hash_key(rt));
     if (!strcmp(name, "values")) return ty_array_of(ty_hash_val(rt));
+    if (!strcmp(name, "merge") || !strcmp(name, "dup") || !strcmp(name, "clone")) return rt;
     if (!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
         !strcmp(name, "include?") || !strcmp(name, "member?") ||
         !strcmp(name, "has_value?") || !strcmp(name, "value?") ||
@@ -557,7 +558,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
     for (int k = 0; k < n; k++) e = ty_unify(e, infer_type(c, els[k]));
     return ty_array_of(e);
   }
-  if (!strcmp(ty, "HashNode")) {
+  if (!strcmp(ty, "HashNode") || !strcmp(ty, "KeywordHashNode")) {
     int n = 0;
     const int *els = nt_arr(nt, id, "elements", &n);
     if (n == 0) return TY_UNKNOWN;

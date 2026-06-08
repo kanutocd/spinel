@@ -1354,6 +1354,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sHash_inspect(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "merge") && argc == 1 &&
+          (rt == TY_STR_INT_HASH || rt == TY_STR_POLY_HASH || rt == TY_SYM_POLY_HASH)) {
+        buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
     }
   }
 
@@ -2426,7 +2431,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_printf(b, "_t%d", t);
     return;
   }
-  if (!strcmp(ty, "HashNode")) {
+  if (!strcmp(ty, "HashNode") || !strcmp(ty, "KeywordHashNode")) {
     TyKind ht = comp_ntype(c, id);
     const char *hn = ty_hash_cname(ht);
     if (!hn) unsupported(c, id, "hash literal (key/value type)");
