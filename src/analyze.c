@@ -399,6 +399,8 @@ static TyKind infer_uncached(Compiler *c, int id) {
       kt = ty_unify(kt, infer_type(c, nt_ref(nt, els[k], "key")));
       vt = ty_unify(vt, infer_type(c, nt_ref(nt, els[k], "value")));
     }
+    /* symbol keys -> SymPolyHash (boxed values), regardless of value type */
+    if (kt == TY_SYMBOL) return TY_SYM_POLY_HASH;
     return ty_hash_of(kt, vt);
   }
   if (!strcmp(ty, "YieldNode")) {

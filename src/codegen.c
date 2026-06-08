@@ -114,6 +114,7 @@ static const char *c_type_name(TyKind t) {
     case TY_STR_STR_HASH: return "sp_StrStrHash *";
     case TY_INT_INT_HASH: return "sp_IntIntHash *";
     case TY_INT_STR_HASH: return "sp_IntStrHash *";
+    case TY_SYM_POLY_HASH: return "sp_SymPolyHash *";
     case TY_POLY:         return "sp_RbVal";
     case TY_POLY_ARRAY:   return "sp_PolyArray *";
     default:             return NULL;
@@ -1273,7 +1274,8 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "sp_%sHash_set(", hn);
       emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_expr(c, argv[0], b); buf_puts(b, ", ");
-      emit_expr(c, argv[1], b); buf_puts(b, ");\n");
+      if (rt == TY_SYM_POLY_HASH) emit_boxed(c, argv[1], b); else emit_expr(c, argv[1], b);
+      buf_puts(b, ");\n");
       return 1;
     }
     return 0;
@@ -1915,11 +1917,13 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "sp_%sHash *_t%d = sp_%sHash_new();\n", hn, t, hn);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+    int sym_poly = (ht == TY_SYM_POLY_HASH);
     for (int j = 0; j < n; j++) {
       int key = nt_ref(nt, els[j], "key");
       int val = nt_ref(nt, els[j], "value");
       Buf kb; memset(&kb, 0, sizeof kb); emit_expr(c, key, &kb);
-      Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, val, &vb);
+      Buf vb; memset(&vb, 0, sizeof vb);
+      if (sym_poly) emit_boxed(c, val, &vb); else emit_expr(c, val, &vb);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_%sHash_set(_t%d, ", hn, t);
       buf_puts(g_pre, kb.p ? kb.p : ""); buf_puts(g_pre, ", ");
