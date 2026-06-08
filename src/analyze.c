@@ -176,6 +176,7 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv >= 0 && rt == TY_PROC && argc == 0) {
     if (!strcmp(name, "arity")) return TY_INT;
     if (!strcmp(name, "lambda?")) return TY_BOOL;
+    if (!strcmp(name, "parameters")) return TY_POLY_ARRAY;
   }
 
   /* identity methods: return the receiver unchanged */
@@ -1936,6 +1937,17 @@ void analyze_program(Compiler *c) {
       const char *v = nt_str(c->nt, id, "value");
       if (v) comp_sym_intern(c, v);
     }
+  }
+  /* Proc#parameters reports param kinds (:req/:opt) and names as symbols;
+     intern them now so they land in the table before the codegen prologue. */
+  for (int id = 0; id < c->nt->count; id++) {
+    if (!is_proc_create(c, id)) continue;
+    comp_sym_intern(c, "req");
+    comp_sym_intern(c, "opt");
+    int pn = a_proc_params_node(c, id);
+    if (pn < 0) continue;
+    int rn = 0; const int *reqs = nt_arr(c->nt, pn, "requireds", &rn);
+    for (int k = 0; k < rn; k++) { const char *nm = nt_str(c->nt, reqs[k], "name"); if (nm) comp_sym_intern(c, nm); }
   }
 
   for (int iter = 0; iter < 128; iter++) {

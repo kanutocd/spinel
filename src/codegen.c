@@ -586,6 +586,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && comp_ntype(c, recv) == TY_PROC && argc == 0 && !strcmp(name, "lambda?")) {
     buf_puts(b, "sp_proc_lambda_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
   }
+  if (recv >= 0 && comp_ntype(c, recv) == TY_PROC && argc == 0 && !strcmp(name, "parameters")) {
+    buf_puts(b, "sp_proc_parameters("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
+  }
 
   /* block_given? -> true inside an inlined yielding method (we only inline
      when a block is present) */
@@ -3924,6 +3927,20 @@ static void emit_proc_literal(Compiler *c, int create, Buf *b) {
   int pid = ++g_proc_counter;
   int ncap = caps.n;
 
+  /* parameter metadata for Proc#parameters: kinds (:req for lambdas, :opt for
+     procs) + names, as interned symbol ids (pre-interned in analyze). */
+  char meta_args[64];
+  if (arity > 0) {
+    buf_printf(&g_procs, "static const sp_sym _proc_kinds_%d[] = {", pid);
+    for (int k = 0; k < arity; k++) buf_printf(&g_procs, "%s(sp_sym)%d", k ? ", " : "", comp_sym_intern(c, is_lambda ? "req" : "opt"));
+    buf_puts(&g_procs, "};\n");
+    buf_printf(&g_procs, "static const sp_sym _proc_names_%d[] = {", pid);
+    for (int k = 0; k < arity; k++) buf_printf(&g_procs, "%s(sp_sym)%d", k ? ", " : "", comp_sym_intern(c, proc_param_name(c, create, k)));
+    buf_puts(&g_procs, "};\n");
+    snprintf(meta_args, sizeof meta_args, "_proc_kinds_%d, _proc_names_%d", pid, pid);
+  }
+  else snprintf(meta_args, sizeof meta_args, "NULL, NULL");
+
   /* capture struct + GC scan (only when the proc captures). cap_scan marks
      the cap struct itself first (sp_Proc_scan does not), then each cell --
      matching the sp_hashproc convention; marking only the cells would leave
@@ -3991,8 +4008,8 @@ static void emit_proc_literal(Compiler *c, int create, Buf *b) {
   g_cap_struct = sv_cap_struct; g_cap_names = sv_cap_names;
 
   if (ncap == 0) {
-    buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, NULL, NULL, %d, %s, %d, NULL, NULL)",
-               pid, arity, is_lambda ? "TRUE" : "FALSE", arity);
+    buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, NULL, NULL, %d, %s, %d, %s)",
+               pid, arity, is_lambda ? "TRUE" : "FALSE", arity, meta_args);
   }
   else {
     /* Allocate + populate the cap struct in the enclosing statement's prelude
@@ -4002,8 +4019,8 @@ static void emit_proc_literal(Compiler *c, int create, Buf *b) {
       buf_printf(g_pre, "_proc_cap_%d *_capv_%d = (_proc_cap_%d *)sp_gc_alloc(sizeof(_proc_cap_%d), NULL, _proc_cap_scan_%d);\n", pid, pid, pid, pid, pid);
       for (int i = 0; i < ncap; i++) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->%s = _cell_%s;\n", pid, caps.v[i], caps.v[i]); }
     }
-    buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, _capv_%d, _proc_cap_scan_%d, %d, %s, %d, NULL, NULL)",
-               pid, pid, pid, arity, is_lambda ? "TRUE" : "FALSE", arity);
+    buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, _capv_%d, _proc_cap_scan_%d, %d, %s, %d, %s)",
+               pid, pid, pid, arity, is_lambda ? "TRUE" : "FALSE", arity, meta_args);
   }
 
   free(params.v); free(used.v); free(locals.v); free(caps.v);
