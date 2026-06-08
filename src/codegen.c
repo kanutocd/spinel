@@ -111,6 +111,8 @@ static const char *c_type_name(TyKind t) {
     case TY_STR_STR_HASH: return "sp_StrStrHash *";
     case TY_INT_INT_HASH: return "sp_IntIntHash *";
     case TY_INT_STR_HASH: return "sp_IntStrHash *";
+    case TY_POLY:         return "sp_RbVal";
+    case TY_POLY_ARRAY:   return "sp_PolyArray *";
     default:             return NULL;
   }
 }
@@ -118,6 +120,7 @@ static int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
          t == TY_SYMBOL || t == TY_RANGE || t == TY_EXCEPTION ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
+         t == TY_POLY || t == TY_POLY_ARRAY ||
          ty_is_hash(t) || ty_is_object(t);
 }
 static const char *default_value(TyKind t) {
@@ -131,7 +134,9 @@ static const char *default_value(TyKind t) {
     case TY_EXCEPTION: return "NULL";
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
-    case TY_STR_ARRAY: return "NULL";
+    case TY_STR_ARRAY:
+    case TY_POLY_ARRAY: return "NULL";
+    case TY_POLY:    return "sp_box_nil()";
     default:        return (ty_is_hash(t) || ty_is_object(t)) ? "NULL" : "0";
   }
 }
@@ -193,6 +198,7 @@ static int  needs_root(TyKind t);
 static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 static void emit_super(Compiler *c, int id, Buf *b);
 static void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out);
+static void emit_boxed(Compiler *c, int node, Buf *b);
 
 /* Strip ParenthesesNode wrappers to reach the inner expression. */
 static int unwrap_parens(Compiler *c, int id) {
@@ -1581,7 +1587,26 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
        emitted via the target's type in emit_assign. If we reach here for
        an empty literal, fall back to an int array. */
     const char *k = array_kind(at);
-    if (n == 0 && !k) { buf_puts(b, "sp_IntArray_new()"); return; }
+    if (n == 0 && !k && at != TY_POLY_ARRAY) { buf_puts(b, "sp_IntArray_new()"); return; }
+    /* poly (mixed-element) array: build an sp_PolyArray of boxed elements */
+    if (at == TY_POLY_ARRAY) {
+      int t = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new();\n", t);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+      for (int j = 0; j < n; j++) {
+        Buf el; memset(&el, 0, sizeof el);
+        emit_boxed(c, els[j], &el);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", t);
+        buf_puts(g_pre, el.p ? el.p : "");
+        buf_puts(g_pre, ");\n");
+        free(el.p);
+      }
+      buf_printf(b, "_t%d", t);
+      return;
+    }
     if (!k) unsupported(c, id, "array literal (element type)");
     int t = ++g_tmp;
     emit_indent(g_pre, g_indent);
@@ -1710,6 +1735,18 @@ static void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
       buf_printf(b, "{ const char *_ps = sp_StrArray_get(%s, _t%d); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n", a, ti);
     free(ab.p);
   }
+  else if (t == TY_POLY) {
+    buf_puts(b, "sp_poly_puts("); emit_expr(c, arg, b); buf_puts(b, ");\n");
+  }
+  else if (t == TY_POLY_ARRAY) {
+    int ta = ++g_tmp, ti = ++g_tmp;
+    Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, arg, &ab);
+    buf_printf(b, "{ sp_PolyArray *_t%d = %s;\n", ta, ab.p ? ab.p : "");
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) sp_poly_puts(sp_PolyArray_get(_t%d, _t%d)); }\n",
+               ti, ti, ta, ti, ta, ti);
+    free(ab.p);
+  }
   else if (ty_is_object(t) && comp_method_in_class(c, ty_object_class(t), "to_s") >= 0) {
     int cid = ty_object_class(t);
     buf_puts(b, "{ const char *_ps = (const char *)(");
@@ -1782,6 +1819,14 @@ static void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   else if (ty_is_hash(t) && ty_hash_cname(t)) {
     buf_printf(b, "fputs(sp_%sHash_inspect(", ty_hash_cname(t));
     emit_expr(c, arg, b);
+    buf_puts(b, "), stdout); putchar('\\n');\n");
+  }
+  else if (t == TY_POLY_ARRAY) {
+    buf_puts(b, "fputs(sp_PolyArray_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "), stdout); putchar('\\n');\n");
+  }
+  else if (t == TY_POLY) {
+    buf_puts(b, "fputs(sp_poly_inspect("); emit_expr(c, arg, b);
     buf_puts(b, "), stdout); putchar('\\n');\n");
   }
   else {
@@ -1857,6 +1902,9 @@ static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     else {
       buf_printf(b, "sp_%sHash_new()", hcn);
     }
+  }
+  else if (lv && lv->type == TY_POLY) {
+    emit_boxed(c, v, b);   /* poly slot: box the (non-poly) RHS */
   }
   else {
     emit_expr(c, v, b);
@@ -2399,6 +2447,12 @@ static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "IfNode"))     { emit_if(c, id, b, indent, 0, 1); return; }
   if (!strcmp(ty, "UnlessNode")) { emit_if(c, id, b, indent, 1, 1); return; }
   if (!strcmp(ty, "ReturnNode")) { emit_return(c, id, b, indent); return; }
+  /* `raise` diverges -- no value to return; emit as a plain statement. */
+  if (!strcmp(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&
+      nt_str(nt, id, "name") && !strcmp(nt_str(nt, id, "name"), "raise")) {
+    emit_indent(b, indent); emit_expr(c, id, b); buf_puts(b, ";\n");
+    return;
+  }
   if (!strcmp(ty, "BeginNode")) {
     /* begin/rescue value -> a temp, assigned in both branches, then tail */
     TyKind rt = comp_ntype(c, id);
@@ -2465,7 +2519,38 @@ static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION; }
+static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY; }
+
+/* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
+   passed through unboxed (double-boxing is a classic silent-corruption bug). */
+static void emit_boxed(Compiler *c, int node, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  if (t == TY_POLY) { emit_expr(c, node, b); return; }
+  if (ty_is_object(t)) {
+    buf_printf(b, "sp_box_obj(");
+    emit_expr(c, node, b);
+    buf_printf(b, ", %d)", ty_object_class(t));
+    return;
+  }
+  const char *fn = NULL;
+  switch (t) {
+    case TY_INT:    fn = "sp_box_int";   break;
+    case TY_FLOAT:  fn = "sp_box_float"; break;
+    case TY_STRING: fn = "sp_box_str";   break;
+    case TY_BOOL:   fn = "sp_box_bool";  break;
+    case TY_SYMBOL: fn = "sp_box_sym";   break;
+    case TY_INT_ARRAY:   fn = "sp_box_int_array";   break;
+    case TY_FLOAT_ARRAY: fn = "sp_box_float_array"; break;
+    case TY_STR_ARRAY:   fn = "sp_box_str_array";   break;
+    case TY_POLY_ARRAY:  fn = "sp_box_poly_array";  break;
+    case TY_NIL:    buf_puts(b, "sp_box_nil()"); return;
+    default: break;
+  }
+  if (!fn) { unsupported(c, node, "boxing value into poly"); return; }
+  buf_printf(b, "%s(", fn);
+  emit_expr(c, node, b);
+  buf_puts(b, ")");
+}
 
 /* `vol` makes the local volatile (required for locals live across a setjmp
    in a begin/rescue). Pointers need the volatile on the pointer itself
@@ -2482,6 +2567,7 @@ static void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
     case TY_SYMBOL: buf_puts(&cty, "sp_sym"); init = "((sp_sym)-1)"; break;
     case TY_RANGE:  buf_puts(&cty, "sp_Range"); init = "{0}"; break;
     case TY_STRING: buf_puts(&cty, "const char *"); init = "(&(\"\\xff\")[1])"; ptr = 1; break;
+    case TY_POLY:   buf_puts(&cty, "sp_RbVal"); init = "sp_box_nil()"; break;
     default:
       if (is_scalar_ret(t) && t != TY_UNKNOWN) { emit_ctype(c, t, &cty); init = "NULL"; ptr = 1; }
       else {
@@ -2494,7 +2580,8 @@ static void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
   buf_puts(b, cty.p ? cty.p : "");
   if (vol && ptr) buf_puts(b, "volatile ");  /* cty ends with "* "; -> "* volatile " */
   buf_printf(b, " lv_%s = %s;\n", lv->name, init);
-  if (root) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+  if (t == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name);
+  else if (root) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
   free(cty.p);
 }
 
