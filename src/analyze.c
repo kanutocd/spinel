@@ -217,6 +217,10 @@ static TyKind infer_call(Compiler *c, int id) {
       (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^") ||
        !strcmp(name, "<<") || !strcmp(name, ">>")))
     return TY_INT;
+  /* boolean &/|/^ */
+  if (recv >= 0 && argc == 1 && rt == TY_BOOL &&
+      (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^")))
+    return TY_BOOL;
 
   size_t nl = strlen(name);
   if (nl > 0 && name[nl - 1] == '?') return TY_BOOL;

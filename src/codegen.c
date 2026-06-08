@@ -683,7 +683,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, "sp_sym_to_s("); emit_expr(c, recv, b); buf_puts(b, ")");
       return;
     }
+    if (!strcmp(name, "inspect")) {
+      buf_puts(b, "sp_str_concat(SPL(\":\"), sp_sym_to_s("); emit_expr(c, recv, b); buf_puts(b, "))");
+      return;
+    }
     if (!strcmp(name, "to_sym")) { emit_expr(c, recv, b); return; }
+  }
+
+  /* boolean receiver methods */
+  if (recv >= 0 && rt == TY_BOOL) {
+    if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
+      buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") ? SPL(\"true\") : SPL(\"false\"))");
+      return;
+    }
+    if (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^")) {
+      buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, " %s ", name); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
   }
 
   /* scalar receiver methods: evaluate the receiver once into rs, then
@@ -706,6 +722,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "chomp"))      buf_printf(b, "sp_str_chomp(%s)", r);
       else if (!strcmp(name, "chop"))       buf_printf(b, "sp_str_chop(%s)", r);
       else if (!strcmp(name, "to_s") || !strcmp(name, "to_str") || !strcmp(name, "dup")) buf_puts(b, r);
+      else if (!strcmp(name, "inspect"))    buf_printf(b, "sp_str_inspect(%s)", r);
       else if (!strcmp(name, "empty?"))     buf_printf(b, "(sp_str_length(%s) == 0)", r);
       else if (!strcmp(name, "include?") && argc == 1) {
         buf_printf(b, "sp_str_include(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -738,6 +755,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       } else handled = 0;
     } else if (rt == TY_INT) {
       if      (!strcmp(name, "to_s") && argc == 0) buf_printf(b, "sp_int_to_s(%s)", r);
+      else if (!strcmp(name, "inspect")) buf_printf(b, "sp_int_to_s(%s)", r);
       else if (!strcmp(name, "to_f"))   buf_printf(b, "((mrb_float)(%s))", r);
       else if (!strcmp(name, "to_i") || !strcmp(name, "to_int") || !strcmp(name, "floor") ||
                !strcmp(name, "ceil") || !strcmp(name, "round")) buf_printf(b, "(%s)", r);
@@ -761,7 +779,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "truncate")) buf_printf(b, "((mrb_int)trunc(%s))", r);
       else if (!strcmp(name, "to_i"))  buf_printf(b, "((mrb_int)(%s))", r);
       else if (!strcmp(name, "to_f"))  buf_printf(b, "(%s)", r);
-      else if (!strcmp(name, "to_s"))  buf_printf(b, "sp_float_to_s(%s)", r);
+      else if (!strcmp(name, "to_s") || !strcmp(name, "inspect"))  buf_printf(b, "sp_float_to_s(%s)", r);
       else if (!strcmp(name, "abs"))   buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "zero?")) buf_printf(b, "((%s) == 0.0)", r);
       else handled = 0;
