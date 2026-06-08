@@ -3255,11 +3255,11 @@ static mrb_bool sp_PolyArray_eq(sp_PolyArray *a, sp_PolyArray *b) {
   }
   return TRUE;
 }
-/* Compare a poly array against a typed (int/str/float) array by boxing the
-   typed side element-wise. `kind` is the typed array's SP_BUILTIN_* tag. */
-static mrb_bool sp_PolyArray_eq_typed(sp_PolyArray *pa, void *tp, int kind) {
-  if (!pa || !tp) return FALSE;
+/* Box a typed (int/str/float) array into a fresh poly array element-wise.
+   `kind` is the typed array's SP_BUILTIN_* tag. */
+static sp_PolyArray *sp_typed_to_poly(void *tp, int kind) {
   sp_PolyArray *tb = sp_PolyArray_new();
+  if (!tp) return tb;
   if (kind == SP_BUILTIN_STR_ARRAY) {
     sp_StrArray *a = (sp_StrArray *)tp;
     for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(tb, sp_box_str(sp_StrArray_get(a, i)));
@@ -3272,7 +3272,13 @@ static mrb_bool sp_PolyArray_eq_typed(sp_PolyArray *pa, void *tp, int kind) {
     sp_IntArray *a = (sp_IntArray *)tp;
     for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(tb, sp_box_int(sp_IntArray_get(a, i)));
   }
-  return sp_PolyArray_eq(pa, tb);
+  return tb;
+}
+/* Compare a poly array against a typed (int/str/float) array by boxing the
+   typed side element-wise. `kind` is the typed array's SP_BUILTIN_* tag. */
+static mrb_bool sp_PolyArray_eq_typed(sp_PolyArray *pa, void *tp, int kind) {
+  if (!pa || !tp) return FALSE;
+  return sp_PolyArray_eq(pa, sp_typed_to_poly(tp, kind));
 }
 static mrb_bool sp_PolyArray_include(sp_PolyArray *a, sp_RbVal v) {
   if (!a) return FALSE;

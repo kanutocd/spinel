@@ -20,7 +20,7 @@ static int is_cmp_op(const char *op) {
   return str_in(op, set);
 }
 static int is_eq_op(const char *op) {
-  static const char *const set[] = {"==", "!=", NULL};
+  static const char *const set[] = {"==", "!=", "===", NULL};
   return str_in(op, set);
 }
 static int is_void_call(const char *name) {
@@ -635,6 +635,7 @@ static TyKind infer_call(Compiler *c, int id) {
 
   if (recv >= 0 && argc == 1 && is_arith_op(name)) {
     if (rt == TY_STRING) {
+      if (!strcmp(name, "%") && ty_is_array(a0)) return TY_STRING;  /* sprintf */
       if (!strcmp(name, "+") || !strcmp(name, "*")) return TY_STRING;
       return TY_UNKNOWN;
     }

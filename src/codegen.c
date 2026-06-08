@@ -1113,6 +1113,25 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* String#% with an array argument: printf-style formatting. Any typed array
+     is boxed to poly so a single format path handles mixed specs. */
+  if (recv >= 0 && rt == TY_STRING && !strcmp(name, "%") && argc == 1) {
+    TyKind at = a0;
+    if (at == TY_POLY_ARRAY) {
+      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
+    const char *ak = array_kind(at);
+    if (ak) {
+      const char *kind = at == TY_STR_ARRAY ? "SP_BUILTIN_STR_ARRAY"
+                       : at == TY_FLOAT_ARRAY ? "SP_BUILTIN_FLT_ARRAY" : "SP_BUILTIN_INT_ARRAY";
+      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
+      buf_puts(b, ", sp_typed_to_poly((void *)("); emit_expr(c, argv[0], b);
+      buf_printf(b, "), %s))", kind);
+      return;
+    }
+  }
+
   /* an empty array literal as a receiver: its node type is unknown (element
      type is usage-folded, but a bare literal has no usage). Handle the common
      methods directly against an empty (poly) array. */
@@ -1334,6 +1353,21 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
     if (!strcmp(name, "to_i")) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
     if (!strcmp(name, "to_f")) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
+  }
+
+  /* `===` on a scalar comparable (bool/int/float/string/symbol) is case
+     equality == value equality. Range/Class/Regexp `===` have their own
+     handlers and fall through here. */
+  if (argc == 1 && !strcmp(name, "===")) {
+    int fr = eq_family(rt), fa = eq_family(a0);
+    if (fr && fr != 5 && fa && fa != 5) {
+      if (fr == fa) {
+        if (fr == 2) { buf_puts(b, "sp_str_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        else { buf_puts(b, "("); emit_expr(c, recv, b); buf_puts(b, " == "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      }
+      else { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, "), ("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
+      return;
+    }
   }
 
   if (argc == 1 && (!strcmp(name, "==") || !strcmp(name, "!="))) {
