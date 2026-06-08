@@ -1363,6 +1363,21 @@ void analyze_program(Compiler *c) {
     if (!ch) break;
   }
 
+  /* Backstop: a parameter still unknown but with a `= nil` default is a
+     nullable param -- represent it as poly so it can hold nil or a value. */
+  for (int s = 0; s < c->nscopes; s++) {
+    Scope *sc = &c->scopes[s];
+    for (int i = 0; i < sc->nparams; i++) {
+      if (sc->pdefault[i] < 0) continue;
+      const char *dty = nt_type(c->nt, sc->pdefault[i]);
+      if (!dty || strcmp(dty, "NilNode")) continue;
+      LocalVar *p = scope_local(sc, sc->pnames[i]);
+      if (p && p->type == TY_UNKNOWN) p->type = TY_POLY;
+    }
+  }
+  /* recompute returns: a method returning such a param is now poly */
+  for (int iter = 0; iter < 8; iter++) if (!infer_return_types(c)) break;
+
   /* Reachability: an instance/free method is live only if its name is
      referenced somewhere -- as a call name, an alias target, or a symbol
      literal (covering send/method/define_method). Names never mentioned
