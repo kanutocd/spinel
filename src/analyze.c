@@ -581,8 +581,13 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "delete")) return TY_STRING;
     if (!strcmp(name, "[]") || !strcmp(name, "slice") || !strcmp(name, "byteslice") ||
         !strcmp(name, "force_encoding") || !strcmp(name, "b") || !strcmp(name, "encode")) return TY_STRING;
+    if (!strcmp(name, "index") && argc == 1) {
+      const char *aty = nt_type(nt, argv[0]);
+      if (aty && !strcmp(aty, "RegularExpressionNode")) return TY_POLY;  /* nil on no match */
+    }
     if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count") ||
         !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp")) return TY_INT;
+    if (!strcmp(name, "scrub")) return TY_STRING;
     if (!strcmp(name, "casecmp?")) return TY_BOOL;
     if (!strcmp(name, "to_f"))  return TY_FLOAT;
     if (!strcmp(name, "split") || !strcmp(name, "lines") || !strcmp(name, "scan")) return TY_STR_ARRAY;
