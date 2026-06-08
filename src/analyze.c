@@ -51,12 +51,15 @@ static TyKind infer_call(Compiler *c, int id) {
        !strcmp(name, "dup") || !strcmp(name, "clone")))
     return rt;
 
-  /* Class.new(...) -> an instance of that class */
+  /* Class.new(...) -> an instance of that class; built-in .new constructors */
   if (recv >= 0 && !strcmp(name, "new")) {
     const char *rty = nt_type(nt, recv);
     if (rty && !strcmp(rty, "ConstantReadNode")) {
-      int ci = comp_class_index(c, nt_str(nt, recv, "name"));
+      const char *cn = nt_str(nt, recv, "name");
+      int ci = comp_class_index(c, cn);
       if (ci >= 0) return ty_object(ci);
+      if (cn && !strcmp(cn, "Array") && argc == 2) return ty_array_of(infer_type(c, argv[1]));
+      if (cn && !strcmp(cn, "String")) return TY_STRING;
     }
   }
 

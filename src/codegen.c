@@ -426,6 +426,37 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, ")");
         return;
       }
+      const char *cn = nt_str(nt, recv, "name");
+      if (cn && !strcmp(cn, "String")) {
+        /* String.new / String.new(s) */
+        if (argc == 1) emit_expr(c, argv[0], b);
+        else buf_puts(b, "(&(\"\\xff\")[1])");
+        return;
+      }
+      if (cn && !strcmp(cn, "Array") && argc == 2) {
+        /* Array.new(n, v) -> n copies of v */
+        TyKind at = comp_ntype(c, id);
+        const char *k = array_kind(at);
+        if (k) {
+          int tn = ++g_tmp, tv = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          Buf nb; memset(&nb, 0, sizeof nb); emit_expr(c, argv[0], &nb);
+          Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, argv[1], &vb);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "mrb_int _t%d = ", tn); buf_puts(g_pre, nb.p ? nb.p : ""); buf_puts(g_pre, ";\n");
+          emit_indent(g_pre, g_indent);
+          emit_ctype(c, ty_array_elem(at), g_pre);
+          buf_printf(g_pre, " _t%d = ", tv); buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ";\n");
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, tr, k);
+          emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push(_t%d, _t%d);\n",
+                     ti, ti, tn, ti, k, tr, tv);
+          free(nb.p); free(vb.p);
+          buf_printf(b, "_t%d", tr);
+          return;
+        }
+      }
     }
   }
 
