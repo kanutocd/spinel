@@ -851,6 +851,15 @@ static int infer_write_types(Compiler *c) {
         newt = (ct == TY_FLOAT || vt == TY_FLOAT) ? TY_FLOAT : TY_INT;
       else newt = ct;
     }
+    else if (!strcmp(ty, "LocalVariableOrWriteNode") ||
+             !strcmp(ty, "LocalVariableAndWriteNode")) {
+      /* a ||= v / a &&= v : the variable can hold its prior value or v */
+      nm = nt_str(nt, id, "name");
+      Scope *s = comp_scope_of(c, id);
+      LocalVar *cur = nm ? scope_local(s, nm) : NULL;
+      TyKind ct = cur ? (TyKind)cur->gc_root : TY_UNKNOWN;
+      newt = ty_unify(ct, infer_type(c, nt_ref(nt, id, "value")));
+    }
     else {
       continue;
     }

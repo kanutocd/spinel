@@ -2605,6 +2605,30 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   }
   if (!strcmp(ty, "LocalVariableWriteNode")) { emit_assign(c, id, b, indent); return; }
   if (!strcmp(ty, "LocalVariableOperatorWriteNode")) { emit_op_assign(c, id, b, indent); return; }
+  if (!strcmp(ty, "LocalVariableOrWriteNode") || !strcmp(ty, "LocalVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "LocalVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+    TyKind t = lv ? lv->type : TY_UNKNOWN;
+    const char *en = rename_local(nm);
+    if (t == TY_POLY) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%ssp_poly_truthy(lv_%s)) lv_%s = ", is_or ? "!" : "", en, en);
+      emit_boxed(c, v, b); buf_puts(b, ";\n");
+    }
+    else if (t == TY_BOOL) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%slv_%s) lv_%s = ", is_or ? "!" : "", en, en);
+      emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    else if (!is_or) {  /* a &&= v on an always-truthy var: always assign */
+      emit_indent(b, indent);
+      buf_printf(b, "lv_%s = ", en); emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    /* a ||= v on an always-truthy var: no-op */
+    return;
+  }
   if (!strcmp(ty, "InstanceVariableWriteNode")) {
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
