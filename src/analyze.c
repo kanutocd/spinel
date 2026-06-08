@@ -943,6 +943,12 @@ static int infer_write_types(Compiler *c) {
       if (lv->type != TY_UNKNOWN && !ty_is_hash(lv->type)) continue;
       lv->type = ty_unify(lv->type, hv);
     }
+    else if (kt == TY_SYMBOL) {
+      /* symbol key -> SymPolyHash (boxed values) */
+      if (vt == TY_UNKNOWN) continue;
+      if (lv->type != TY_UNKNOWN && lv->type != TY_SYM_POLY_HASH) continue;
+      lv->type = TY_SYM_POLY_HASH;
+    }
   }
 
   /* detect change vs the stashed old types */
