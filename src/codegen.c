@@ -1852,6 +1852,20 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "include?") && argc == 1) {
+        /* a typed array can never contain an element of an incompatible
+           type (numeric vs string), so the answer is statically false;
+           still evaluate both operands for any side effects. */
+        int mismatch = 0;
+        if (rt == TY_STR_ARRAY && a0 != TY_STRING && a0 != TY_UNKNOWN && a0 != TY_POLY) mismatch = 1;
+        if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) &&
+            a0 != TY_INT && a0 != TY_FLOAT && a0 != TY_UNKNOWN && a0 != TY_POLY) mismatch = 1;
+        if (mismatch) {
+          buf_puts(b, "((void)("); emit_expr(c, recv, b);
+          buf_puts(b, "), (void)("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)");
+          return;
+        }
+      }
       if ((!strcmp(name, "include?") || !strcmp(name, "index")) && argc == 1 && rt != TY_FLOAT_ARRAY) {
         const char *fn = !strcmp(name, "include?") ? "include" : "index";
         buf_printf(b, "sp_%sArray_%s(", k, fn);
