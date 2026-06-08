@@ -67,6 +67,21 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
   }
 
+  /* hash receiver methods */
+  if (recv >= 0 && ty_is_hash(rt)) {
+    if (!strcmp(name, "[]"))     return ty_hash_val(rt);
+    if (!strcmp(name, "[]="))    return ty_hash_val(rt);
+    if (!strcmp(name, "fetch"))  return ty_hash_val(rt);
+    if (!strcmp(name, "length") || !strcmp(name, "size") ||
+        !strcmp(name, "count")) return TY_INT;
+    if (!strcmp(name, "keys"))   return ty_array_of(ty_hash_key(rt));
+    if (!strcmp(name, "values")) return ty_array_of(ty_hash_val(rt));
+    if (!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
+        !strcmp(name, "include?") || !strcmp(name, "member?") ||
+        !strcmp(name, "has_value?") || !strcmp(name, "value?") ||
+        !strcmp(name, "empty?")) return TY_BOOL;
+  }
+
   /* string receiver methods */
   if (recv >= 0 && rt == TY_STRING) {
     if (!strcmp(name, "upcase") || !strcmp(name, "downcase") ||
@@ -176,6 +191,19 @@ static TyKind infer_uncached(Compiler *c, int id) {
     TyKind e = TY_UNKNOWN;
     for (int k = 0; k < n; k++) e = ty_unify(e, infer_type(c, els[k]));
     return ty_array_of(e);
+  }
+  if (!strcmp(ty, "HashNode")) {
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    if (n == 0) return TY_UNKNOWN;
+    TyKind kt = TY_UNKNOWN, vt = TY_UNKNOWN;
+    for (int k = 0; k < n; k++) {
+      const char *aty = nt_type(nt, els[k]);
+      if (!aty || strcmp(aty, "AssocNode")) return TY_UNKNOWN;
+      kt = ty_unify(kt, infer_type(c, nt_ref(nt, els[k], "key")));
+      vt = ty_unify(vt, infer_type(c, nt_ref(nt, els[k], "value")));
+    }
+    return ty_hash_of(kt, vt);
   }
   if (!strcmp(ty, "CallNode")) return infer_call(c, id);
 
@@ -352,6 +380,21 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "find") || !strcmp(name, "each_with_index")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
+
+    /* hash.each { |k, v| } binds two params */
+    if (!strcmp(name, "each") && ty_is_hash(rt)) {
+      Scope *hs = comp_scope_of(c, block);
+      LocalVar *kp = scope_local_intern(hs, p0);
+      TyKind km = ty_unify(kp->type, ty_hash_key(rt));
+      if (km != kp->type) { kp->type = km; changed = 1; }
+      const char *p1 = block_param_name(c, block, 1);
+      if (p1) {
+        LocalVar *vp = scope_local_intern(hs, p1);
+        TyKind vm = ty_unify(vp->type, ty_hash_val(rt));
+        if (vm != vp->type) { vp->type = vm; changed = 1; }
+      }
+      continue;
+    }
 
     if (pt == TY_UNKNOWN) continue;
     Scope *s = comp_scope_of(c, block);

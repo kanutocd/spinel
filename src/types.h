@@ -22,6 +22,10 @@ typedef enum {
   TY_FLOAT_ARRAY,
   TY_STR_ARRAY,
   TY_POLY_ARRAY,
+  TY_STR_INT_HASH,
+  TY_STR_STR_HASH,
+  TY_INT_INT_HASH,
+  TY_INT_STR_HASH,
   TY_POLY          /* union / top: a value whose static type widened */
 } TyKind;
 
@@ -30,6 +34,11 @@ int ty_is_numeric(TyKind t);           /* INT or FLOAT */
 int ty_is_array(TyKind t);
 TyKind ty_array_of(TyKind elem);       /* element type -> array kind */
 TyKind ty_array_elem(TyKind arr);      /* array kind -> element type */
+int ty_is_hash(TyKind t);
+TyKind ty_hash_of(TyKind key, TyKind val); /* (key,val) -> hash kind (UNKNOWN if unsupported) */
+TyKind ty_hash_key(TyKind h);
+TyKind ty_hash_val(TyKind h);
+const char *ty_hash_cname(TyKind h);   /* "StrInt" etc, for sp_<X>Hash_* */
 /* Merge two observed types into the narrowest type covering both.
    Equal -> same; UNKNOWN acts as identity; otherwise widen to POLY
    (numeric int+float stays POLY for now -- mixed-numeric vars are rare

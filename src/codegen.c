@@ -71,13 +71,18 @@ static const char *c_type_name(TyKind t) {
     case TY_INT_ARRAY:   return "sp_IntArray *";
     case TY_FLOAT_ARRAY: return "sp_FloatArray *";
     case TY_STR_ARRAY:   return "sp_StrArray *";
+    case TY_STR_INT_HASH: return "sp_StrIntHash *";
+    case TY_STR_STR_HASH: return "sp_StrStrHash *";
+    case TY_INT_INT_HASH: return "sp_IntIntHash *";
+    case TY_INT_STR_HASH: return "sp_IntStrHash *";
     default:             return NULL;
   }
 }
 static int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
          t == TY_SYMBOL ||
-         t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY;
+         t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
+         ty_is_hash(t);
 }
 static const char *default_value(TyKind t) {
   switch (t) {
@@ -89,7 +94,7 @@ static const char *default_value(TyKind t) {
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
     case TY_STR_ARRAY: return "NULL";
-    default:        return "0";
+    default:        return ty_is_hash(t) ? "NULL" : "0";
   }
 }
 /* "Int" / "Str" / "Float" for the sp_<K>Array_* runtime family. */
@@ -131,6 +136,7 @@ static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
 static int  emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
 static int  emit_output_call(Compiler *c, int id, Buf *b, int indent);
 static int  emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent);
+static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 
 /* Strip ParenthesesNode wrappers to reach the inner expression. */
 static int unwrap_parens(Compiler *c, int id) {
@@ -256,6 +262,45 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     unsupported(c, id, "equality");
   }
 
+  /* hash value methods */
+  if (recv >= 0 && ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    if (hn) {
+      if (!strcmp(name, "[]") && argc == 1) {
+        buf_printf(b, "sp_%sHash_get_opt(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "fetch") && argc == 1) {
+        buf_printf(b, "sp_%sHash_get(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) {
+        buf_printf(b, "sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "empty?") && argc == 0) {
+        buf_printf(b, "(sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        return;
+      }
+      if ((!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
+           !strcmp(name, "include?") || !strcmp(name, "member?")) && argc == 1) {
+        buf_printf(b, "sp_%sHash_has_key(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "keys") && argc == 0) {
+        buf_printf(b, "sp_%sHash_keys(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) {
+        buf_printf(b, "sp_%sHash_inspect(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+    }
+  }
+
   /* array value methods */
   if (recv >= 0 && ty_is_array(rt)) {
     const char *k = array_kind(rt);
@@ -372,13 +417,27 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   int recv = nt_ref(nt, id, "receiver");
   if (!name || recv < 0) return 0;
   TyKind rt = comp_ntype(c, recv);
-  if (!ty_is_array(rt)) return 0;
-  const char *k = array_kind(rt);
-  if (!k) return 0;
   int args = nt_ref(nt, id, "arguments");
   int argc = 0;
   const int *argv = NULL;
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+
+  if (ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    if (hn && !strcmp(name, "[]=") && argc == 2) {
+      emit_indent(b, indent);
+      buf_printf(b, "sp_%sHash_set(", hn);
+      emit_expr(c, recv, b); buf_puts(b, ", ");
+      emit_expr(c, argv[0], b); buf_puts(b, ", ");
+      emit_expr(c, argv[1], b); buf_puts(b, ");\n");
+      return 1;
+    }
+    return 0;
+  }
+
+  if (!ty_is_array(rt)) return 0;
+  const char *k = array_kind(rt);
+  if (!k) return 0;
 
   if (!strcmp(name, "[]=") && argc == 2) {
     emit_indent(b, indent);
@@ -396,6 +455,56 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
   return 0;
+}
+
+/* h[k] op= v  /  a[i] op= v  (IndexOperatorWriteNode). Receiver and key
+   are evaluated once into temps. */
+static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  const char *op = nt_str(nt, id, "binary_operator");
+  int args = nt_ref(nt, id, "arguments");
+  int v = nt_ref(nt, id, "value");
+  int argc = 0;
+  const int *argv = NULL;
+  if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+  if (argc != 1 || !op) unsupported(c, id, "index operator assignment");
+  TyKind rt = comp_ntype(c, recv);
+
+  int ta = ++g_tmp, tb = ++g_tmp;
+
+  if (ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    TyKind vt = ty_hash_val(rt);
+    if (!hn) unsupported(c, id, "index operator assignment (hash)");
+    emit_indent(b, indent);
+    buf_printf(b, "{ %s _t%d = ", c_type_name(rt), ta); emit_expr(c, recv, b);
+    buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tb); emit_expr(c, argv[0], b);
+    buf_puts(b, "; ");
+    buf_printf(b, "sp_%sHash_set(_t%d, _t%d, ", hn, ta, tb);
+    if (vt == TY_STRING && !strcmp(op, "+")) {
+      buf_printf(b, "sp_str_concat(sp_%sHash_get(_t%d, _t%d), ", hn, ta, tb);
+      emit_expr(c, v, b); buf_puts(b, ")");
+    } else {
+      buf_printf(b, "sp_%sHash_get(_t%d, _t%d) %s ", hn, ta, tb, op);
+      buf_puts(b, "("); emit_expr(c, v, b); buf_puts(b, ")");
+    }
+    buf_puts(b, "); }\n");
+    return;
+  }
+
+  if (ty_is_array(rt)) {
+    const char *k = array_kind(rt);
+    if (!k) unsupported(c, id, "index operator assignment (array)");
+    emit_indent(b, indent);
+    buf_printf(b, "{ %s _t%d = ", c_type_name(rt), ta); emit_expr(c, recv, b);
+    buf_printf(b, "; mrb_int _t%d = ", tb); emit_expr(c, argv[0], b);
+    buf_puts(b, "; ");
+    buf_printf(b, "sp_%sArray_set(_t%d, _t%d, sp_%sArray_get(_t%d, _t%d) %s ", k, ta, tb, k, ta, tb, op);
+    buf_puts(b, "("); emit_expr(c, v, b); buf_puts(b, ")); }\n");
+    return;
+  }
+  unsupported(c, id, "index operator assignment");
 }
 
 /* Block iteration lowered to an inline C for-loop. Handles n.times,
@@ -420,6 +529,32 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < ", t, t);
     buf_puts(b, rb.p); buf_printf(b, "; _t%d++) {\n", t);
     if (p0) { emit_indent(b, indent + 1); buf_printf(b, "lv_%s = _t%d;\n", p0, t); }
+    emit_stmts(c, body, b, indent + 1);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    free(rb.p);
+    return 1;
+  }
+
+  /* hash.each { |k, v| ... } */
+  if (!strcmp(name, "each") && ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    if (!hn) return 0;
+    const char *p1 = block_param_name(c, block, 1);
+    int t = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb);
+    emit_expr(c, recv, &rb);
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < ", t, t);
+    buf_puts(b, rb.p); buf_printf(b, "->len; _t%d++) {\n", t);
+    if (p0) {
+      emit_indent(b, indent + 1);
+      buf_printf(b, "lv_%s = ", p0); buf_puts(b, rb.p); buf_printf(b, "->order[_t%d];\n", t);
+    }
+    if (p1) {
+      emit_indent(b, indent + 1);
+      buf_printf(b, "lv_%s = sp_%sHash_get(", p1, hn);
+      buf_puts(b, rb.p); buf_puts(b, ", "); buf_puts(b, rb.p); buf_printf(b, "->order[_t%d]);\n", t);
+    }
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     free(rb.p);
@@ -608,6 +743,31 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_printf(b, "_t%d", t);
     return;
   }
+  if (!strcmp(ty, "HashNode")) {
+    TyKind ht = comp_ntype(c, id);
+    const char *hn = ty_hash_cname(ht);
+    if (!hn) unsupported(c, id, "hash literal (key/value type)");
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%sHash *_t%d = sp_%sHash_new();\n", hn, t, hn);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+    for (int j = 0; j < n; j++) {
+      int key = nt_ref(nt, els[j], "key");
+      int val = nt_ref(nt, els[j], "value");
+      Buf kb; memset(&kb, 0, sizeof kb); emit_expr(c, key, &kb);
+      Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, val, &vb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_%sHash_set(_t%d, ", hn, t);
+      buf_puts(g_pre, kb.p ? kb.p : ""); buf_puts(g_pre, ", ");
+      buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ");\n");
+      free(kb.p); free(vb.p);
+    }
+    buf_printf(b, "_t%d", t);
+    return;
+  }
   if (!strcmp(ty, "CallNode")) { emit_call(c, id, b); return; }
 
   unsupported(c, id, "expression");
@@ -669,6 +829,10 @@ static void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, ")), stdout); putchar('\\n');\n");
   } else if (ty_is_array(t) && array_kind(t)) {
     buf_printf(b, "fputs(sp_%sArray_inspect(", array_kind(t));
+    emit_expr(c, arg, b);
+    buf_puts(b, "), stdout); putchar('\\n');\n");
+  } else if (ty_is_hash(t) && ty_hash_cname(t)) {
+    buf_printf(b, "fputs(sp_%sHash_inspect(", ty_hash_cname(t));
     emit_expr(c, arg, b);
     buf_puts(b, "), stdout); putchar('\\n');\n");
   } else {
@@ -854,6 +1018,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   }
   if (!strcmp(ty, "LocalVariableWriteNode")) { emit_assign(c, id, b, indent); return; }
   if (!strcmp(ty, "LocalVariableOperatorWriteNode")) { emit_op_assign(c, id, b, indent); return; }
+  if (!strcmp(ty, "IndexOperatorWriteNode")) { emit_index_op_write(c, id, b, indent); return; }
   if (!strcmp(ty, "IfNode"))     { emit_if(c, id, b, indent, 0, 0); return; }
   if (!strcmp(ty, "UnlessNode")) { emit_if(c, id, b, indent, 1, 0); return; }
   if (!strcmp(ty, "WhileNode"))  { emit_while(c, id, b, indent, 0); return; }
@@ -924,7 +1089,7 @@ static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t); }
+static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t) || ty_is_hash(t); }
 
 static void declare_local(Buf *b, LocalVar *lv) {
   switch (lv->type) {
@@ -945,6 +1110,11 @@ static void declare_local(Buf *b, LocalVar *lv) {
       buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
       break;
     default:
+      if (ty_is_hash(lv->type)) {
+        buf_printf(b, "    %s lv_%s = NULL;\n", c_type_name(lv->type), lv->name);
+        buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+        break;
+      }
       fprintf(stderr, "spinelc: local '%s' has unsupported type %s\n",
               lv->name, ty_name(lv->type));
       exit(1);

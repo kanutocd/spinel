@@ -1,4 +1,5 @@
 #include "types.h"
+#include <stddef.h>
 
 const char *ty_name(TyKind t) {
   switch (t) {
@@ -15,9 +16,46 @@ const char *ty_name(TyKind t) {
     case TY_FLOAT_ARRAY: return "float_array";
     case TY_STR_ARRAY:   return "str_array";
     case TY_POLY_ARRAY:  return "poly_array";
+    case TY_STR_INT_HASH: return "str_int_hash";
+    case TY_STR_STR_HASH: return "str_str_hash";
+    case TY_INT_INT_HASH: return "int_int_hash";
+    case TY_INT_STR_HASH: return "int_str_hash";
     case TY_POLY:    return "poly";
   }
   return "?";
+}
+
+static const struct { TyKind kind, key, val; const char *cname; } hash_tbl[] = {
+  {TY_STR_INT_HASH, TY_STRING, TY_INT,    "StrInt"},
+  {TY_STR_STR_HASH, TY_STRING, TY_STRING, "StrStr"},
+  {TY_INT_INT_HASH, TY_INT,    TY_INT,    "IntInt"},
+  {TY_INT_STR_HASH, TY_INT,    TY_STRING, "IntStr"},
+};
+
+int ty_is_hash(TyKind t) {
+  for (unsigned i = 0; i < sizeof hash_tbl / sizeof hash_tbl[0]; i++)
+    if (hash_tbl[i].kind == t) return 1;
+  return 0;
+}
+TyKind ty_hash_of(TyKind key, TyKind val) {
+  for (unsigned i = 0; i < sizeof hash_tbl / sizeof hash_tbl[0]; i++)
+    if (hash_tbl[i].key == key && hash_tbl[i].val == val) return hash_tbl[i].kind;
+  return TY_UNKNOWN;
+}
+TyKind ty_hash_key(TyKind h) {
+  for (unsigned i = 0; i < sizeof hash_tbl / sizeof hash_tbl[0]; i++)
+    if (hash_tbl[i].kind == h) return hash_tbl[i].key;
+  return TY_UNKNOWN;
+}
+TyKind ty_hash_val(TyKind h) {
+  for (unsigned i = 0; i < sizeof hash_tbl / sizeof hash_tbl[0]; i++)
+    if (hash_tbl[i].kind == h) return hash_tbl[i].val;
+  return TY_UNKNOWN;
+}
+const char *ty_hash_cname(TyKind h) {
+  for (unsigned i = 0; i < sizeof hash_tbl / sizeof hash_tbl[0]; i++)
+    if (hash_tbl[i].kind == h) return hash_tbl[i].cname;
+  return NULL;
 }
 
 int ty_is_numeric(TyKind t) { return t == TY_INT || t == TY_FLOAT; }
