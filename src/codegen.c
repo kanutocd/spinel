@@ -662,6 +662,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     unsupported(c, id, "comparison");
   }
 
+  /* poly receiver: nil? / a few type-agnostic queries */
+  if (recv >= 0 && rt == TY_POLY && argc == 0) {
+    if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
+  }
+
   if (argc == 1 && (!strcmp(name, "==") || !strcmp(name, "!="))) {
     int eq = !strcmp(name, "==");
     if (rt == TY_STRING || a0 == TY_STRING) {
@@ -676,6 +681,18 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, " %s ", eq ? "==" : "!=");
       emit_expr(c, argv[0], b);
       buf_puts(b, ")");
+      return;
+    }
+    if (rt == TY_POLY_ARRAY && a0 == TY_POLY_ARRAY) {
+      buf_puts(b, eq ? "sp_PolyArray_eq(" : "(!sp_PolyArray_eq(");
+      emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+      buf_puts(b, eq ? ")" : "))");
+      return;
+    }
+    if (rt == TY_POLY || a0 == TY_POLY) {
+      buf_puts(b, eq ? "sp_poly_eq(" : "(!sp_poly_eq(");
+      emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+      buf_puts(b, eq ? ")" : "))");
       return;
     }
     unsupported(c, id, "equality");
@@ -848,6 +865,49 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, "%s _t%d = ", c_type_name(rt), t);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
         buf_printf(b, "sp_%sArray_get(_t%d, sp_%sArray_length(_t%d) - 1)", k, t, k, t);
+        return;
+      }
+    }
+    /* poly (mixed-element) array methods: elements are boxed sp_RbVal */
+    if (rt == TY_POLY_ARRAY) {
+      if (!strcmp(name, "[]") && argc == 1) {
+        buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) {
+        buf_puts(b, "sp_PolyArray_length("); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "empty?") && argc == 0) {
+        buf_puts(b, "(sp_PolyArray_length("); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        return;
+      }
+      if ((!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append")) && argc == 1) {
+        buf_puts(b, "sp_PolyArray_push("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "first") && argc == 0) {
+        buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", 0)");
+        return;
+      }
+      if (!strcmp(name, "include?") && argc == 1) {
+        buf_puts(b, "sp_PolyArray_include("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "dup") && argc == 0) {
+        buf_puts(b, "sp_PolyArray_dup("); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "compact") && argc == 0) {
+        buf_puts(b, "sp_PolyArray_compact("); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "join") && argc == 1) {
+        buf_puts(b, "sp_PolyArray_join("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) {
+        buf_puts(b, "sp_PolyArray_inspect("); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
     }

@@ -148,9 +148,10 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "join"))                        return TY_STRING;
     if (!strcmp(name, "inspect") || !strcmp(name, "to_s")) return TY_STRING;
     if (!strcmp(name, "empty?") || !strcmp(name, "include?")) return TY_BOOL;
-    if (!strcmp(name, "push") || !strcmp(name, "<<") ||
-        !strcmp(name, "reverse") || !strcmp(name, "sort") ||
-        !strcmp(name, "uniq") || !strcmp(name, "to_a"))   return rt;
+    if (!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append") ||
+        !strcmp(name, "reverse") || !strcmp(name, "sort") || !strcmp(name, "uniq") ||
+        !strcmp(name, "to_a") || !strcmp(name, "dup") || !strcmp(name, "clone") ||
+        !strcmp(name, "compact"))   return rt;
     if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
   }
 
