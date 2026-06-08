@@ -1541,6 +1541,13 @@ static int infer_param_types(Compiler *c) {
     TyKind rt = infer_type(c, recv);
     if (ty_is_object(rt))
       changed |= bind_call_params(c, id, comp_method_in_chain(c, ty_object_class(rt), name, NULL));
+    else if (rt == TY_POLY) {
+      /* poly receiver: the call may dispatch to any user method of this name,
+         so bind every candidate's params (they would otherwise stay UNKNOWN
+         and fail to compile). */
+      for (int k = 0; k < c->nclasses; k++)
+        changed |= bind_call_params(c, id, comp_method_in_chain(c, k, name, NULL));
+    }
   }
   return changed;
 }

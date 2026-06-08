@@ -1518,6 +1518,48 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* poly method dispatch with arguments: switch on the boxed object's cls_id
+     and call the matching user method (or a builtin array `[]`), passing the
+     arguments evaluated once into temps. */
+  if (recv >= 0 && rt == TY_POLY && argc > 0) {
+    int is_index = !strcmp(name, "[]") && argc == 1;
+    int ncand = 0;
+    for (int k = 0; k < c->nclasses; k++) {
+      int mi = comp_method_in_chain(c, k, name, NULL);
+      if (mi >= 0 && c->scopes[mi].nparams == argc) ncand++;
+    }
+    if (ncand > 0 || is_index) {
+      TyKind ret = comp_ntype(c, id);
+      int tv = ++g_tmp, tr = ++g_tmp;
+      int *atmp = malloc(sizeof(int) * argc);
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+      for (int a = 0; a < argc; a++) {
+        atmp[a] = ++g_tmp;
+        emit_ctype(c, infer_type(c, argv[a]), b);
+        buf_printf(b, " _t%d = ", atmp[a]); emit_expr(c, argv[a], b); buf_puts(b, "; ");
+      }
+      emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
+      buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value(ret) : "0");
+      buf_printf(b, "switch (_t%d.cls_id) {", tv);
+      for (int k = 0; k < c->nclasses; k++) {
+        int defcls = -1;
+        int mi = comp_method_in_chain(c, k, name, &defcls);
+        if (mi < 0 || c->scopes[mi].nparams != argc) continue;
+        buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)_t%d.v.p",
+                   k, tr, c->classes[defcls].name, mc(c->scopes[mi].name),
+                   c->classes[defcls].name, tv);
+        for (int a = 0; a < argc; a++) buf_printf(b, ", _t%d", atmp[a]);
+        buf_puts(b, "); break;");
+      }
+      if (is_index) {
+        buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+      }
+      buf_printf(b, " } _t%d; })", tr);
+      free(atmp);
+      return;
+    }
+  }
+
   /* range value methods (evaluate the range once into a temp) */
   if (recv >= 0 && rt == TY_RANGE) {
     int block = nt_ref(nt, id, "block");
