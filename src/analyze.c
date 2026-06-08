@@ -487,6 +487,13 @@ static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
         int dv = nt_ref(c->nt, opts[i], "value");
         if (pname) scope_add_param(s, pname, dv);
       }
+      /* `&block` parameter: tracked for yield-style inlining, no typed slot.
+         Anonymous `&` has no name; record "" so forwarding still works. */
+      int bp = nt_ref(c->nt, pn, "block");
+      if (bp >= 0 && nt_type(c->nt, bp) && !strcmp(nt_type(c->nt, bp), "BlockParameterNode")) {
+        const char *bn = nt_str(c->nt, bp, "name");
+        s->blk_param = strdup(bn ? bn : "");
+      }
     }
     child = new_idx;
   }
@@ -1034,6 +1041,24 @@ static int first_yield(Compiler *c, int si) {
   return -1;
 }
 
+/* Arguments node of the first `<&block-param>.call(...)` in scope `si`, or
+   -1. Lets block-param inference treat block.call like a yield. */
+static int first_block_call_args(Compiler *c, int si) {
+  Scope *m = &c->scopes[si];
+  if (!m->blk_param || !m->blk_param[0]) return -1;
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || strcmp(ty, "CallNode") || c->nscope[id] != si) continue;
+    const char *nm = nt_str(c->nt, id, "name");
+    if (!nm || strcmp(nm, "call")) continue;
+    int recv = nt_ref(c->nt, id, "receiver");
+    if (recv < 0 || !nt_type(c->nt, recv) || strcmp(nt_type(c->nt, recv), "LocalVariableReadNode")) continue;
+    const char *rn = nt_str(c->nt, recv, "name");
+    if (rn && !strcmp(rn, m->blk_param)) return nt_ref(c->nt, id, "arguments");
+  }
+  return -1;
+}
+
 /* Bind block parameter types for supported iteration methods. */
 static int infer_block_params(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -1063,7 +1088,7 @@ static int infer_block_params(Compiler *c) {
       }
       if (mi >= 0 && c->scopes[mi].yields) {
         int yn = first_yield(c, mi);
-        int ya = yn >= 0 ? nt_ref(nt, yn, "arguments") : -1;
+        int ya = yn >= 0 ? nt_ref(nt, yn, "arguments") : first_block_call_args(c, mi);
         int yc = 0;
         const int *yargs = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
         Scope *bs = comp_scope_of(c, block);
@@ -1238,6 +1263,40 @@ void analyze_program(Compiler *c) {
       const char *nm = nt_str(c->nt, id, "name");
       if (nm && !strcmp(nm, "block_given?")) comp_scope_of(c, id)->yields = 1;
     }
+  }
+
+  /* `&block` + block.call: a method whose block parameter never escapes
+     (every read is a `.call` receiver or a `&block` forward) is inlined at
+     its call sites exactly like a yielding method. The block-param slot is
+     then virtual -- the literal block flows in like an implicit yield. */
+  for (int mi = 0; mi < c->nscopes; mi++) {
+    Scope *m = &c->scopes[mi];
+    if (!m->blk_param) continue;
+    /* Anonymous `&`: nameless, so it can only be forwarded -- always safe
+       to inline (there is no escaping read to worry about). */
+    if (!m->blk_param[0]) { m->yields = 1; continue; }
+    int escapes = 0, uses = 0;
+    for (int id = 0; id < c->nt->count && !escapes; id++) {
+      const char *ty = nt_type(c->nt, id);
+      if (!ty || strcmp(ty, "LocalVariableReadNode")) continue;
+      if (comp_scope_of(c, id) != m) continue;
+      const char *nm = nt_str(c->nt, id, "name");
+      if (!nm || strcmp(nm, m->blk_param)) continue;
+      uses++;
+      /* approved: receiver of a `.call`, or expression of a `&block` arg */
+      int ok = 0;
+      for (int p = 0; p < c->nt->count; p++) {
+        const char *pty = nt_type(c->nt, p);
+        if (!pty) continue;
+        if (!strcmp(pty, "CallNode") && nt_ref(c->nt, p, "receiver") == id) {
+          const char *cn = nt_str(c->nt, p, "name");
+          if (cn && !strcmp(cn, "call")) { ok = 1; break; }
+        }
+        if (!strcmp(pty, "BlockArgumentNode") && nt_ref(c->nt, p, "expression") == id) { ok = 1; break; }
+      }
+      if (!ok) escapes = 1;
+    }
+    if (!escapes && uses > 0) m->yields = 1;
   }
 
   /* intern every symbol literal so codegen can emit the id table */

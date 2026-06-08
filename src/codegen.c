@@ -59,6 +59,9 @@ static char g_ren_from[MAX_RENAME][96];
 static char g_ren_to[MAX_RENAME][112];
 static int  g_nren = 0;
 static int  g_block_id = -1;
+/* Name of the `&block` parameter of the method currently being inlined, so
+   `<blk>.call(args)` inside it expands the active block like `yield args`. */
+static const char *g_block_param_name = NULL;
 /* The C expression for `self` (a pointer). Overridden while inlining an
    instance method at a call site (where there is no real `self` param). */
 static const char *g_self = "self";
@@ -1156,13 +1159,19 @@ static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_ex
   Scope *m = &c->scopes[mi];
   if (!m->yields || scope_has_return(c, mi)) return 0;
   int block = nt_ref(nt, id, "block");   /* may be -1: no block passed */
+  /* `inner(&)` / `inner(&block)`: a BlockArgumentNode forwards the block
+     active at this (already-inlined) site, not a fresh literal. */
+  if (block >= 0 && nt_type(nt, block) && !strcmp(nt_type(nt, block), "BlockArgumentNode"))
+    block = g_block_id;
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
 
   int tag = ++g_tmp;
   int saved_nren = g_nren, saved_block = g_block_id;
   const char *saved_self = g_self;
+  const char *saved_bpn = g_block_param_name;
   static char selfbuf[64];
   g_block_id = block;
+  g_block_param_name = m->blk_param;
 
   if (as_expr) buf_puts(b, "({\n");
   else { emit_indent(b, indent); buf_puts(b, "{\n"); }
@@ -1181,12 +1190,13 @@ static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_ex
   /* declare method locals under renamed names */
   for (int i = 0; i < m->nlocals; i++) {
     LocalVar *lv = &m->locals[i];
+    if (m->blk_param && lv->name && !strcmp(lv->name, m->blk_param)) continue;  /* virtual &block slot */
     snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", lv->name);
     snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_y%d_%s", tag, lv->name);
     const char *rn = g_ren_to[g_nren];
     g_nren++;
     if (!is_scalar_ret(lv->type)) { /* unsupported local type: bail out */
-      g_nren = saved_nren; g_block_id = saved_block;
+      g_nren = saved_nren; g_block_id = saved_block; g_block_param_name = saved_bpn;
       return 0;
     }
     emit_indent(b, din);
@@ -1215,11 +1225,57 @@ static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_ex
   g_nren = saved_nren;
   g_block_id = saved_block;
   g_self = saved_self;
+  g_block_param_name = saved_bpn;
   return 1;
 }
 
 static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
   return emit_inline_call_x(c, id, b, indent, 0);
+}
+
+/* Is `id` a `<&block-param>.call(...)` invocation of the active block? */
+static int is_block_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (!g_block_param_name || !g_block_param_name[0] || g_block_id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty || strcmp(ty, "CallNode")) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm || (strcmp(nm, "call") && strcmp(nm, "()") && strcmp(nm, "[]") && strcmp(nm, "yield"))) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "LocalVariableReadNode")) return 0;
+  const char *rn = nt_str(nt, recv, "name");
+  return rn && !strcmp(rn, g_block_param_name);
+}
+
+/* Expand the active block's body, binding its params to the given call
+   args. Shared by YieldNode and `block.call`. `as_expr` wraps in ({...}). */
+static void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_expr) {
+  const NodeTable *nt = c->nt;
+  int blk = g_block_id;
+  int bbody = nt_ref(nt, blk, "body");
+  int yc = 0;
+  const int *yargs = args_node >= 0 ? nt_arr(nt, args_node, "arguments", &yc) : NULL;
+  Scope *bsc = comp_scope_of(c, blk);
+  if (as_expr) buf_puts(b, "({ ");
+  for (int k = 0; ; k++) {
+    const char *bp = block_param_name(c, blk, k);
+    if (!bp) break;
+    if (!as_expr) emit_indent(b, indent);
+    buf_printf(b, "lv_%s = ", bp);
+    if (k < yc) emit_expr(c, yargs[k], b);
+    else {
+      LocalVar *bl = scope_local(bsc, bp);
+      TyKind bt = bl ? bl->type : TY_INT;
+      buf_puts(b, bt == TY_RANGE ? "(sp_Range){0}" : default_value(bt));
+    }
+    buf_puts(b, as_expr ? "; " : ";\n");
+  }
+  int sv = g_nren; g_nren = 0;
+  int svb = g_block_id; g_block_id = -1;
+  const char *svbpn = g_block_param_name; g_block_param_name = NULL;
+  emit_stmts(c, bbody, b, as_expr ? 0 : indent);
+  g_nren = sv; g_block_id = svb; g_block_param_name = svbpn;
+  if (as_expr) buf_puts(b, "})");
 }
 
 /* Inline a yielding method call in expression position: ({ ...; value; }).
@@ -1485,33 +1541,12 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   }
   if (!strcmp(ty, "LocalVariableReadNode")) { buf_printf(b, "lv_%s", rename_local(nt_str(nt, id, "name"))); return; }
   if (!strcmp(ty, "YieldNode")) {
-    /* yield used for its value: ({ bind block params; block body; }) where
-       the block body's last expression is the value */
     if (g_block_id < 0) unsupported(c, id, "yield (no block in scope)");
-    int blk = g_block_id;
-    int bbody = nt_ref(nt, blk, "body");
-    int ya = nt_ref(nt, id, "arguments");
-    int yc = 0;
-    const int *yargs = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
-    Scope *bsc = comp_scope_of(c, blk);
-    buf_puts(b, "({ ");
-    for (int k = 0; ; k++) {
-      const char *bp = block_param_name(c, blk, k);
-      if (!bp) break;
-      buf_printf(b, "lv_%s = ", bp);
-      if (k < yc) emit_expr(c, yargs[k], b);  /* yield args: method scope (renames on) */
-      else {
-        LocalVar *bl = scope_local(bsc, bp);
-        TyKind bt = bl ? bl->type : TY_INT;
-        buf_puts(b, bt == TY_RANGE ? "(sp_Range){0}" : default_value(bt));
-      }
-      buf_puts(b, "; ");
-    }
-    int sv = g_nren; g_nren = 0;        /* block body: call-site scope (renames off) */
-    int svb = g_block_id; g_block_id = -1;
-    emit_stmts(c, bbody, b, 0);          /* last bare-expr statement is the value */
-    g_nren = sv; g_block_id = svb;
-    buf_puts(b, "})");
+    emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
+    return;
+  }
+  if (is_block_call(c, id)) {           /* block.call used for its value */
+    emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
     return;
   }
   if (!strcmp(ty, "SelfNode")) { buf_puts(b, g_self); return; }  /* self is the object reference (pointer) */
@@ -2192,40 +2227,12 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
 
   if (!strcmp(ty, "YieldNode")) {
     if (g_block_id < 0) unsupported(c, id, "yield (no block in scope)");
-    int blk = g_block_id;
-    int bbody = nt_ref(nt, blk, "body");
-    int ya = nt_ref(nt, id, "arguments");
-    int yc = 0;
-    const int *yargs = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
-    /* bind block params to yield args (yield args are in method scope:
-       renames stay on; block param names are call-site locals). Block
-       params beyond this yield's arity are zeroed so a smaller yield in a
-       mixed-arity method doesn't leak a previous yield's values. */
-    Scope *bsc = comp_scope_of(c, blk);
-    for (int k = 0; ; k++) {
-      const char *bp = block_param_name(c, blk, k);
-      if (!bp) break;
-      emit_indent(b, indent);
-      buf_printf(b, "lv_%s = ", bp);
-      if (k < yc) {
-        emit_expr(c, yargs[k], b);
-      }
-      else {
-        LocalVar *bl = scope_local(bsc, bp);
-        TyKind bt = bl ? bl->type : TY_INT;
-        buf_puts(b, bt == TY_RANGE ? "(sp_Range){0}" : default_value(bt));
-      }
-      buf_puts(b, ";\n");
-    }
-    /* emit the block body in the call-site scope: renames off */
-    int sv = g_nren; g_nren = 0;
-    int svb = g_block_id; g_block_id = -1;  /* nested yield not supported */
-    emit_stmts(c, bbody, b, indent);
-    g_nren = sv; g_block_id = svb;
+    emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, indent, 0);
     return;
   }
 
   if (!strcmp(ty, "CallNode")) {
+    if (is_block_call(c, id)) { emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, indent, 0); return; }
     if (emit_output_call(c, id, b, indent)) return;
     if (emit_inline_call(c, id, b, indent)) return;
     if (emit_iteration_stmt(c, id, b, indent)) return;
@@ -2507,6 +2514,7 @@ static void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
   int vol = scope_has_begin(c, (int)(s - c->scopes));
   for (int i = 0; i < s->nlocals; i++) {
     LocalVar *lv = &s->locals[i];
+    if (s->blk_param && lv->name && !strcmp(lv->name, s->blk_param)) continue;  /* virtual &block slot */
     if (lv->is_param) {
       if (needs_root(lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
     }
