@@ -399,8 +399,11 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "chop") || !strcmp(name, "chr") || !strcmp(name, "clamp") ||
         !strcmp(name, "squeeze") || !strcmp(name, "tr") || !strcmp(name, "tr_s") ||
         !strcmp(name, "delete")) return TY_STRING;
-    if (!strcmp(name, "[]") || !strcmp(name, "slice")) return TY_STRING;
-    if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count")) return TY_INT;
+    if (!strcmp(name, "[]") || !strcmp(name, "slice") || !strcmp(name, "byteslice") ||
+        !strcmp(name, "force_encoding") || !strcmp(name, "b") || !strcmp(name, "encode")) return TY_STRING;
+    if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count") ||
+        !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp")) return TY_INT;
+    if (!strcmp(name, "casecmp?")) return TY_BOOL;
     if (!strcmp(name, "to_f"))  return TY_FLOAT;
     if (!strcmp(name, "split") || !strcmp(name, "lines")) return TY_STR_ARRAY;
     if (!strcmp(name, "bytes")) return TY_INT_ARRAY;

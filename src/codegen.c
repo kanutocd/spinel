@@ -1615,6 +1615,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "; strcmp(_t%d, _t%d) < 0 ? _t%d : (strcmp(_t%d, _t%d) > 0 ? _t%d : _t%d); })",
                    tc, tlo, tlo, tc, thi, thi, tc);
       }
+      else if (!strcmp(name, "oct") && argc == 0) buf_printf(b, "sp_str_oct(%s)", r);
+      else if (!strcmp(name, "ord") && argc == 0) buf_printf(b, "sp_str_ord(%s)", r);
+      else if ((!strcmp(name, "force_encoding") || !strcmp(name, "b") || !strcmp(name, "encode")) && argc <= 1) buf_printf(b, "(%s)", r);
+      else if (!strcmp(name, "casecmp") && argc == 1) { buf_printf(b, "sp_str_casecmp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "casecmp?") && argc == 1) { buf_printf(b, "(sp_str_casecmp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ") == 0)"); }
+      else if (!strcmp(name, "byteslice") && argc == 2) { buf_printf(b, "sp_str_byteslice(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "byteslice") && argc == 1) { buf_printf(b, "sp_str_byteslice(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", 1)"); }
       else if (!strcmp(name, "squeeze") && argc == 0) buf_printf(b, "sp_str_squeeze(%s)", r);
       else if (!strcmp(name, "squeeze") && argc == 1) { buf_printf(b, "sp_str_squeeze_chars(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if ((!strcmp(name, "tr") || !strcmp(name, "tr_s")) && argc == 2) {
