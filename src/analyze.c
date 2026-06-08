@@ -308,6 +308,10 @@ static TyKind infer_call(Compiler *c, int id) {
         (!strcmp(name, "pid") || !strcmp(name, "ppid")))
       return TY_INT;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Integer") &&
+        !strcmp(name, "sqrt"))
+      return TY_INT;
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Dir") &&
         (!strcmp(name, "exist?") || !strcmp(name, "exists?")))
       return TY_BOOL;
@@ -607,6 +611,9 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "ceil") || !strcmp(name, "floor") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) return TY_INT;  /* no precision arg -> self */
     if (!strcmp(name, "divmod") && argc == 1) return TY_INT_ARRAY;  /* [quotient, remainder] */
+    if ((!strcmp(name, "allbits?") || !strcmp(name, "anybits?") || !strcmp(name, "nobits?")) && argc == 1) return TY_BOOL;
+    if ((!strcmp(name, "ceildiv") || !strcmp(name, "pow")) && argc >= 1) return TY_INT;
+    if ((!strcmp(name, "pred") || !strcmp(name, "succ") || !strcmp(name, "next")) && argc == 0) return TY_INT;
     if (!strcmp(name, "chr")) return TY_STRING;
     if (!strcmp(name, "[]") && argc == 1) return TY_INT;  /* bit access */
     if (!strcmp(name, "gcd") || !strcmp(name, "lcm") || !strcmp(name, "clamp")) return TY_INT;
@@ -615,6 +622,7 @@ static TyKind infer_call(Compiler *c, int id) {
   }
   /* float receiver methods */
   if (recv >= 0 && rt == TY_FLOAT) {
+    if (!strcmp(name, "divmod") && argc == 1) return TY_POLY_ARRAY;  /* [Integer, Float] */
     if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) {
       /* value-based return type: ndigits > 0 (literal) -> Float, else Integer */

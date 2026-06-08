@@ -1023,6 +1023,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if (!strcmp(name, "ppid") && argc == 0) { buf_puts(b, "sp_process_ppid()"); return; }
   }
 
+  /* Integer.sqrt(n) -> integer square root (exact, Newton's method) */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Integer") &&
+      !strcmp(name, "sqrt") && argc == 1) {
+    buf_puts(b, "sp_int_sqrt("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    return;
+  }
+
   /* Dir.exist? / Dir.exists? -> directory test */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Dir") &&
@@ -2352,6 +2360,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         (void)rn;
       }
       else if (!strcmp(name, "digits") && argc == 0) buf_printf(b, "sp_int_digits(%s, 10)", r);
+      else if (!strcmp(name, "allbits?") && argc == 1) { buf_printf(b, "(((%s) & (", r); emit_expr(c, argv[0], b); buf_printf(b, ")) == ("); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+      else if (!strcmp(name, "anybits?") && argc == 1) { buf_printf(b, "(((%s) & (", r); emit_expr(c, argv[0], b); buf_puts(b, ")) != 0)"); }
+      else if (!strcmp(name, "nobits?") && argc == 1) { buf_printf(b, "(((%s) & (", r); emit_expr(c, argv[0], b); buf_puts(b, ")) == 0)"); }
+      else if (!strcmp(name, "ceildiv") && argc == 1) { buf_printf(b, "sp_ceildiv(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "pow") && argc == 2) { buf_printf(b, "sp_powmod(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "pow") && argc == 1) { buf_printf(b, "sp_int_pow(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "pred") && argc == 0) buf_printf(b, "((%s) - 1)", r);
+      else if ((!strcmp(name, "succ") || !strcmp(name, "next")) && argc == 0) buf_printf(b, "((%s) + 1)", r);
       else if (!strcmp(name, "to_s") && argc == 1) { buf_printf(b, "sp_int_to_s_base(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else handled = 0;
     }
@@ -2376,6 +2392,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       else if (!strcmp(name, "to_i"))  buf_printf(b, "((mrb_int)(%s))", r);
       else if (!strcmp(name, "to_f"))  buf_printf(b, "(%s)", r);
+      else if (!strcmp(name, "divmod") && argc == 1) {
+        /* Float#divmod(n) -> [floor(x/n) (Integer), x - q*n (Float)] */
+        int tx = ++g_tmp, tn = ++g_tmp, tq = ++g_tmp, o = ++g_tmp;
+        buf_printf(b, "({ mrb_float _t%d = (%s); mrb_float _t%d = ", tx, r, tn); emit_expr(c, argv[0], b);
+        buf_printf(b, "; mrb_int _t%d = (mrb_int)floor(_t%d / _t%d); sp_PolyArray *_t%d = sp_PolyArray_new();"
+                      " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
+                      " sp_PolyArray_push(_t%d, sp_box_float(_t%d - (mrb_float)_t%d * _t%d)); _t%d; })",
+                   tq, tx, tn, o, o, tq, o, tx, tq, tn, o);
+      }
       else if (!strcmp(name, "to_s") || !strcmp(name, "inspect"))  buf_printf(b, "sp_float_to_s(%s)", r);
       else if (!strcmp(name, "abs"))   buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "zero?")) buf_printf(b, "((%s) == 0.0)", r);
