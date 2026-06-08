@@ -1581,22 +1581,24 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "index") && argc == 1) {
         buf_printf(b, "sp_str_index(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
-      else if (!strcmp(name, "[]") && argc == 1 && nt_type(c->nt, argv[0]) &&
+      else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 1 && nt_type(c->nt, argv[0]) &&
                !strcmp(nt_type(c->nt, argv[0]), "RangeNode")) {
-        /* s[a..b] / s[a...b] */
+        /* s[a..b] / s[a...b]; beginless/endless ranges use 0 / length */
         int rn = argv[0];
         int excl = (int)(nt_int(c->nt, rn, "flags", 0) & 4) ? 1 : 0;
+        int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
         buf_printf(b, "sp_str_sub_range_r(%s, ", r);
-        emit_expr(c, nt_ref(c->nt, rn, "left"), b); buf_puts(b, ", ");
-        emit_expr(c, nt_ref(c->nt, rn, "right"), b);
-        buf_printf(b, ", %d)", excl);
+        if (lo >= 0) emit_expr(c, lo, b); else buf_puts(b, "0");
+        buf_puts(b, ", ");
+        if (hi >= 0) { emit_expr(c, hi, b); buf_printf(b, ", %d)", excl); }
+        else buf_printf(b, "(mrb_int)sp_str_length(%s), 0)", r);  /* endless: to the end */
       }
-      else if (!strcmp(name, "[]") && argc == 2) {
+      else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 2) {
         /* s[start, len] */
         buf_printf(b, "sp_str_sub_range(%s, ", r);
         emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
       }
-      else if (!strcmp(name, "[]") && argc == 1) {
+      else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 1) {
         buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "split") && argc == 1) {
