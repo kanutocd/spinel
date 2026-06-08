@@ -595,6 +595,8 @@ static TyKind infer_call(Compiler *c, int id) {
   }
   /* integer receiver methods */
   if (recv >= 0 && rt == TY_INT) {
+    if (!strcmp(name, "ceil") || !strcmp(name, "floor") ||
+        !strcmp(name, "round") || !strcmp(name, "truncate")) return TY_INT;  /* no precision arg -> self */
     if (!strcmp(name, "chr")) return TY_STRING;
     if (!strcmp(name, "[]") && argc == 1) return TY_INT;  /* bit access */
     if (!strcmp(name, "gcd") || !strcmp(name, "lcm") || !strcmp(name, "clamp")) return TY_INT;

@@ -2095,8 +2095,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if      (!strcmp(name, "to_s") && argc == 0) buf_printf(b, "sp_int_to_s(%s)", r);
       else if (!strcmp(name, "inspect")) buf_printf(b, "sp_int_to_s(%s)", r);
       else if (!strcmp(name, "to_f"))   buf_printf(b, "((mrb_float)(%s))", r);
-      else if (!strcmp(name, "to_i") || !strcmp(name, "to_int") || !strcmp(name, "floor") ||
-               !strcmp(name, "ceil") || !strcmp(name, "round")) buf_printf(b, "(%s)", r);
+      else if ((!strcmp(name, "to_i") || !strcmp(name, "to_int") || !strcmp(name, "floor") ||
+                !strcmp(name, "ceil") || !strcmp(name, "round") || !strcmp(name, "truncate")) &&
+               argc == 0) buf_printf(b, "(%s)", r);
+      else if ((!strcmp(name, "floor") || !strcmp(name, "ceil") ||
+                !strcmp(name, "round") || !strcmp(name, "truncate")) && argc == 1) {
+        buf_printf(b, "sp_int_%s(%s, ", name, r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
       else if (!strcmp(name, "abs"))    buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "chr"))    buf_printf(b, "sp_int_chr(%s)", r);
       else if (!strcmp(name, "[]") && argc == 1) { buf_printf(b, "(((%s) >> (", r); emit_expr(c, argv[0], b); buf_puts(b, ")) & 1)"); }
