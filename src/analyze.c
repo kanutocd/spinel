@@ -289,6 +289,10 @@ static TyKind infer_call(Compiler *c, int id) {
         (!strcmp(name, "now") || !strcmp(name, "at") || !strcmp(name, "local") ||
          !strcmp(name, "mktime") || !strcmp(name, "utc") || !strcmp(name, "gm")))
       return TY_TIME;
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Process") &&
+        (!strcmp(name, "pid") || !strcmp(name, "ppid")))
+      return TY_INT;
   }
 
   /* Time instance methods */

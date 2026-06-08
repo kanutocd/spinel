@@ -819,6 +819,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  /* Process module methods */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Process")) {
+    if (!strcmp(name, "pid") && argc == 0) { buf_puts(b, "((mrb_int)getpid())"); return; }
+    if (!strcmp(name, "ppid") && argc == 0) { buf_puts(b, "sp_process_ppid()"); return; }
+  }
+
   /* Time class constructors */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Time")) {
