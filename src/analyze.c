@@ -738,32 +738,51 @@ static int infer_write_types(Compiler *c) {
     }
   }
 
-  /* Fold container usage into the local type: `a << x` / `a.push(x)` /
-     `a[i] = x` on a local `a` promotes it to an array of x's type (this is
-     how an empty `[]` gets its element type). Part of the same recompute
-     frame so it survives the reset and the change check stays consistent. */
+  /* Fold container usage into the local type so an empty `[]` / `{}` gets
+     its element / key+value type from how it is filled. `a << x` /
+     `a.push(x)` / `a[i] = x` (int key) -> array; `h[k] = v` / `h[k] op= v`
+     (string key) -> hash. Part of the recompute frame so it survives reset. */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
-    if (!ty || strcmp(ty, "CallNode")) continue;
-    int recv = nt_ref(nt, id, "receiver");
+    if (!ty) continue;
+    int recv, kt = TY_UNKNOWN, vt = TY_UNKNOWN, is_push = 0;
+    if (!strcmp(ty, "CallNode")) {
+      recv = nt_ref(nt, id, "receiver");
+      const char *name = nt_str(nt, id, "name");
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (name && (!strcmp(name, "push") || !strcmp(name, "<<")) && an == 1) {
+        is_push = 1; vt = infer_type(c, argv[0]);
+      } else if (name && !strcmp(name, "[]=") && an == 2) {
+        kt = infer_type(c, argv[0]); vt = infer_type(c, argv[1]);
+      } else continue;
+    } else if (!strcmp(ty, "IndexOperatorWriteNode")) {
+      recv = nt_ref(nt, id, "receiver");
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an != 1) continue;
+      kt = infer_type(c, argv[0]); vt = infer_type(c, nt_ref(nt, id, "value"));
+    } else {
+      continue;
+    }
     if (recv < 0 || strcmp(nt_type(nt, recv) ? nt_type(nt, recv) : "", "LocalVariableReadNode")) continue;
-    const char *name = nt_str(nt, id, "name");
-    if (!name) continue;
-    int args = nt_ref(nt, id, "arguments");
-    int an = 0;
-    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-    TyKind elem = TY_UNKNOWN;
-    if ((!strcmp(name, "push") || !strcmp(name, "<<")) && an == 1) elem = infer_type(c, argv[0]);
-    else if (!strcmp(name, "[]=") && an == 2) elem = infer_type(c, argv[1]);
-    else continue;
-    if (elem == TY_UNKNOWN) continue;
     const char *rnm = nt_str(nt, recv, "name");
     LocalVar *lv = rnm ? scope_local(comp_scope_of(c, recv), rnm) : NULL;
     if (!lv || lv->is_param || lv->is_block_param) continue;
-    /* only promote a container local: a known string uses `<<` for append,
-       not array push -- don't pollute it */
-    if (lv->type != TY_UNKNOWN && !ty_is_array(lv->type)) continue;
-    lv->type = ty_unify(lv->type, ty_array_of(elem));
+
+    if (is_push || kt == TY_INT) {
+      /* array (a known string's `<<` is append, not push -- don't pollute) */
+      if (vt == TY_UNKNOWN) continue;
+      if (lv->type != TY_UNKNOWN && !ty_is_array(lv->type)) continue;
+      lv->type = ty_unify(lv->type, ty_array_of(vt));
+    } else if (kt == TY_STRING) {
+      TyKind hv = ty_hash_of(TY_STRING, vt);
+      if (hv == TY_UNKNOWN) continue;
+      if (lv->type != TY_UNKNOWN && !ty_is_hash(lv->type)) continue;
+      lv->type = ty_unify(lv->type, hv);
+    }
   }
 
   /* detect change vs the stashed old types */

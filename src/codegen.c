@@ -651,7 +651,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     const char *hn = ty_hash_cname(rt);
     if (hn) {
       if (!strcmp(name, "[]") && argc == 1) {
-        buf_printf(b, "sp_%sHash_get_opt(", hn);
+        /* int-valued hashes have a nullable get_opt; string-valued use get */
+        const char *getter = ty_hash_val(rt) == TY_INT ? "get_opt" : "get";
+        buf_printf(b, "sp_%sHash_%s(", hn, getter);
         emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
@@ -1597,6 +1599,23 @@ static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   const char *vty = nt_type(c->nt, v);
   int vn = 0;
   int is_empty_array = vty && !strcmp(vty, "ArrayNode") && (nt_arr(c->nt, v, "elements", &vn), vn == 0);
+  int hn = 0;
+  int is_empty_hash = vty && !strcmp(vty, "HashNode") && (nt_arr(c->nt, v, "elements", &hn), hn == 0);
+  /* h = Hash.new / Hash.new(default) */
+  int is_hash_new = 0, hash_new_default = -1;
+  if (vty && !strcmp(vty, "CallNode") && !strcmp(nt_str(c->nt, v, "name") ? nt_str(c->nt, v, "name") : "", "new")) {
+    int hr = nt_ref(c->nt, v, "receiver");
+    const char *hrt = hr >= 0 ? nt_type(c->nt, hr) : NULL;
+    if (hrt && !strcmp(hrt, "ConstantReadNode") &&
+        !strcmp(nt_str(c->nt, hr, "name") ? nt_str(c->nt, hr, "name") : "", "Hash")) {
+      is_hash_new = 1;
+      int ha = nt_ref(c->nt, v, "arguments");
+      int hac = 0;
+      const int *hav = ha >= 0 ? nt_arr(c->nt, ha, "arguments", &hac) : NULL;
+      if (hac >= 1) hash_new_default = hav[0];
+    }
+  }
+
   if (vty && !strcmp(vty, "NilNode") && lv) {
     if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
     else buf_puts(b, default_value(lv->type));
@@ -1604,6 +1623,16 @@ static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   else if (is_empty_array && lv && array_kind(lv->type)) {
     /* `a = []` -> a new array of the variable's resolved element type */
     buf_printf(b, "sp_%sArray_new()", array_kind(lv->type));
+  }
+  else if ((is_empty_hash || is_hash_new) && lv && ty_hash_cname(lv->type)) {
+    const char *hcn = ty_hash_cname(lv->type);
+    if (is_hash_new && hash_new_default >= 0) {
+      buf_printf(b, "sp_%sHash_new_with_default(", hcn);
+      emit_expr(c, hash_new_default, b);
+      buf_puts(b, ")");
+    } else {
+      buf_printf(b, "sp_%sHash_new()", hcn);
+    }
   }
   else {
     emit_expr(c, v, b);
