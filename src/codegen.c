@@ -596,7 +596,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       /* receiver pointer: &lvalue, or a temp for an rvalue receiver */
       char selfptr[64];
       const char *rty = nt_type(nt, recv);
-      if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode"))) {
+      if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode") || !strcmp(rty, "SelfNode"))) {
         Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
         char tmp[64];
         snprintf(tmp, sizeof tmp, "&%s", rb.p ? rb.p : "");
@@ -930,7 +930,7 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
      recv must be an assignable lvalue (local or ivar). */
   if (rt == TY_STRING && !strcmp(name, "<<") && argc == 1) {
     const char *rty = nt_type(nt, recv);
-    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode"))) {
+    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode") || !strcmp(rty, "SelfNode"))) {
       TyKind at = comp_ntype(c, argv[0]);
       emit_indent(b, indent);
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat(");
@@ -1080,7 +1080,7 @@ static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
     int st = ++g_tmp;
     const char *rty = nt_type(nt, recv);
     emit_indent(b, indent + 1);
-    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode"))) {
+    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode") || !strcmp(rty, "SelfNode"))) {
       buf_printf(b, "sp_%s *_t%d = &", c->classes[recv_class].name, st);
       emit_expr(c, recv, b);
     } else {
@@ -1375,6 +1375,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
   if (!strcmp(ty, "LocalVariableReadNode")) { buf_printf(b, "lv_%s", rename_local(nt_str(nt, id, "name"))); return; }
+  if (!strcmp(ty, "SelfNode")) { buf_printf(b, "(*%s)", g_self); return; }
   if (!strcmp(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@x" */
     buf_printf(b, "%s->iv_%s", g_self, nm + 1);
@@ -1512,7 +1513,7 @@ static void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "{ const char *_ps = (const char *)(");
     buf_printf(b, "sp_%s_to_s(", c->classes[cid].name);
     const char *rty = nt_type(c->nt, arg);
-    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode"))) {
+    if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode") || !strcmp(rty, "SelfNode"))) {
       buf_puts(b, "&"); emit_expr(c, arg, b);
     }
     else {
@@ -2209,7 +2210,7 @@ static void emit_method(Compiler *c, Scope *s, Buf *b) {
   else {
     emit_stmts_tail(c, s->body, b, 1);
     buf_puts(b, "  return ");
-    if (ty_is_object(s->ret)) { emit_ctype(c, s->ret, b); buf_puts(b, "){0}"); /* unreachable default */ buf_puts(b, ";\n"); }
+    if (ty_is_object(s->ret)) { buf_puts(b, "("); emit_ctype(c, s->ret, b); buf_puts(b, "){0};\n"); /* unreachable default */ }
     else buf_printf(b, "%s;\n", default_value(s->ret));
   }
   buf_puts(b, "}\n");

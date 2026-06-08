@@ -288,6 +288,10 @@ static TyKind infer_uncached(Compiler *c, int id) {
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
     return lv ? lv->type : TY_UNKNOWN;
   }
+  if (!strcmp(ty, "SelfNode")) {
+    Scope *s = comp_scope_of(c, id);
+    return s->class_id >= 0 ? ty_object(s->class_id) : TY_UNKNOWN;
+  }
   if (!strcmp(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
