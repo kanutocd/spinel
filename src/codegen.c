@@ -944,6 +944,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "keys") && argc == 0 && rt == TY_SYM_POLY_HASH) {
+        /* runtime returns sym ids as an IntArray; box into a poly (sym) array */
+        int ki = ++g_tmp, kp = ++g_tmp, ii = ++g_tmp;
+        buf_printf(b, "({ sp_IntArray *_t%d = sp_SymPolyHash_keys(", ki); emit_expr(c, recv, b);
+        buf_printf(b, "); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", kp, kp);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++)"
+                      " sp_PolyArray_push(_t%d, sp_box_sym((sp_sym)sp_IntArray_get(_t%d, _t%d)));",
+                   ii, ii, ki, ii, kp, ki, ii);
+        buf_printf(b, " _t%d; })", kp);
+        return;
+      }
       if (!strcmp(name, "keys") && argc == 0) {
         buf_printf(b, "sp_%sHash_keys(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
