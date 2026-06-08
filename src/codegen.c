@@ -647,6 +647,33 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_inspect(", k); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "first") && argc == 0) {
+        buf_printf(b, "sp_%sArray_get(", k); emit_expr(c, recv, b); buf_puts(b, ", 0)");
+        return;
+      }
+      if ((!strcmp(name, "min") || !strcmp(name, "max")) && argc == 0 && rt != TY_STR_ARRAY) {
+        buf_printf(b, "sp_%sArray_%s(", k, name); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "include?") || !strcmp(name, "index")) && argc == 1 && rt != TY_FLOAT_ARRAY) {
+        const char *fn = !strcmp(name, "include?") ? "include" : "index";
+        buf_printf(b, "sp_%sArray_%s(", k, fn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
+      if ((!strcmp(name, "sort") || !strcmp(name, "uniq")) && argc == 0 && rt == TY_INT_ARRAY) {
+        buf_printf(b, "sp_IntArray_%s(", name); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "last") && argc == 0) {
+        int t = ++g_tmp;
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "%s _t%d = ", c_type_name(rt), t);
+        buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        buf_printf(b, "sp_%sArray_get(_t%d, sp_%sArray_length(_t%d) - 1)", k, t, k, t);
+        return;
+      }
     }
   }
 
