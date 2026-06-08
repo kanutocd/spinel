@@ -130,6 +130,24 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
   }
 
+  /* range receiver methods */
+  if (recv >= 0 && rt == TY_RANGE) {
+    if (!strcmp(name, "to_a"))      return TY_INT_ARRAY;
+    if (!strcmp(name, "include?") || !strcmp(name, "member?") ||
+        !strcmp(name, "cover?"))    return TY_BOOL;
+    if (!strcmp(name, "sum") || !strcmp(name, "min") || !strcmp(name, "max") ||
+        !strcmp(name, "first") || !strcmp(name, "last") ||
+        !strcmp(name, "size") || !strcmp(name, "count") ||
+        !strcmp(name, "begin") || !strcmp(name, "end"))  return TY_INT;
+    int block = nt_ref(nt, id, "block");
+    if (block >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
+      int body = nt_ref(nt, block, "body");
+      int bn = 0;
+      const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+      return ty_array_of(bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN);
+    }
+  }
+
   /* hash receiver methods */
   if (recv >= 0 && ty_is_hash(rt)) {
     if (!strcmp(name, "[]"))     return ty_hash_val(rt);

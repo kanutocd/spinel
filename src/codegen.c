@@ -68,6 +68,7 @@ static const char *c_type_name(TyKind t) {
     case TY_BOOL:        return "mrb_bool";
     case TY_STRING:      return "const char *";
     case TY_SYMBOL:      return "sp_sym";
+    case TY_RANGE:       return "sp_Range";
     case TY_INT_ARRAY:   return "sp_IntArray *";
     case TY_FLOAT_ARRAY: return "sp_FloatArray *";
     case TY_STR_ARRAY:   return "sp_StrArray *";
@@ -80,7 +81,7 @@ static const char *c_type_name(TyKind t) {
 }
 static int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
-         t == TY_SYMBOL ||
+         t == TY_SYMBOL || t == TY_RANGE ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
          ty_is_hash(t) || ty_is_object(t);
 }
@@ -91,6 +92,7 @@ static const char *default_value(TyKind t) {
     case TY_BOOL:   return "0";
     case TY_STRING: return "(&(\"\\xff\")[1])";
     case TY_SYMBOL: return "((sp_sym)-1)";
+    case TY_RANGE:  return "(sp_Range){0}";
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
     case TY_STR_ARRAY: return "NULL";
@@ -521,6 +523,37 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* range value methods (evaluate the range once into a temp) */
+  if (recv >= 0 && rt == TY_RANGE) {
+    static const char *const rmeths[] = {
+      "to_a", "include?", "member?", "cover?", "sum", "min", "max",
+      "first", "last", "size", "count", "begin", "end", NULL };
+    int known = 0;
+    for (int i = 0; rmeths[i]; i++) if (!strcmp(name, rmeths[i])) known = 1;
+    if (known) {
+      int t = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_Range _t%d = ", t);
+      buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+      if (!strcmp(name, "to_a"))
+        buf_printf(b, "sp_IntArray_from_range(_t%d.first, _t%d.last - _t%d.excl)", t, t, t);
+      else if (!strcmp(name, "include?") || !strcmp(name, "member?") || !strcmp(name, "cover?")) {
+        buf_printf(b, "sp_range_include(&_t%d, ", t); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      } else if (!strcmp(name, "first") || !strcmp(name, "min") || !strcmp(name, "begin"))
+        buf_printf(b, "(_t%d.first)", t);
+      else if (!strcmp(name, "last") || !strcmp(name, "max"))
+        buf_printf(b, "(_t%d.last - _t%d.excl)", t, t);
+      else if (!strcmp(name, "end"))
+        buf_printf(b, "(_t%d.last)", t);
+      else if (!strcmp(name, "size") || !strcmp(name, "count"))
+        buf_printf(b, "(_t%d.last - _t%d.excl - _t%d.first + 1)", t, t, t);
+      else if (!strcmp(name, "sum"))
+        buf_printf(b, "sp_IntArray_sum(sp_IntArray_from_range(_t%d.first, _t%d.last - _t%d.excl), 0)", t, t, t);
+      return;
+    }
+  }
+
   /* hash value methods */
   if (recv >= 0 && ty_is_hash(rt)) {
     const char *hn = ty_hash_cname(rt);
@@ -863,24 +896,19 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
-  /* (a..b).each { |i| ... } */
+  /* (a..b).each { |i| ... } -- any range-typed receiver */
   if (!strcmp(name, "each") && rt == TY_RANGE && p0) {
-    int rn = unwrap_parens(c, recv);
-    if (nt_type(nt, rn) && !strcmp(nt_type(nt, rn), "RangeNode")) {
-      int left = nt_ref(nt, rn, "left");
-      int right = nt_ref(nt, rn, "right");
-      int excl = (int)(nt_int(nt, rn, "flags", 0) & 4);
-      Buf lb; memset(&lb, 0, sizeof lb); emit_expr(c, left, &lb);
-      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, right, &rb);
-      emit_indent(b, indent);
-      buf_printf(b, "for (lv_%s = ", p0); buf_puts(b, lb.p);
-      buf_printf(b, "; lv_%s %s ", p0, excl ? "<" : "<="); buf_puts(b, rb.p);
-      buf_printf(b, "; lv_%s++) {\n", p0);
-      emit_stmts(c, body, b, indent + 1);
-      emit_indent(b, indent); buf_puts(b, "}\n");
-      free(lb.p); free(rb.p);
-      return 1;
-    }
+    int t = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent);
+    buf_printf(b, "sp_Range _t%d = ", t); buf_puts(b, rb.p ? rb.p : ""); buf_puts(b, ";\n");
+    free(rb.p);
+    emit_indent(b, indent);
+    buf_printf(b, "for (lv_%s = _t%d.first; lv_%s <= _t%d.last - _t%d.excl; lv_%s++) {\n",
+               p0, t, p0, t, t, p0);
+    emit_stmts(c, body, b, indent + 1);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
   }
 
   /* n.upto(m) / n.downto(m) { |i| ... } */
@@ -990,6 +1018,17 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   if (!strcmp(ty, "SymbolNode")) {
     int sid = comp_sym_intern(c, nt_str(nt, id, "value"));
     buf_printf(b, "((sp_sym)%d)", sid);
+    return;
+  }
+  if (!strcmp(ty, "RangeNode")) {
+    int left = nt_ref(nt, id, "left");
+    int right = nt_ref(nt, id, "right");
+    int excl = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
+    buf_puts(b, "sp_range_new(");
+    if (left >= 0) emit_expr(c, left, b); else buf_puts(b, "0");
+    buf_puts(b, ", ");
+    if (right >= 0) emit_expr(c, right, b); else buf_puts(b, "0");
+    buf_printf(b, ", %d)", excl);
     return;
   }
   if (!strcmp(ty, "LocalVariableReadNode")) { buf_printf(b, "lv_%s", nt_str(nt, id, "name")); return; }
@@ -1528,6 +1567,9 @@ static void declare_local(Compiler *c, Buf *b, LocalVar *lv) {
       break;
     case TY_SYMBOL:
       buf_printf(b, "    sp_sym lv_%s = ((sp_sym)-1);\n", lv->name);
+      break;
+    case TY_RANGE:
+      buf_printf(b, "    sp_Range lv_%s = {0};\n", lv->name);
       break;
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
