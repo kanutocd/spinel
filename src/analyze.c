@@ -190,7 +190,15 @@ static TyKind infer_call(Compiler *c, int id) {
   /* float receiver methods */
   if (recv >= 0 && rt == TY_FLOAT) {
     if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
-        !strcmp(name, "round") || !strcmp(name, "truncate")) return TY_INT;
+        !strcmp(name, "round") || !strcmp(name, "truncate")) {
+      /* value-based return type: ndigits > 0 (literal) -> Float, else Integer */
+      if (argc == 1) {
+        const char *aty = nt_type(nt, argv[0]);
+        if (aty && !strcmp(aty, "IntegerNode") && nt_int(nt, argv[0], "value", 0) > 0)
+          return TY_FLOAT;
+      }
+      return TY_INT;
+    }
   }
 
   if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0)

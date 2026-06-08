@@ -773,10 +773,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "to_s") && argc == 1) { buf_printf(b, "sp_int_to_s_base(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else handled = 0;
     } else { /* TY_FLOAT */
-      if      (!strcmp(name, "floor")) buf_printf(b, "((mrb_int)floor(%s))", r);
-      else if (!strcmp(name, "ceil"))  buf_printf(b, "((mrb_int)ceil(%s))", r);
-      else if (!strcmp(name, "round")) buf_printf(b, "((mrb_int)round(%s))", r);
-      else if (!strcmp(name, "truncate")) buf_printf(b, "((mrb_int)trunc(%s))", r);
+      /* round/ceil/floor/truncate(n>0) -> Float to n decimals; else Integer */
+      int ndig = 0;
+      if ((!strcmp(name, "floor") || !strcmp(name, "ceil") ||
+           !strcmp(name, "round") || !strcmp(name, "truncate")) && argc == 1) {
+        const char *aty = nt_type(c->nt, argv[0]);
+        if (aty && !strcmp(aty, "IntegerNode")) ndig = (int)nt_int(c->nt, argv[0], "value", 0);
+      }
+      const char *cfn = !strcmp(name, "floor") ? "floor" : !strcmp(name, "ceil") ? "ceil"
+                      : !strcmp(name, "truncate") ? "trunc" : "round";
+      if ((!strcmp(name, "floor") || !strcmp(name, "ceil") ||
+           !strcmp(name, "round") || !strcmp(name, "truncate"))) {
+        if (ndig > 0)
+          buf_printf(b, "({ double _f = pow(10, %d); %s((%s) * _f) / _f; })", ndig, cfn, r);
+        else
+          buf_printf(b, "((mrb_int)%s(%s))", cfn, r);
+      }
       else if (!strcmp(name, "to_i"))  buf_printf(b, "((mrb_int)(%s))", r);
       else if (!strcmp(name, "to_f"))  buf_printf(b, "(%s)", r);
       else if (!strcmp(name, "to_s") || !strcmp(name, "inspect"))  buf_printf(b, "sp_float_to_s(%s)", r);
