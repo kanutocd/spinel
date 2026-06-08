@@ -190,8 +190,89 @@ static void emit_method_call(Compiler *c, int id, Buf *b) {
   buf_puts(b, ")");
 }
 
+/* map/select/reject/filter as an expression: build a result array via a
+   loop emitted into the statement prelude; the expression value is the
+   temp array. Returns 1 if handled. */
+static int emit_collect_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!name || recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = array_kind(rt);
+  if (!k) return 0;
+
+  int is_map = !strcmp(name, "map") || !strcmp(name, "collect");
+  int is_sel = !strcmp(name, "select") || !strcmp(name, "filter");
+  int is_rej = !strcmp(name, "reject");
+  if (!is_map && !is_sel && !is_rej) return 0;
+
+  TyKind restype = comp_ntype(c, id);
+  const char *rk = array_kind(restype);
+  if (!rk) return 0;
+
+  const char *p0 = block_param_name(c, block, 0);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0;
+  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+
+  int trecv = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp;
+
+  /* eval receiver once (its own preludes must land before the decl line) */
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = ", trecv);
+  buf_puts(g_pre, rb.p ? rb.p : "");
+  buf_puts(g_pre, ";\n");
+  free(rb.p);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", rk, tres, rk);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, k, trecv, ti);
+
+  int bodyIndent = g_indent + 1;
+  if (p0) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+  }
+  /* body statements except the last */
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndent);
+
+  int saveIndent = g_indent;
+  g_indent = bodyIndent;
+  Buf vb; memset(&vb, 0, sizeof vb);
+  emit_expr(c, bb[bn - 1], &vb);  /* value preludes flow to g_pre at bodyIndent */
+  g_indent = saveIndent;
+
+  if (is_map) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk, tres);
+    buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ");\n");
+  } else {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "if (%s(", is_rej ? "!" : "");
+    buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ")) ");
+    buf_printf(g_pre, "sp_%sArray_push(_t%d, lv_%s);\n", rk, tres, p0 ? p0 : "");
+  }
+  free(vb.p);
+  emit_indent(g_pre, g_indent);
+  buf_puts(g_pre, "}\n");
+
+  buf_printf(b, "_t%d", tres);
+  return 1;
+}
+
 static void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
+  if (emit_collect_expr(c, id, b)) return;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
   int args = nt_ref(nt, id, "arguments");

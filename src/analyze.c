@@ -87,6 +87,19 @@ static TyKind infer_call(Compiler *c, int id) {
 
   /* array receiver methods */
   if (recv >= 0 && ty_is_array(rt)) {
+    int block = nt_ref(nt, id, "block");
+    if (block >= 0) {
+      if (!strcmp(name, "map") || !strcmp(name, "collect")) {
+        int body = nt_ref(nt, block, "body");
+        int bn = 0;
+        const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+        return ty_array_of(bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN);
+      }
+      if (!strcmp(name, "select") || !strcmp(name, "reject") ||
+          !strcmp(name, "filter") || !strcmp(name, "sort_by") ||
+          !strcmp(name, "take_while") || !strcmp(name, "drop_while"))
+        return rt;
+    }
     if (!strcmp(name, "[]"))                          return ty_array_elem(rt);
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count") || !strcmp(name, "index")) return TY_INT;
@@ -442,6 +455,19 @@ static int infer_ivar_types(Compiler *c) {
 static int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+
+  /* Recompute non-param local types FRESH each iteration: reset to UNKNOWN
+     (saving the old value), then unify all write-site RHS types. This lets
+     a local NARROW as block-param/return inference improves, instead of
+     monotonically widening to POLY from a stale early estimate. */
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      /* stash old type in gc_root (unused by codegen) so we can detect
+         change; block params are typed elsewhere, so leave them alone */
+      if (!lv->is_param && !lv->is_block_param) { lv->gc_root = (int)lv->type; lv->type = TY_UNKNOWN; }
+    }
+
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
@@ -455,7 +481,7 @@ static int infer_write_types(Compiler *c) {
       Scope *s = comp_scope_of(c, id);
       LocalVar *cur = nm ? scope_local(s, nm) : NULL;
       TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
-      TyKind ct = cur ? cur->type : TY_UNKNOWN;
+      TyKind ct = cur ? (TyKind)cur->gc_root : TY_UNKNOWN; /* old type */
       if (ct == TY_STRING) newt = TY_STRING;
       else if (ty_is_numeric(ct) && ty_is_numeric(vt))
         newt = (ct == TY_FLOAT || vt == TY_FLOAT) ? TY_FLOAT : TY_INT;
@@ -465,10 +491,16 @@ static int infer_write_types(Compiler *c) {
     }
     if (!nm) continue;
     LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
-    if (!lv) continue;
-    TyKind merged = ty_unify(lv->type, newt);
-    if (merged != lv->type) { lv->type = merged; changed = 1; }
+    if (!lv || lv->is_param || lv->is_block_param) continue;
+    lv->type = ty_unify(lv->type, newt);
   }
+
+  /* detect change vs the stashed old types */
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      if (!lv->is_param && !lv->is_block_param && (TyKind)lv->gc_root != lv->type) changed = 1;
+    }
   return changed;
 }
 
@@ -566,12 +598,12 @@ static int infer_block_params(Compiler *c) {
     /* hash.each { |k, v| } binds two params */
     if (!strcmp(name, "each") && ty_is_hash(rt)) {
       Scope *hs = comp_scope_of(c, block);
-      LocalVar *kp = scope_local_intern(hs, p0);
+      LocalVar *kp = scope_local_intern(hs, p0); kp->is_block_param = 1;
       TyKind km = ty_unify(kp->type, ty_hash_key(rt));
       if (km != kp->type) { kp->type = km; changed = 1; }
       const char *p1 = block_param_name(c, block, 1);
       if (p1) {
-        LocalVar *vp = scope_local_intern(hs, p1);
+        LocalVar *vp = scope_local_intern(hs, p1); vp->is_block_param = 1;
         TyKind vm = ty_unify(vp->type, ty_hash_val(rt));
         if (vm != vp->type) { vp->type = vm; changed = 1; }
       }
@@ -580,7 +612,7 @@ static int infer_block_params(Compiler *c) {
 
     if (pt == TY_UNKNOWN) continue;
     Scope *s = comp_scope_of(c, block);
-    LocalVar *lv = scope_local_intern(s, p0);
+    LocalVar *lv = scope_local_intern(s, p0); lv->is_block_param = 1;
     TyKind merged = ty_unify(lv->type, pt);
     if (merged != lv->type) { lv->type = merged; changed = 1; }
   }

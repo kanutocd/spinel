@@ -15,8 +15,9 @@
 typedef struct {
   char *name;       /* Ruby local name (without sigil) */
   TyKind type;      /* inferred type */
-  int gc_root;      /* needs SP_GC_ROOT (heap-managed: strings, ...) */
-  int is_param;     /* declared as a method parameter */
+  int gc_root;      /* scratch during analysis; rooting is type-derived in codegen */
+  int is_param;     /* declared as a method parameter (C function param) */
+  int is_block_param; /* bound by a block; typed by block-param inference */
 } LocalVar;
 
 typedef struct {
