@@ -406,6 +406,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "casecmp?")) return TY_BOOL;
     if (!strcmp(name, "to_f"))  return TY_FLOAT;
     if (!strcmp(name, "split") || !strcmp(name, "lines")) return TY_STR_ARRAY;
+    if (!strcmp(name, "each_char") || !strcmp(name, "each_line") || !strcmp(name, "each_byte")) return TY_STRING;
     if (!strcmp(name, "bytes")) return TY_INT_ARRAY;
     if (!strcmp(name, "gsub") || !strcmp(name, "sub") || !strcmp(name, "tr") ||
         !strcmp(name, "center") || !strcmp(name, "ljust") || !strcmp(name, "rjust"))
@@ -1460,6 +1461,10 @@ static int infer_block_params(Compiler *c) {
     TyKind pt = TY_UNKNOWN;
     if ((!strcmp(name, "times") || !strcmp(name, "upto") ||
          !strcmp(name, "downto") || !strcmp(name, "step")) && rt == TY_INT)
+      pt = TY_INT;
+    else if (rt == TY_STRING && (!strcmp(name, "each_char") || !strcmp(name, "each_line")))
+      pt = TY_STRING;
+    else if (rt == TY_STRING && !strcmp(name, "each_byte"))
       pt = TY_INT;
     else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||

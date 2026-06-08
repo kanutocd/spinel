@@ -1543,6 +1543,37 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* str.each_char / each_line { |x| ... } -> iterate, return self. */
+  if (recv >= 0 && rt == TY_STRING && nt_ref(nt, id, "block") >= 0 &&
+      (!strcmp(name, "each_char") || !strcmp(name, "each_line") || !strcmp(name, "each_byte"))) {
+    int block = nt_ref(nt, id, "block");
+    int body = nt_ref(nt, block, "body");
+    const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+    int ts = ++g_tmp, ti = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    int is_line = !strcmp(name, "each_line");
+    int is_byte = !strcmp(name, "each_byte");
+    buf_printf(b, "({ const char *_t%d = %s; ", ts, rb.p ? rb.p : ""); free(rb.p);
+    if (is_line) {
+      int tl = ++g_tmp;
+      buf_printf(b, "sp_StrArray *_t%d = sp_str_lines(_t%d); for (mrb_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) { ", tl, ts, ti, ti, tl, ti);
+      if (p0) buf_printf(b, "lv_%s = sp_StrArray_get(_t%d, _t%d); ", p0, tl, ti);
+    }
+    else if (is_byte) {
+      buf_printf(b, "for (mrb_int _t%d = 0; _t%d < (mrb_int)sp_str_byte_len(_t%d); _t%d++) { ", ti, ti, ts, ti);
+      if (p0) buf_printf(b, "lv_%s = (unsigned char)_t%d[_t%d]; ", p0, ts, ti);
+    }
+    else {
+      buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_str_length(_t%d); _t%d++) { ", ti, ti, ts, ti);
+      if (p0) buf_printf(b, "lv_%s = sp_str_char_at_or_nil(_t%d, _t%d); ", p0, ts, ti);
+    }
+    int sv = g_nren; g_nren = 0;
+    emit_stmts(c, body, b, 0);
+    g_nren = sv;
+    buf_printf(b, " } _t%d; })", ts);
+    return;
+  }
+
   /* scalar receiver methods: evaluate the receiver once into rs, then
      splice its text (so a literal/complex receiver isn't rebuilt). */
   if (recv >= 0 && (rt == TY_STRING || rt == TY_INT || rt == TY_FLOAT)) {
@@ -1601,8 +1632,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 1) {
         buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
+      else if (!strcmp(name, "split") && argc == 0) buf_printf(b, "sp_str_split_ws(%s)", r);
       else if (!strcmp(name, "split") && argc == 1) {
-        buf_printf(b, "sp_str_split_drop_trailing(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        /* split(" ") is whitespace-mode; split(sep) drops trailing empties */
+        const char *aty = nt_type(c->nt, argv[0]);
+        int ws = aty && !strcmp(aty, "StringNode") && nt_str(c->nt, argv[0], "content") &&
+                 !strcmp(nt_str(c->nt, argv[0], "content"), " ");
+        if (ws) buf_printf(b, "sp_str_split_ws(%s)", r);
+        else { buf_printf(b, "sp_str_split_drop_trailing(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      }
+      else if (!strcmp(name, "split") && argc == 2) {
+        buf_printf(b, "sp_str_split_limit(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "clamp") && (argc == 2 ||
                (argc == 1 && nt_type(c->nt, argv[0]) && !strcmp(nt_type(c->nt, argv[0]), "RangeNode")))) {
