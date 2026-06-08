@@ -2627,6 +2627,17 @@ static void emit_boxed(Compiler *c, int node, Buf *b) {
     buf_printf(b, ", %d)", ty_object_class(t));
     return;
   }
+  if (ty_is_hash(t)) {
+    static const struct { TyKind t; const char *id; } hids[] = {
+      {TY_STR_INT_HASH, "SP_BUILTIN_STR_INT_HASH"}, {TY_STR_STR_HASH, "SP_BUILTIN_STR_STR_HASH"},
+      {TY_INT_STR_HASH, "SP_BUILTIN_INT_STR_HASH"}, {TY_INT_INT_HASH, NULL} };
+    for (unsigned i = 0; i < sizeof hids / sizeof hids[0]; i++)
+      if (hids[i].t == t && hids[i].id) {
+        buf_printf(b, "sp_box_obj("); emit_expr(c, node, b); buf_printf(b, ", %s)", hids[i].id);
+        return;
+      }
+    unsupported(c, node, "boxing value into poly"); return;
+  }
   const char *fn = NULL;
   switch (t) {
     case TY_INT:    fn = "sp_box_int";   break;
@@ -2634,6 +2645,7 @@ static void emit_boxed(Compiler *c, int node, Buf *b) {
     case TY_STRING: fn = "sp_box_str";   break;
     case TY_BOOL:   fn = "sp_box_bool";  break;
     case TY_SYMBOL: fn = "sp_box_sym";   break;
+    case TY_RANGE:  fn = "sp_box_range"; break;
     case TY_INT_ARRAY:   fn = "sp_box_int_array";   break;
     case TY_FLOAT_ARRAY: fn = "sp_box_float_array"; break;
     case TY_STR_ARRAY:   fn = "sp_box_str_array";   break;
