@@ -170,6 +170,7 @@ static int  emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
 static int  emit_output_call(Compiler *c, int id, Buf *b, int indent);
 static int  emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent);
 static int  emit_inline_call(Compiler *c, int id, Buf *b, int indent);
+static int  emit_inline_expr(Compiler *c, int id, Buf *b);
 static int  needs_root(TyKind t);
 static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 static void emit_super(Compiler *c, int id, Buf *b);
@@ -400,6 +401,7 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
 static void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   if (emit_collect_expr(c, id, b)) return;
+  if (emit_inline_expr(c, id, b)) return;  /* value-returning yield method */
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
   int args = nt_ref(nt, id, "arguments");
@@ -1049,7 +1051,7 @@ static int scope_has_return(Compiler *c, int scope_idx) {
    declare the method's locals (renamed to avoid clashing with the call
    site), bind params to args, then emit the method body with yield
    expanding to the block. Returns 1 if handled. */
-static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
+static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
@@ -1083,7 +1085,8 @@ static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
   static char selfbuf[64];
   g_block_id = block;
 
-  emit_indent(b, indent); buf_puts(b, "{\n");
+  if (as_expr) buf_puts(b, "({\n");
+  else { emit_indent(b, indent); buf_puts(b, "{\n"); }
   /* instance method: bind self to the receiver */
   if (recv >= 0) {
     int st = ++g_tmp;
@@ -1135,12 +1138,26 @@ static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
   }
 
   emit_stmts(c, m->body, b, din);
-  emit_indent(b, indent); buf_puts(b, "}\n");
+  if (as_expr) { emit_indent(b, indent); buf_puts(b, "})"); }
+  else { emit_indent(b, indent); buf_puts(b, "}\n"); }
 
   g_nren = saved_nren;
   g_block_id = saved_block;
   g_self = saved_self;
   return 1;
+}
+
+static int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
+  return emit_inline_call_x(c, id, b, indent, 0);
+}
+
+/* Inline a yielding method call in expression position: ({ ...; value; }).
+   The method must return a usable value (its body's last statement). */
+static int emit_inline_expr(Compiler *c, int id, Buf *b) {
+  /* only when a value is actually produced (scalar return) */
+  TyKind rt = comp_ntype(c, id);
+  if (!is_scalar_ret(rt)) return 0;
+  return emit_inline_call_x(c, id, b, g_indent + 1, 1);
 }
 
 /* Block iteration lowered to an inline C for-loop. Handles n.times,
