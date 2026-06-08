@@ -136,8 +136,13 @@ static const char *rename_local(const char *nm) {
 
 static void unsupported(Compiler *c, int id, const char *what) {
   const char *ty = nt_type(c->nt, id);
-  fprintf(stderr, "spinelc: unsupported %s: node %d (%s)\n",
-          what, id, ty ? ty : "?");
+  const char *mname = ty && !strcmp(ty, "CallNode") ? nt_str(c->nt, id, "name") : NULL;
+  if (mname)
+    fprintf(stderr, "spinelc: unsupported %s: node %d (%s `%s`)\n",
+            what, id, ty, mname);
+  else
+    fprintf(stderr, "spinelc: unsupported %s: node %d (%s)\n",
+            what, id, ty ? ty : "?");
   exit(1);
 }
 
