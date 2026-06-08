@@ -140,6 +140,8 @@ static TyKind infer_call(Compiler *c, int id) {
         return rt;
     }
     if (!strcmp(name, "[]"))                          return ty_array_elem(rt);
+    /* index returns nil on a miss -> poly (int-or-nil) */
+    if (!strcmp(name, "index") && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) return TY_POLY;
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count") || !strcmp(name, "index")) return TY_INT;
     if (!strcmp(name, "sum"))                         return ty_array_elem(rt);

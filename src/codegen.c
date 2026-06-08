@@ -983,6 +983,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_%s(", k, name); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "index") && argc == 1 && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) {
+        /* nil-on-miss -> poly */
+        buf_printf(b, "sp_%sArray_index_poly(", k);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
       if ((!strcmp(name, "include?") || !strcmp(name, "index")) && argc == 1 && rt != TY_FLOAT_ARRAY) {
         const char *fn = !strcmp(name, "include?") ? "include" : "index";
         buf_printf(b, "sp_%sArray_%s(", k, fn);
