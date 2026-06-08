@@ -1982,6 +1982,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_%s(", k, name); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "minmax") && argc == 0 && rt != TY_STR_ARRAY) {
+        int t = ++g_tmp, o = ++g_tmp;
+        buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_%sArray *_t%d = sp_%sArray_new(); sp_%sArray_push(_t%d, sp_%sArray_min(_t%d));"
+                      " sp_%sArray_push(_t%d, sp_%sArray_max(_t%d)); _t%d; })",
+                   k, o, k, k, o, k, t, k, o, k, t, o);
+        return;
+      }
       if (!strcmp(name, "index") && argc == 1 && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) {
         /* nil-on-miss -> poly */
         buf_printf(b, "sp_%sArray_index_poly(", k);
@@ -2216,6 +2224,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "index") && argc == 1) {
         buf_printf(b, "sp_str_index(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
+      else if ((!strcmp(name, "partition") || !strcmp(name, "rpartition")) && argc == 1 &&
+               re_lit_index(c, argv[0]) < 0) {
+        buf_printf(b, "sp_str_%s(%s, ", name, r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
       else if (!strcmp(name, "scrub") && argc == 0) buf_printf(b, "sp_str_scrub(%s, 0)", r);
       else if (!strcmp(name, "scrub") && argc == 1) { buf_printf(b, "sp_str_scrub(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 1 && nt_type(c->nt, argv[0]) &&
@@ -2324,6 +2336,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "zero?"))  buf_printf(b, "((%s) == 0)", r);
       else if (!strcmp(name, "positive?")) buf_printf(b, "((%s) > 0)", r);
       else if (!strcmp(name, "negative?")) buf_printf(b, "((%s) < 0)", r);
+      else if (!strcmp(name, "divmod") && argc == 1) {
+        int tb = ++g_tmp, o = ++g_tmp;
+        buf_printf(b, "({ mrb_int _t%d = ", tb); emit_expr(c, argv[0], b);
+        buf_printf(b, "; sp_IntArray *_t%d = sp_IntArray_new(); sp_IntArray_push(_t%d, sp_idiv(%s, _t%d));"
+                      " sp_IntArray_push(_t%d, sp_imod(%s, _t%d)); _t%d; })", o, o, r, tb, o, r, tb, o);
+      }
       else if (!strcmp(name, "gcd") && argc == 1) { buf_printf(b, "sp_gcd(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "lcm") && argc == 1) { buf_printf(b, "sp_lcm(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "clamp") && argc == 2) { buf_printf(b, "sp_int_clamp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }

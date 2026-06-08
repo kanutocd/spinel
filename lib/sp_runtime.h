@@ -1428,6 +1428,34 @@ static sp_StrArray*sp_str_split_limit(const char*s,const char*sep,mrb_int n){
    ASCII whitespace, skip leading whitespace. Issue #507: the no-arg
    form previously emitted `sp_str_split(s, 0)` and segfaulted at
    strlen(NULL). */
+static const char*sp_str_byteslice(const char*s,mrb_int start,mrb_int len);  /* fwd */
+/* partition: [before, sep, after] at the first sep; no match -> [s, "", ""]. */
+static sp_StrArray *sp_str_partition(const char *s, const char *sep) {
+  SP_GC_ROOT(s); SP_GC_ROOT(sep);
+  sp_StrArray *r = sp_StrArray_new();
+  mrb_int bl = (mrb_int)sp_str_byte_len(s), sl = (mrb_int)strlen(sep);
+  const char *f = sl > 0 ? strstr(s, sep) : s;
+  if (!f) { sp_StrArray_push(r, s); sp_StrArray_push(r, sp_str_empty); sp_StrArray_push(r, sp_str_empty); return r; }
+  mrb_int pre = (mrb_int)(f - s);
+  sp_StrArray_push(r, sp_str_byteslice(s, 0, pre));
+  sp_StrArray_push(r, sp_str_byteslice(s, pre, sl));
+  sp_StrArray_push(r, sp_str_byteslice(s, pre + sl, bl - pre - sl));
+  return r;
+}
+/* rpartition: split at the last sep; no match -> ["", "", s]. */
+static sp_StrArray *sp_str_rpartition(const char *s, const char *sep) {
+  SP_GC_ROOT(s); SP_GC_ROOT(sep);
+  sp_StrArray *r = sp_StrArray_new();
+  mrb_int bl = (mrb_int)sp_str_byte_len(s), sl = (mrb_int)strlen(sep);
+  const char *last = NULL;
+  if (sl > 0) { const char *p = s; while ((p = strstr(p, sep))) { last = p; p++; } }
+  if (!last) { sp_StrArray_push(r, sp_str_empty); sp_StrArray_push(r, sp_str_empty); sp_StrArray_push(r, s); return r; }
+  mrb_int pre = (mrb_int)(last - s);
+  sp_StrArray_push(r, sp_str_byteslice(s, 0, pre));
+  sp_StrArray_push(r, sp_str_byteslice(s, pre, sl));
+  sp_StrArray_push(r, sp_str_byteslice(s, pre + sl, bl - pre - sl));
+  return r;
+}
 static sp_StrArray*sp_str_split_ws(const char*s){
   SP_GC_ROOT(s);
   sp_StrArray*a=sp_StrArray_new();

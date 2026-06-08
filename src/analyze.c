@@ -463,6 +463,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "sum"))                         return ty_array_elem(rt);
     if (!strcmp(name, "first") || !strcmp(name, "last") ||
         !strcmp(name, "min") || !strcmp(name, "max")) return ty_array_elem(rt);
+    if (!strcmp(name, "minmax")) return rt;  /* [min, max], same element kind */
     if (!strcmp(name, "join"))                        return TY_STRING;
     if (!strcmp(name, "inspect") || !strcmp(name, "to_s")) return TY_STRING;
     if (!strcmp(name, "empty?") || !strcmp(name, "include?")) return TY_BOOL;
@@ -590,6 +591,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count") ||
         !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp")) return TY_INT;
     if (!strcmp(name, "scrub")) return TY_STRING;
+    if (!strcmp(name, "partition") || !strcmp(name, "rpartition")) return TY_STR_ARRAY;
     if (!strcmp(name, "casecmp?")) return TY_BOOL;
     if (!strcmp(name, "to_f"))  return TY_FLOAT;
     if (!strcmp(name, "split") || !strcmp(name, "lines") || !strcmp(name, "scan")) return TY_STR_ARRAY;
@@ -604,6 +606,7 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv >= 0 && rt == TY_INT) {
     if (!strcmp(name, "ceil") || !strcmp(name, "floor") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) return TY_INT;  /* no precision arg -> self */
+    if (!strcmp(name, "divmod") && argc == 1) return TY_INT_ARRAY;  /* [quotient, remainder] */
     if (!strcmp(name, "chr")) return TY_STRING;
     if (!strcmp(name, "[]") && argc == 1) return TY_INT;  /* bit access */
     if (!strcmp(name, "gcd") || !strcmp(name, "lcm") || !strcmp(name, "clamp")) return TY_INT;
