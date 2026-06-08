@@ -222,6 +222,17 @@ static TyKind infer_call(Compiler *c, int id) {
     }
   }
 
+  /* symbol receiver methods */
+  if (recv >= 0 && rt == TY_SYMBOL) {
+    if (!strcmp(name, "to_s") || !strcmp(name, "id2name") || !strcmp(name, "name")) return TY_STRING;
+    if (!strcmp(name, "inspect")) return TY_STRING;
+    if (!strcmp(name, "upcase") || !strcmp(name, "downcase") ||
+        !strcmp(name, "capitalize") || !strcmp(name, "swapcase") ||
+        !strcmp(name, "to_sym") || !strcmp(name, "itself")) return TY_SYMBOL;
+    if (!strcmp(name, "length") || !strcmp(name, "size")) return TY_INT;
+    if (!strcmp(name, "empty?") || !strcmp(name, "==") || !strcmp(name, "!=")) return TY_BOOL;
+  }
+
   /* range receiver methods */
   if (recv >= 0 && rt == TY_RANGE) {
     if (!strcmp(name, "to_a"))      return TY_INT_ARRAY;
@@ -349,6 +360,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "FloatNode"))               return TY_FLOAT;
   if (!strcmp(ty, "StringNode"))              return TY_STRING;
   if (!strcmp(ty, "InterpolatedStringNode"))  return TY_STRING;
+  if (!strcmp(ty, "InterpolatedSymbolNode"))  return TY_SYMBOL;
   if (!strcmp(ty, "SymbolNode"))              return TY_SYMBOL;
   if (!strcmp(ty, "TrueNode"))                return TY_BOOL;
   if (!strcmp(ty, "FalseNode"))               return TY_BOOL;
