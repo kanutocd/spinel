@@ -303,7 +303,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "ArrayNode")) {
     int n = 0;
     const int *els = nt_arr(nt, id, "elements", &n);
-    if (n == 0) return TY_POLY_ARRAY;
+    if (n == 0) return TY_UNKNOWN;  /* empty: element type comes from usage */
     TyKind e = TY_UNKNOWN;
     for (int k = 0; k < n; k++) e = ty_unify(e, infer_type(c, els[k]));
     return ty_array_of(e);
@@ -626,6 +626,34 @@ static int infer_write_types(Compiler *c) {
     LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
     if (!lv || lv->is_param || lv->is_block_param) continue;
     lv->type = ty_unify(lv->type, newt);
+  }
+
+  /* Fold container usage into the local type: `a << x` / `a.push(x)` /
+     `a[i] = x` on a local `a` promotes it to an array of x's type (this is
+     how an empty `[]` gets its element type). Part of the same recompute
+     frame so it survives the reset and the change check stays consistent. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || strcmp(nt_type(nt, recv) ? nt_type(nt, recv) : "", "LocalVariableReadNode")) continue;
+    const char *name = nt_str(nt, id, "name");
+    if (!name) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    TyKind elem = TY_UNKNOWN;
+    if ((!strcmp(name, "push") || !strcmp(name, "<<")) && an == 1) elem = infer_type(c, argv[0]);
+    else if (!strcmp(name, "[]=") && an == 2) elem = infer_type(c, argv[1]);
+    else continue;
+    if (elem == TY_UNKNOWN) continue;
+    const char *rnm = nt_str(nt, recv, "name");
+    LocalVar *lv = rnm ? scope_local(comp_scope_of(c, recv), rnm) : NULL;
+    if (!lv || lv->is_param || lv->is_block_param) continue;
+    /* only promote a container local: a known string uses `<<` for append,
+       not array push -- don't pollute it */
+    if (lv->type != TY_UNKNOWN && !ty_is_array(lv->type)) continue;
+    lv->type = ty_unify(lv->type, ty_array_of(elem));
   }
 
   /* detect change vs the stashed old types */

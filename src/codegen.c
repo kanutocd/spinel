@@ -1127,11 +1127,15 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
   if (!strcmp(ty, "ArrayNode")) {
-    TyKind at = comp_ntype(c, id);
-    const char *k = array_kind(at);
-    if (!k) unsupported(c, id, "array literal (element type)");
     int n = 0;
     const int *els = nt_arr(nt, id, "elements", &n);
+    TyKind at = comp_ntype(c, id);
+    /* an empty `[]` literal carries no element type of its own; it is
+       emitted via the target's type in emit_assign. If we reach here for
+       an empty literal, fall back to an int array. */
+    const char *k = array_kind(at);
+    if (n == 0 && !k) { buf_puts(b, "sp_IntArray_new()"); return; }
+    if (!k) unsupported(c, id, "array literal (element type)");
     int t = ++g_tmp;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, t, k);
@@ -1322,9 +1326,14 @@ static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   buf_printf(b, "lv_%s = ", nm);
   /* `x = nil` -> the variable's type-appropriate default */
   const char *vty = nt_type(c->nt, v);
+  int vn = 0;
+  int is_empty_array = vty && !strcmp(vty, "ArrayNode") && (nt_arr(c->nt, v, "elements", &vn), vn == 0);
   if (vty && !strcmp(vty, "NilNode") && lv) {
     if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
     else buf_puts(b, default_value(lv->type));
+  } else if (is_empty_array && lv && array_kind(lv->type)) {
+    /* `a = []` -> a new array of the variable's resolved element type */
+    buf_printf(b, "sp_%sArray_new()", array_kind(lv->type));
   } else {
     emit_expr(c, v, b);
   }
