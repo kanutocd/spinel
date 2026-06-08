@@ -449,8 +449,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* exception object methods */
   if (recv >= 0 && comp_ntype(c, recv) == TY_EXCEPTION) {
     if (!strcmp(name, "message") || !strcmp(name, "to_s") || !strcmp(name, "to_str") ||
-        !strcmp(name, "inspect") || !strcmp(name, "full_message")) {
+        !strcmp(name, "full_message")) {
       buf_puts(b, "sp_exc_message("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return;
+    }
+    if (!strcmp(name, "inspect")) {
+      /* #<ClassName: message> */
+      int t = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_Exception *_t%d = ", t);
+      buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+      buf_printf(b, "sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d))", t, t);
+      return;
+    }
+    if (!strcmp(name, "class")) {  /* used as .class.to_s / .class.name */
+      buf_puts(b, "sp_exc_class_name("); emit_expr(c, recv, b); buf_puts(b, ")");
       return;
     }
   }

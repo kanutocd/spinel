@@ -146,7 +146,7 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv >= 0 && rt == TY_EXCEPTION) {
     if (!strcmp(name, "message") || !strcmp(name, "to_s") ||
         !strcmp(name, "to_str") || !strcmp(name, "inspect") ||
-        !strcmp(name, "full_message")) return TY_STRING;
+        !strcmp(name, "full_message") || !strcmp(name, "class")) return TY_STRING;
   }
 
   /* range receiver methods */
