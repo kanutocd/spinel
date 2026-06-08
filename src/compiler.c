@@ -77,6 +77,7 @@ ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node) {
   memset(ci, 0, sizeof(*ci));
   ci->name = name ? strdup(name) : NULL;
   ci->def_node = def_node;
+  ci->parent = -1;
   return ci;
 }
 
@@ -114,6 +115,14 @@ int comp_method_in_class(Compiler *c, int class_id, const char *name) {
   return -1;
 }
 
+int comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_class) {
+  for (int cid = class_id; cid >= 0; cid = c->classes[cid].parent) {
+    int mi = comp_method_in_class(c, cid, name);
+    if (mi >= 0) { if (def_class) *def_class = cid; return mi; }
+  }
+  return -1;
+}
+
 static int name_in(char **list, int n, const char *name) {
   for (int i = 0; i < n; i++) if (strcmp(list[i], name) == 0) return 1;
   return 0;
@@ -136,6 +145,17 @@ void comp_add_writer(ClassInfo *ci, const char *name) {
 }
 int comp_is_reader(ClassInfo *ci, const char *name) { return name_in(ci->readers, ci->nreaders, name); }
 int comp_is_writer(ClassInfo *ci, const char *name) { return name_in(ci->writers, ci->nwriters, name); }
+
+int comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class) {
+  for (int cid = class_id; cid >= 0; cid = c->classes[cid].parent)
+    if (comp_is_reader(&c->classes[cid], name)) { if (def_class) *def_class = cid; return 1; }
+  return 0;
+}
+int comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class) {
+  for (int cid = class_id; cid >= 0; cid = c->classes[cid].parent)
+    if (comp_is_writer(&c->classes[cid], name)) { if (def_class) *def_class = cid; return 1; }
+  return 0;
+}
 
 Scope *comp_scope_of(Compiler *c, int node_id) {
   if (node_id < 0 || node_id >= c->nt->count) return &c->scopes[0];

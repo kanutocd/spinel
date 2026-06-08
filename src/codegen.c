@@ -148,6 +148,7 @@ static int  emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
 static int  emit_output_call(Compiler *c, int id, Buf *b, int indent);
 static int  emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent);
 static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
+static void emit_super(Compiler *c, int id, Buf *b);
 
 /* Strip ParenthesesNode wrappers to reach the inner expression. */
 static int unwrap_parens(Compiler *c, int id) {
@@ -270,6 +271,82 @@ static int emit_collect_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+static int is_descendant(Compiler *c, int k, int anc) {
+  for (int x = k; x >= 0; x = c->classes[x].parent) if (x == anc) return 1;
+  return 0;
+}
+
+/* Number of distinct implementations of `name` across cid's subtree
+   (cid + all descendants). >1 means a self/obj call needs runtime dispatch. */
+static int dispatch_impl_count(Compiler *c, int cid, const char *name) {
+  int impls[256], n = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int def = -1;
+    if (comp_method_in_chain(c, k, name, &def) < 0) continue;
+    int seen = 0;
+    for (int j = 0; j < n; j++) if (impls[j] == def) seen = 1;
+    if (!seen && n < 256) impls[n++] = def;
+  }
+  return n;
+}
+
+/* Emit a (possibly virtual) method call. `selfptr` is a reusable C
+   expression yielding sp_<static>* (e.g. "self", "&lv_x", "&_t3"). Args
+   are pre-evaluated into temps so they're emitted once. */
+static void emit_dispatch(Compiler *c, int cid, const char *name,
+                          const char *selfptr, int argsNode, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int defcls = cid;
+  comp_method_in_chain(c, cid, name, &defcls);
+  TyKind ret = TY_UNKNOWN;
+  { int mi = comp_method_in_chain(c, cid, name, NULL); if (mi >= 0) ret = c->scopes[mi].ret; }
+
+  int argc = 0;
+  const int *argv = argsNode >= 0 ? nt_arr(nt, argsNode, "arguments", &argc) : NULL;
+  /* evaluate args into temps in the prelude */
+  int *atmp = argc ? malloc(sizeof(int) * argc) : NULL;
+  for (int k = 0; k < argc; k++) {
+    atmp[k] = ++g_tmp;
+    Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, argv[k], &ab);
+    emit_indent(g_pre, g_indent);
+    emit_ctype(c, comp_ntype(c, argv[k]), g_pre);
+    buf_printf(g_pre, " _t%d = ", atmp[k]);
+    buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
+    free(ab.p);
+  }
+
+  int virtual = dispatch_impl_count(c, cid, name) > 1 && is_scalar_ret(ret);
+
+  if (!virtual) {
+    buf_printf(b, "sp_%s_%s((sp_%s *)%s", c->classes[defcls].name, name, c->classes[defcls].name, selfptr);
+    for (int k = 0; k < argc; k++) buf_printf(b, ", _t%d", atmp[k]);
+    buf_puts(b, ")");
+    free(atmp);
+    return;
+  }
+
+  /* runtime dispatch on cls_id (GCC statement-expression) */
+  int rtmp = ++g_tmp;
+  buf_puts(b, "({ ");
+  emit_ctype(c, ret, b);
+  buf_printf(b, " _t%d; switch ((%s)->cls_id) {", rtmp, selfptr);
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kd = -1;
+    if (comp_method_in_chain(c, k, name, &kd) < 0) continue;
+    buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)%s", k, rtmp,
+               c->classes[kd].name, name, c->classes[kd].name, selfptr);
+    for (int a = 0; a < argc; a++) buf_printf(b, ", _t%d", atmp[a]);
+    buf_puts(b, "); break;");
+  }
+  buf_printf(b, " default: _t%d = sp_%s_%s((sp_%s *)%s", rtmp,
+             c->classes[defcls].name, name, c->classes[defcls].name, selfptr);
+  for (int a = 0; a < argc; a++) buf_printf(b, ", _t%d", atmp[a]);
+  buf_printf(b, "); break; } _t%d; })", rtmp);
+  free(atmp);
+}
+
 static void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   if (emit_collect_expr(c, id, b)) return;
@@ -282,6 +359,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (!name) unsupported(c, id, "call (no name)");
 
   if (recv < 0 && comp_method_index(c, name) >= 0) { emit_method_call(c, id, b); return; }
+
+  /* implicit-self call inside an instance method */
+  if (recv < 0) {
+    Scope *self = comp_scope_of(c, id);
+    if (self->class_id >= 0) {
+      if (comp_reader_in_chain(c, self->class_id, name, NULL)) {
+        buf_printf(b, "self->iv_%s", name);
+        return;
+      }
+      int mi = comp_method_in_chain(c, self->class_id, name, NULL);
+      if (mi >= 0) {
+        emit_dispatch(c, self->class_id, name, "self", nt_ref(nt, id, "arguments"), b);
+        return;
+      }
+    }
+  }
 
   /* Class.new(args) -> sp_<Class>_new(args) */
   if (recv >= 0 && !strcmp(name, "new")) {
@@ -395,21 +488,25 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     unsupported(c, id, "equality");
   }
 
-  /* object method call: sp_<Class>_<m>(&recv, args) */
+  /* object method call: sp_<DefClass>_<m>((sp_<DefClass>*)&recv, args) */
   if (recv >= 0 && ty_is_object(rt)) {
     int cid = ty_object_class(rt);
     /* attr reader -> field access (recv).iv_x */
-    if (comp_is_reader(&c->classes[cid], name)) {
+    if (comp_reader_in_chain(c, cid, name, NULL)) {
       buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ").iv_%s", name);
       return;
     }
-    int mi = comp_method_in_class(c, cid, name);
+    int mi = comp_method_in_chain(c, cid, name, NULL);
     if (mi >= 0) {
-      buf_printf(b, "sp_%s_%s(", c->classes[cid].name, name);
-      /* self by address; receiver must be an lvalue (local/ivar) or a temp */
+      /* receiver pointer: &lvalue, or a temp for an rvalue receiver */
+      char selfptr[64];
       const char *rty = nt_type(nt, recv);
       if (rty && (!strcmp(rty, "LocalVariableReadNode") || !strcmp(rty, "InstanceVariableReadNode"))) {
-        buf_puts(b, "&"); emit_expr(c, recv, b);
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+        char tmp[64];
+        snprintf(tmp, sizeof tmp, "&%s", rb.p ? rb.p : "");
+        snprintf(selfptr, sizeof selfptr, "%s", tmp);
+        free(rb.p);
       } else {
         int t = ++g_tmp;
         emit_indent(g_pre, g_indent);
@@ -417,13 +514,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, " _t%d = ", t);
         Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
-        buf_printf(b, "&_t%d", t);
+        snprintf(selfptr, sizeof selfptr, "&_t%d", t);
       }
-      int args = nt_ref(nt, id, "arguments");
-      int argc = 0; const int *argv = NULL;
-      if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
-      for (int k = 0; k < argc; k++) { buf_puts(b, ", "); emit_expr(c, argv[k], b); }
-      buf_puts(b, ")");
+      emit_dispatch(c, cid, name, selfptr, nt_ref(nt, id, "arguments"), b);
       return;
     }
   }
@@ -962,6 +1055,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
   if (!strcmp(ty, "CallNode")) { emit_call(c, id, b); return; }
+  if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) { emit_super(c, id, b); return; }
 
   unsupported(c, id, "expression");
 }
@@ -1299,7 +1393,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
           char base[256];
           if (ln - 1 < sizeof base) {
             memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
-            if (comp_is_writer(&c->classes[ty_object_class(rt)], base)) {
+            if (comp_writer_in_chain(c, ty_object_class(rt), base, NULL)) {
               int args = nt_ref(nt, id, "arguments");
               int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
               if (an >= 1) {
@@ -1346,6 +1440,9 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     return;
   }
   if (!strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) { return; } /* methods emitted separately */
+  if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) {
+    emit_indent(b, indent); emit_super(c, id, b); buf_puts(b, ";\n"); return;
+  }
   if (!strcmp(ty, "IndexOperatorWriteNode")) { emit_index_op_write(c, id, b, indent); return; }
   if (!strcmp(ty, "IfNode"))     { emit_if(c, id, b, indent, 0, 0); return; }
   if (!strcmp(ty, "UnlessNode")) { emit_if(c, id, b, indent, 1, 0); return; }
@@ -1533,7 +1630,7 @@ static void emit_method(Compiler *c, Scope *s, Buf *b) {
 static void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_printf(b, "typedef struct sp_%s_s sp_%s;\n", ci->name, ci->name);
   buf_printf(b, "struct sp_%s_s {\n", ci->name);
-  if (ci->nivars == 0) buf_puts(b, "  char _unused;\n");
+  buf_puts(b, "  mrb_int cls_id;\n");  /* runtime class tag for virtual dispatch */
   for (int i = 0; i < ci->nivars; i++) {
     TyKind t = ci->ivar_types[i];
     if (!is_scalar_ret(t) && t != TY_UNKNOWN) { /* ok */ }
@@ -1547,7 +1644,8 @@ static void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
 
 static void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   int cid = comp_class_index(c, ci->name);
-  int init = comp_method_in_class(c, cid, "initialize");
+  int initcls = cid;
+  int init = comp_method_in_chain(c, cid, "initialize", &initcls);
   buf_printf(b, "static sp_%s sp_%s_new(", ci->name, ci->name);
   if (init >= 0 && c->scopes[init].nparams > 0) {
     Scope *s = &c->scopes[init];
@@ -1561,13 +1659,39 @@ static void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "void");
   }
   buf_printf(b, ") {\n  sp_%s self = {0};\n", ci->name);
+  buf_printf(b, "  self.cls_id = %d;\n", cid);
   if (init >= 0) {
-    buf_printf(b, "  sp_%s_initialize(&self", ci->name);
+    /* an inherited initialize takes the parent's self type */
+    buf_printf(b, "  sp_%s_initialize(", c->classes[initcls].name);
+    if (initcls != cid) buf_printf(b, "(sp_%s *)", c->classes[initcls].name);
+    buf_puts(b, "&self");
     Scope *s = &c->scopes[init];
     for (int i = 0; i < s->nparams; i++) buf_printf(b, ", lv_%s", s->pnames[i]);
     buf_puts(b, ");\n");
   }
   buf_puts(b, "  return self;\n}\n");
+}
+
+/* super(args) / super -> call the parent's same-named method. */
+static void emit_super(Compiler *c, int id, Buf *b) {
+  Scope *s = comp_scope_of(c, id);
+  if (s->class_id < 0 || !s->name) { unsupported(c, id, "super (not in a method)"); }
+  int p = c->classes[s->class_id].parent;
+  int defcls = -1;
+  int mi = p >= 0 ? comp_method_in_chain(c, p, s->name, &defcls) : -1;
+  if (mi < 0) unsupported(c, id, "super (no parent method)");
+  buf_printf(b, "sp_%s_%s((sp_%s *)self", c->classes[defcls].name, s->name, c->classes[defcls].name);
+  /* explicit args, or forward the current method's params for bare super */
+  const char *ty = nt_type(c->nt, id);
+  if (ty && !strcmp(ty, "ForwardingSuperNode")) {
+    for (int i = 0; i < s->nparams; i++) buf_printf(b, ", lv_%s", s->pnames[i]);
+  } else {
+    int args = nt_ref(c->nt, id, "arguments");
+    int argc = 0; const int *argv = NULL;
+    if (args >= 0) argv = nt_arr(c->nt, args, "arguments", &argc);
+    for (int k = 0; k < argc; k++) { buf_puts(b, ", "); emit_expr(c, argv[k], b); }
+  }
+  buf_puts(b, ")");
 }
 
 /* ---- top level ---- */

@@ -38,6 +38,7 @@ typedef struct {
 typedef struct {
   char *name;          /* class name ("Point") */
   int def_node;        /* ClassNode id */
+  int parent;          /* superclass index, or -1 */
   char **ivars;        /* instance variable names, incl. leading '@' */
   TyKind *ivar_types;
   int nivars, civars;
@@ -84,6 +85,12 @@ int        comp_ivar_index(ClassInfo *ci, const char *name);  /* -1 if none */
 int        comp_ivar_intern(ClassInfo *ci, const char *name); /* find or add; returns index */
 /* Find the method scope index for class_id + method name, or -1. */
 int        comp_method_in_class(Compiler *c, int class_id, const char *name);
+/* Like comp_method_in_class but walks the superclass chain. On success,
+   *def_class (if non-NULL) is set to the class that defines the method. */
+int        comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
+/* Walk the chain for an attr reader/writer; returns 1 and the owning class. */
+int        comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
+int        comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
 void       comp_add_reader(ClassInfo *ci, const char *name);
 void       comp_add_writer(ClassInfo *ci, const char *name);
 int        comp_is_reader(ClassInfo *ci, const char *name);

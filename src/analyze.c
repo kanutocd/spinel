@@ -54,12 +54,12 @@ static TyKind infer_call(Compiler *c, int id) {
     }
   }
 
-  /* obj.method(...) -> the method's return type */
+  /* obj.method(...) -> the method's return type (walks the superclass chain) */
   if (recv >= 0 && ty_is_object(rt)) {
     int cid = ty_object_class(rt);
     ClassInfo *cls = &c->classes[cid];
     /* attr reader */
-    if (comp_is_reader(cls, name)) {
+    if (comp_reader_in_chain(c, cid, name, NULL)) {
       char ivn[256];
       snprintf(ivn, sizeof ivn, "@%s", name);
       int iv = comp_ivar_index(cls, ivn);
@@ -71,15 +71,30 @@ static TyKind infer_call(Compiler *c, int id) {
       char base[256];
       if (ln - 1 < sizeof base) {
         memcpy(base, name, ln - 1); base[ln - 1] = '\0';
-        if (comp_is_writer(cls, base) && argc >= 1) return infer_type(c, argv[0]);
+        if (comp_writer_in_chain(c, cid, base, NULL) && argc >= 1) return infer_type(c, argv[0]);
       }
     }
-    int mi = comp_method_in_class(c, cid, name);
+    int mi = comp_method_in_chain(c, cid, name, NULL);
     if (mi >= 0) return c->scopes[mi].ret;
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
   }
 
-  /* user-defined method call (no receiver) */
+  /* implicit-self call inside an instance method */
+  if (recv < 0) {
+    Scope *self = comp_scope_of(c, id);
+    if (self->class_id >= 0) {
+      if (comp_reader_in_chain(c, self->class_id, name, NULL)) {
+        char ivn[256];
+        snprintf(ivn, sizeof ivn, "@%s", name);
+        int iv = comp_ivar_index(&c->classes[self->class_id], ivn);
+        if (iv >= 0) return c->classes[self->class_id].ivar_types[iv];
+      }
+      int mi = comp_method_in_chain(c, self->class_id, name, NULL);
+      if (mi >= 0) return c->scopes[mi].ret;
+    }
+  }
+
+  /* user-defined free-function call (no receiver) */
   if (recv < 0) {
     int mi = comp_method_index(c, name);
     if (mi >= 0) return c->scopes[mi].ret;
@@ -276,6 +291,14 @@ static TyKind infer_uncached(Compiler *c, int id) {
     }
     return ty_hash_of(kt, vt);
   }
+  if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) {
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0 || !s->name) return TY_UNKNOWN;
+    int p = c->classes[s->class_id].parent;
+    if (p < 0) return TY_UNKNOWN;
+    int mi = comp_method_in_chain(c, p, s->name, NULL);
+    return mi >= 0 ? c->scopes[mi].ret : TY_UNKNOWN;
+  }
   if (!strcmp(ty, "CallNode")) return infer_call(c, id);
 
   return TY_UNKNOWN;
@@ -404,6 +427,65 @@ static void register_attrs(Compiler *c) {
   }
 }
 
+/* Resolve each class's superclass index from its ClassNode. */
+static void resolve_parents(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int i = 0; i < c->nclasses; i++) {
+    int sc = nt_ref(nt, c->classes[i].def_node, "superclass");
+    if (sc < 0) continue;
+    const char *sty = nt_type(nt, sc);
+    if (sty && !strcmp(sty, "ConstantReadNode")) {
+      int p = comp_class_index(c, nt_str(nt, sc, "name"));
+      if (p >= 0 && p != i) c->classes[i].parent = p;
+    }
+  }
+}
+
+/* Merge inherited ivar/reader/writer NAMES into subclasses so the struct
+   layout is [parent ivars..., own ivars...] (cast-compatible). Types are
+   propagated later in the fixpoint. Parent-first order. */
+static void inherit_members(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++) {
+    ClassInfo *ci = &c->classes[i];
+    int p = ci->parent;
+    if (p < 0 || p >= i) continue;  /* parent defined earlier; already merged */
+    ClassInfo *pc = &c->classes[p];
+
+    char **old = ci->ivars; TyKind *oldt = ci->ivar_types; int oldn = ci->nivars;
+    ci->ivars = NULL; ci->ivar_types = NULL; ci->nivars = ci->civars = 0;
+    for (int k = 0; k < pc->nivars; k++) {
+      int idx = comp_ivar_intern(ci, pc->ivars[k]);
+      ci->ivar_types[idx] = pc->ivar_types[k];
+    }
+    for (int k = 0; k < oldn; k++) {
+      int idx = comp_ivar_intern(ci, old[k]);
+      ci->ivar_types[idx] = ty_unify(ci->ivar_types[idx], oldt[k]);
+      free(old[k]);
+    }
+    free(old); free(oldt);
+
+    for (int k = 0; k < pc->nreaders; k++) comp_add_reader(ci, pc->readers[k]);
+    for (int k = 0; k < pc->nwriters; k++) comp_add_writer(ci, pc->writers[k]);
+  }
+}
+
+/* Propagate inherited @ivar types parent -> child. */
+static int infer_inherited_ivars(Compiler *c) {
+  int changed = 0;
+  for (int i = 0; i < c->nclasses; i++) {
+    ClassInfo *ci = &c->classes[i];
+    if (ci->parent < 0) continue;
+    ClassInfo *pc = &c->classes[ci->parent];
+    for (int k = 0; k < pc->nivars; k++) {
+      int idx = comp_ivar_index(ci, pc->ivars[k]);
+      if (idx < 0) continue;
+      TyKind merged = ty_unify(ci->ivar_types[idx], pc->ivar_types[k]);
+      if (merged != ci->ivar_types[idx]) { ci->ivar_types[idx] = merged; changed = 1; }
+    }
+  }
+  return changed;
+}
+
 /* @ivar types from their assignments across the class's methods. */
 static int infer_ivar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -530,12 +612,26 @@ static int infer_param_types(Compiler *c) {
   int changed = 0;
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
-    if (!ty || strcmp(ty, "CallNode")) continue;
+    if (!ty) continue;
+    if (!strcmp(ty, "SuperNode")) {
+      Scope *s = comp_scope_of(c, id);
+      if (s->class_id < 0 || !s->name) continue;
+      int p = c->classes[s->class_id].parent;
+      if (p < 0) continue;
+      changed |= bind_call_params(c, id, comp_method_in_chain(c, p, s->name, NULL));
+      continue;
+    }
+    if (strcmp(ty, "CallNode")) continue;
     const char *name = nt_str(nt, id, "name");
     int recv = nt_ref(nt, id, "receiver");
 
     if (recv < 0) {
-      changed |= bind_call_params(c, id, comp_method_index(c, name));
+      int mi = comp_method_index(c, name);
+      if (mi < 0) {
+        Scope *self = comp_scope_of(c, id);
+        if (self->class_id >= 0) mi = comp_method_in_chain(c, self->class_id, name, NULL);
+      }
+      changed |= bind_call_params(c, id, mi);
       continue;
     }
     /* Class.new -> initialize params */
@@ -654,6 +750,8 @@ void analyze_program(Compiler *c) {
   walk_scope(c, c->nt->root_id, 0, -1);
   register_locals(c);
   register_attrs(c);
+  resolve_parents(c);
+  inherit_members(c);
 
   /* intern every symbol literal so codegen can emit the id table */
   for (int id = 0; id < c->nt->count; id++) {
@@ -670,6 +768,7 @@ void analyze_program(Compiler *c) {
     ch |= infer_param_types(c);
     ch |= infer_block_params(c);
     ch |= infer_ivar_types(c);
+    ch |= infer_inherited_ivars(c);
     ch |= infer_return_types(c);
     if (!ch) break;
   }
