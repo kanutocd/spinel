@@ -1789,8 +1789,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     const char *k = array_kind(rt);
     if (k) {
       if ((!strcmp(name, "to_a") || !strcmp(name, "to_ary") || !strcmp(name, "entries") ||
-           (!strcmp(name, "flatten") && argc == 0)) && argc == 0) {
-        /* a scalar-element array has nothing to flatten: identity */
+           !strcmp(name, "flatten") || !strcmp(name, "compact")) && argc == 0) {
+        /* a scalar-element array can't nest or hold nil: these are identity */
         emit_expr(c, recv, b); return;
       }
       if (!strcmp(name, "[]") && argc == 1 && nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "RangeNode")) {
