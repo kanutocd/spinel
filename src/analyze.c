@@ -209,6 +209,17 @@ static TyKind infer_call(Compiler *c, int id) {
   TyKind rt = recv >= 0 ? infer_type(c, recv) : TY_UNKNOWN;
   TyKind a0 = argc >= 1 ? infer_type(c, argv[0]) : TY_UNKNOWN;
 
+  /* an empty array literal used directly as a receiver (`[].flatten`) has no
+     usage to fold an element type from; treat it as an empty poly array so
+     array methods dispatch instead of falling through to unresolved. */
+  if (rt == TY_UNKNOWN && recv >= 0) {
+    const char *rty = nt_type(nt, recv);
+    if (rty && !strcmp(rty, "ArrayNode")) {
+      int en = 0; nt_arr(nt, recv, "elements", &en);
+      if (en == 0) rt = TY_POLY_ARRAY;
+    }
+  }
+
   /* `<&block-param>.call(...)` inside a yielding method: the explicit-call form
      of yield. Its value is the call-site block's value (resolved like yield). */
   {
@@ -458,7 +469,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append") ||
         !strcmp(name, "reverse") || !strcmp(name, "sort") || !strcmp(name, "uniq") ||
         !strcmp(name, "to_a") || !strcmp(name, "dup") || !strcmp(name, "clone") ||
-        !strcmp(name, "compact"))   return rt;
+        !strcmp(name, "compact") || !strcmp(name, "flatten")) return rt;
     if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
   }
 

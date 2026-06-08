@@ -1031,6 +1031,26 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   TyKind a0 = argc >= 1 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
   TyKind res = comp_ntype(c, id);
 
+  /* an empty array literal as a receiver: its node type is unknown (element
+     type is usage-folded, but a bare literal has no usage). Handle the common
+     methods directly against an empty (poly) array. */
+  if (recv >= 0 && rt == TY_UNKNOWN) {
+    const char *rty = nt_type(nt, recv);
+    if (rty && !strcmp(rty, "ArrayNode")) {
+      int en = 0; nt_arr(nt, recv, "elements", &en);
+      if (en == 0) {
+        if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) { buf_puts(b, "0"); return; }
+        if (!strcmp(name, "empty?") && argc == 0) { buf_puts(b, "1"); return; }
+        if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) { buf_puts(b, "\"[]\""); return; }
+        if ((!strcmp(name, "flatten") || !strcmp(name, "compact") || !strcmp(name, "uniq") ||
+             !strcmp(name, "sort") || !strcmp(name, "reverse") || !strcmp(name, "dup") ||
+             !strcmp(name, "clone") || !strcmp(name, "to_a")) && argc <= 1) {
+          buf_puts(b, "sp_PolyArray_new()"); return;
+        }
+      }
+    }
+  }
+
   if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0) {
     buf_puts(b, name[0] == '-' ? "(-" : "(+");
     emit_expr(c, recv, b); buf_puts(b, ")");
@@ -1715,7 +1735,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && ty_is_array(rt)) {
     const char *k = array_kind(rt);
     if (k) {
-      if ((!strcmp(name, "to_a") || !strcmp(name, "to_ary") || !strcmp(name, "entries")) && argc == 0) {
+      if ((!strcmp(name, "to_a") || !strcmp(name, "to_ary") || !strcmp(name, "entries") ||
+           (!strcmp(name, "flatten") && argc == 0)) && argc == 0) {
+        /* a scalar-element array has nothing to flatten: identity */
         emit_expr(c, recv, b); return;
       }
       if (!strcmp(name, "[]") && argc == 1 && nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "RangeNode")) {
@@ -1839,6 +1861,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       if (!strcmp(name, "compact") && argc == 0) {
         buf_puts(b, "sp_PolyArray_compact("); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "flatten") && argc <= 1) {
+        if (argc == 1) { buf_puts(b, "sp_PolyArray_flatten_n("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        else { buf_puts(b, "sp_PolyArray_flatten("); emit_expr(c, recv, b); buf_puts(b, ")"); }
         return;
       }
       if (!strcmp(name, "join") && argc == 1) {
