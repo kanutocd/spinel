@@ -890,6 +890,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_PolyArray_get("); emit_expr(c, recv, b); buf_puts(b, ", 0)");
         return;
       }
+      if (!strcmp(name, "to_a") && argc == 0) { emit_expr(c, recv, b); return; }
+      if (!strcmp(name, "last") && argc == 0) {
+        int t = ++g_tmp;
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_PolyArray *_t%d = ", t);
+        buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        buf_printf(b, "sp_PolyArray_get(_t%d, sp_PolyArray_length(_t%d) - 1)", t, t);
+        return;
+      }
       if (!strcmp(name, "include?") && argc == 1) {
         buf_puts(b, "sp_PolyArray_include("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
         return;
@@ -1109,6 +1119,29 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_expr(c, argv[0], b); buf_puts(b, ", ");
       emit_expr(c, argv[1], b); buf_puts(b, ");\n");
+      return 1;
+    }
+    return 0;
+  }
+
+  if (rt == TY_POLY_ARRAY) {
+    if (!strcmp(name, "[]=") && argc == 2) {
+      emit_indent(b, indent);
+      buf_puts(b, "sp_PolyArray_set("); emit_expr(c, recv, b); buf_puts(b, ", ");
+      emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ");\n");
+      return 1;
+    }
+    if ((!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append")) && argc >= 1) {
+      for (int a = 0; a < argc; a++) {
+        emit_indent(b, indent);
+        buf_puts(b, "sp_PolyArray_push("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[a], b); buf_puts(b, ");\n");
+      }
+      return 1;
+    }
+    if (!strcmp(name, "clear") && argc == 0) {
+      emit_indent(b, indent);
+      buf_puts(b, "("); emit_expr(c, recv, b); buf_puts(b, ")->len = 0;\n");
       return 1;
     }
     return 0;
