@@ -5714,7 +5714,29 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     const char *vty = nt_type(nt, value);
     int en = 0;
     const int *els = (vty && !strcmp(vty, "ArrayNode")) ? nt_arr(nt, value, "elements", &en) : NULL;
-    if (!els || en < ln) unsupported(c, id, "multiple assignment");
+    if (!els) {
+      /* scalar RHS (`a, b = 1`): the first target takes the value, the rest
+         their slot default (Ruby gives nil; we land the typed zero). A call /
+         super / yield can return a multi-value tuple, so those are excluded
+         and fall through to the tuple-destructuring path. */
+      TyKind st = comp_ntype(c, value);
+      int multi_src = vty && (!strcmp(vty, "CallNode") || !strcmp(vty, "SuperNode") ||
+                              !strcmp(vty, "ForwardingSuperNode") || !strcmp(vty, "YieldNode"));
+      if (vty && !multi_src && !ty_is_array(st) && !ty_is_hash(st) && st != TY_UNKNOWN) {
+        for (int i = 0; i < ln; i++) {
+          const char *lty = nt_type(nt, lefts[i]);
+          if (!lty || strcmp(lty, "LocalVariableTargetNode")) continue;
+          emit_indent(b, indent);
+          buf_printf(b, "lv_%s = ", nt_str(nt, lefts[i], "name"));
+          if (i == 0) emit_expr(c, value, b);
+          else buf_puts(b, default_value(comp_ntype(c, lefts[i])));
+          buf_puts(b, ";\n");
+        }
+        return;
+      }
+      unsupported(c, id, "multiple assignment");
+    }
+    if (en < ln) unsupported(c, id, "multiple assignment");
     /* evaluate all RHS values into temps first (so `a, b = b, a` swaps) */
     int base = g_tmp + 1;
     for (int i = 0; i < ln; i++) {

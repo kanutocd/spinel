@@ -1528,7 +1528,26 @@ static int infer_write_types(Compiler *c) {
     const int *lefts = nt_arr(nt, id, "lefts", &ln);
     int value = nt_ref(nt, id, "value");
     const char *vty = nt_type(nt, value);
-    if (!vty || strcmp(vty, "ArrayNode")) continue;
+    if (!vty || strcmp(vty, "ArrayNode")) {
+      /* scalar RHS (`a, b = 1`): the first target gets the scalar, the rest
+         their slot default. Type every target as the scalar's kind. Array /
+         hash RHS would splat and is handled elsewhere, so skip those. */
+      int multi_src = vty && (!strcmp(vty, "CallNode") || !strcmp(vty, "SuperNode") ||
+                              !strcmp(vty, "ForwardingSuperNode") || !strcmp(vty, "YieldNode"));
+      if (vty && value >= 0 && !multi_src) {
+        TyKind st = infer_type(c, value);
+        if (st != TY_UNKNOWN && st != TY_NIL && !ty_is_array(st) && !ty_is_hash(st)) {
+          for (int i = 0; i < ln; i++) {
+            if (strcmp(nt_type(nt, lefts[i]) ? nt_type(nt, lefts[i]) : "", "LocalVariableTargetNode")) continue;
+            const char *lnm = nt_str(nt, lefts[i], "name");
+            LocalVar *lv = lnm ? scope_local(comp_scope_of(c, id), lnm) : NULL;
+            if (!lv || lv->is_param || lv->is_block_param) continue;
+            lv->type = ty_unify(lv->type, st);
+          }
+        }
+      }
+      continue;
+    }
     int en = 0;
     const int *els = nt_arr(nt, value, "elements", &en);
     for (int i = 0; i < ln && i < en; i++) {
