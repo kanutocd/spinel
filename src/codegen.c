@@ -2732,6 +2732,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "even?"))  buf_printf(b, "((%s) %% 2 == 0)", r);
       else if (!strcmp(name, "odd?"))   buf_printf(b, "((%s) %% 2 != 0)", r);
       else if (!strcmp(name, "zero?"))  buf_printf(b, "((%s) == 0)", r);
+      else if (!strcmp(name, "nonzero?")) buf_printf(b, "((%s) == 0 ? SP_INT_NIL : (%s))", r, r);
       else if (!strcmp(name, "positive?")) buf_printf(b, "((%s) > 0)", r);
       else if (!strcmp(name, "negative?")) buf_printf(b, "((%s) < 0)", r);
       else if (!strcmp(name, "divmod") && argc == 1) {
