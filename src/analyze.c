@@ -645,6 +645,9 @@ static TyKind infer_call(Compiler *c, int id) {
   /* float receiver methods */
   if (recv >= 0 && rt == TY_FLOAT) {
     if (!strcmp(name, "divmod") && argc == 1) return TY_POLY_ARRAY;  /* [Integer, Float] */
+    if (!strcmp(name, "infinite?")) return TY_INT;   /* nil / 1 / -1 (nullable int) */
+    if (!strcmp(name, "nan?") || !strcmp(name, "finite?") ||
+        !strcmp(name, "positive?") || !strcmp(name, "negative?")) return TY_BOOL;
     if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) {
       /* value-based return type: ndigits > 0 (literal) -> Float, else Integer */

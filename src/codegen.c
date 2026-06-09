@@ -2561,6 +2561,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "inspect")) buf_printf(b, "sp_float_opt_inspect(%s)", r);
       else if (!strcmp(name, "abs"))   buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "zero?")) buf_printf(b, "((%s) == 0.0)", r);
+      else if (!strcmp(name, "nan?"))  buf_printf(b, "(isnan(%s) != 0)", r);
+      else if (!strcmp(name, "finite?")) buf_printf(b, "(isfinite(%s) != 0)", r);
+      else if (!strcmp(name, "infinite?")) buf_printf(b, "(isinf(%s) ? ((%s) > 0 ? 1LL : -1LL) : SP_INT_NIL)", r, r);
+      else if (!strcmp(name, "positive?")) buf_printf(b, "((%s) > 0)", r);
+      else if (!strcmp(name, "negative?")) buf_printf(b, "((%s) < 0)", r);
       else handled = 0;
     }
     free(rs.p);
