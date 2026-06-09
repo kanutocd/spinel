@@ -538,7 +538,15 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "index") && (rt == TY_INT_ARRAY || rt == TY_STR_ARRAY)) return TY_POLY;
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count") || !strcmp(name, "index")) return TY_INT;
-    if (!strcmp(name, "sum"))                         return ty_array_elem(rt);
+    if (!strcmp(name, "sum")) {
+      int blk = nt_ref(nt, id, "block");
+      if (blk >= 0) {
+        int body = nt_ref(nt, blk, "body");
+        int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+        return bn > 0 ? infer_type(c, bb[bn - 1]) : ty_array_elem(rt);
+      }
+      return ty_array_elem(rt);
+    }
     if (!strcmp(name, "inject") || !strcmp(name, "reduce")) return ty_array_elem(rt);
     if (!strcmp(name, "tally") && argc == 0) {
       if (rt == TY_INT_ARRAY) return TY_INT_INT_HASH;
@@ -2032,6 +2040,7 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "max_by") || !strcmp(name, "min_by") || !strcmp(name, "sort_by") ||
               !strcmp(name, "take_while") || !strcmp(name, "drop_while") ||
               !strcmp(name, "reverse_each") || !strcmp(name, "each_entry") ||
+              !strcmp(name, "sum") ||
               !strcmp(name, "each_with_index")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);

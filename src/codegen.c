@@ -696,6 +696,42 @@ static int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* array.sum([init]) { |x| f(x) } as an expression: sum the block's result
+   over every element. Returns 1 if handled. */
+static int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "sum")) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+  if (!k) return 0;
+  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+  TyKind acct = comp_ntype(c, bb[bn - 1]);
+  if (acct != TY_INT && acct != TY_FLOAT) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp;
+  buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
+  buf_printf(b, "; mrb_int _t%d = sp_%sArray_length(_t%d); ", tn, k, ta);
+  emit_ctype(c, acct, b); buf_printf(b, " _t%d = ", tacc);
+  if (argc == 1) emit_expr(c, argv[0], b); else buf_puts(b, acct == TY_FLOAT ? "0.0" : "0");
+  buf_printf(b, "; for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) { ", ti, ti, tn, ti);
+  if (p0) buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d); ", p0, k, ta, ti);
+  buf_printf(b, "_t%d = ", tacc);
+  if (acct == TY_INT) { buf_printf(b, "sp_int_add(_t%d, ", tacc); emit_expr(c, bb[bn - 1], b); buf_puts(b, ")"); }
+  else { buf_printf(b, "_t%d + ", tacc); emit_expr(c, bb[bn - 1], b); }
+  buf_printf(b, "; } _t%d; })", tacc);
+  return 1;
+}
+
 /* inject(:op) / reduce(:op) / inject(&:op) / inject(init, :op) as an
    expression: fold the array with a symbol-named arithmetic operator. The
    block-fold form (inject { |a, e| ... }) is not handled here. Returns 1 if
@@ -1180,6 +1216,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (emit_grep_expr(c, id, b)) return;
   if (emit_minmax_by_expr(c, id, b)) return;
   if (emit_bsearch_expr(c, id, b)) return;
+  if (emit_sum_block_expr(c, id, b)) return;
   if (emit_transform_hash_expr(c, id, b)) return;
   if (emit_gsub_block_expr(c, id, b)) return;
   if (emit_inject_expr(c, id, b)) return;
