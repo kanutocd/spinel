@@ -5661,6 +5661,25 @@ static int emit_inline_expr(Compiler *c, int id, Buf *b) {
 
 /* Block iteration lowered to an inline C for-loop. Handles n.times,
    array.each, range.each, n.upto/downto. Returns 1 if handled. */
+/* Emit `lv_<p0> = <expr_src>` boxing if p0 is poly and src is concrete. */
+static void emit_iter_param_assign(Compiler *c, int block, const char *p0_orig,
+                                   const char *p0_ren, TyKind src_type,
+                                   const char *src_expr, Buf *b, int indent) {
+  Scope *sc = comp_scope_of(c, block);
+  LocalVar *lv = sc ? scope_local(sc, p0_orig) : NULL;
+  TyKind pt = lv ? lv->type : src_type;
+  emit_indent(b, indent);
+  if (pt == TY_POLY && src_type != TY_POLY) {
+    Buf bx; memset(&bx, 0, sizeof bx);
+    emit_boxed_text(c, src_type, src_expr, &bx);
+    buf_printf(b, "lv_%s = %s;\n", p0_ren, bx.p ? bx.p : src_expr);
+    free(bx.p);
+  }
+  else {
+    buf_printf(b, "lv_%s = %s;\n", p0_ren, src_expr);
+  }
+}
+
 static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int block = nt_ref(nt, id, "block");
@@ -5680,7 +5699,8 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
 
   if (recv < 0) return 0;
   int body = nt_ref(nt, block, "body");
-  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  const char *p0_orig = block_param_name(c, block, 0);
+  const char *p0 = p0_orig ? rename_local(p0_orig) : NULL;
   TyKind rt = comp_ntype(c, recv);
 
   /* n.times { |i| ... } */
@@ -5691,7 +5711,7 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < ", t, t);
     buf_puts(b, rb.p); buf_printf(b, "; _t%d++) {\n", t);
-    if (p0) { emit_indent(b, indent + 1); buf_printf(b, "lv_%s = _t%d;\n", p0, t); }
+    if (p0) { char ts[32]; snprintf(ts, sizeof ts, "_t%d", t); emit_iter_param_assign(c, block, p0_orig, p0, TY_INT, ts, b, indent + 1); }
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     free(rb.p);
@@ -5718,7 +5738,7 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "for (mrb_int _t%d = ", t); emit_expr(c, recv, b);
       buf_printf(b, "; _t%d >= 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
                  ts, t, tl, t, tl, t, ts);
-      if (p0) { emit_indent(b, indent + 1); buf_printf(b, "lv_%s = _t%d;\n", p0, t); }
+      if (p0) { char ts2[32]; snprintf(ts2, sizeof ts2, "_t%d", t); emit_iter_param_assign(c, block, p0_orig, p0, TY_INT, ts2, b, indent + 1); }
       emit_stmts(c, body, b, indent + 1);
       emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;
@@ -5739,7 +5759,7 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "mrb_int _t%d = (mrb_int)floor((_t%d-_t%d)/_t%d + _t%d_e);\n", tn, tl, tb, ts, tn);
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d <= _t%d; _t%d++) {\n", ti, ti, tn, ti);
-    if (p0) { emit_indent(b, indent + 1); buf_printf(b, "lv_%s = _t%d + _t%d * _t%d;\n", p0, tb, ti, ts); }
+    if (p0) { char fp_expr[64]; snprintf(fp_expr, sizeof fp_expr, "_t%d + _t%d * _t%d", tb, ti, ts); emit_iter_param_assign(c, block, p0_orig, p0, TY_FLOAT, fp_expr, b, indent + 1); }
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
