@@ -653,6 +653,7 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "first") || !strcmp(name, "last") ||
         !strcmp(name, "size") || !strcmp(name, "count") ||
         !strcmp(name, "begin") || !strcmp(name, "end"))  return TY_INT;
+    if (!strcmp(name, "bsearch")) return TY_INT;  /* a member, or nil (nullable int) */
     int block = nt_ref(nt, id, "block");
     if (block >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
       int body = nt_ref(nt, block, "body");
@@ -1984,7 +1985,8 @@ static int infer_block_params(Compiler *c) {
     else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||
               !strcmp(name, "find") || !strcmp(name, "detect") || !strcmp(name, "each_with_index") ||
-              !strcmp(name, "sort_by") || !strcmp(name, "find_all") || !strcmp(name, "count")) && rt == TY_RANGE)
+              !strcmp(name, "sort_by") || !strcmp(name, "find_all") || !strcmp(name, "count") ||
+              !strcmp(name, "bsearch")) && rt == TY_RANGE)
       pt = TY_INT;
     else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||

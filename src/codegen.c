@@ -507,6 +507,42 @@ static int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* (lo..hi).bsearch { |x| cond } in find-minimum mode: binary search for the
+   smallest member where the block is truthy, or nil (the SP_INT_NIL sentinel)
+   when none qualifies. Loop in the statement prelude; value is the result.
+   Returns 1 if handled. */
+static int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "bsearch")) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || comp_ntype(c, recv) != TY_RANGE) return 0;
+  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+  int tr = ++g_tmp, tlo = ++g_tmp, thi = ++g_tmp, tres = ++g_tmp, tmid = ++g_tmp;
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_Range _t%d = ", tr); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = _t%d.first;\n", tlo, tr);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = _t%d.last - _t%d.excl;\n", thi, tr, tr);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = SP_INT_NIL;\n", tres);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tlo, thi);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "mrb_int _t%d = _t%d + (_t%d - _t%d) / 2;\n", tmid, tlo, thi, tlo);
+  if (p0) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tmid); }
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+  int save = g_indent; g_indent++;
+  Buf cb; memset(&cb, 0, sizeof cb); emit_expr(c, bb[bn - 1], &cb); g_indent = save;
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "if (%s) { _t%d = _t%d; _t%d = _t%d - 1; }\n", cb.p ? cb.p : "0", tres, tmid, thi, tmid); free(cb.p);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "else { _t%d = _t%d + 1; }\n", tlo, tmid);
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  buf_printf(b, "_t%d", tres);
+  return 1;
+}
+
 /* array.max_by / min_by { |x| key } -> the element with the largest/smallest
    (int/float) key. Loop in the statement prelude; value is the best element. */
 static int emit_minmax_by_expr(Compiler *c, int id, Buf *b) {
@@ -1031,6 +1067,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (emit_predicate_expr(c, id, b)) return;
   if (emit_grep_expr(c, id, b)) return;
   if (emit_minmax_by_expr(c, id, b)) return;
+  if (emit_bsearch_expr(c, id, b)) return;
   if (emit_inject_expr(c, id, b)) return;
   if (emit_sortby_expr(c, id, b)) return;
   if (emit_inline_expr(c, id, b)) return;  /* value-returning yield method */
