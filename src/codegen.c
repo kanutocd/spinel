@@ -3086,46 +3086,73 @@ static void emit_interp(Compiler *c, int id, Buf *b) {
       int bn = 0;
       const int *body = s >= 0 ? nt_arr(nt, s, "body", &bn) : NULL;
       int expr = bn > 0 ? body[bn - 1] : -1;
+      /* `#{ s1; s2; ...; sN }` evaluates every statement in order and uses sN's
+         value. Run the leading statements for side effects; if sN is itself an
+         assignment, perform it and read the assigned variable back as the value. */
+      char vexpr[48]; vexpr[0] = 0;
+      for (int si = 0; si + 1 < bn; si++) emit_stmt(c, body[si], g_pre, g_indent);
+      const char *ety = expr >= 0 ? nt_type(nt, expr) : NULL;
       TyKind t = comp_ntype(c, expr);
+      if (ety && (!strcmp(ety, "LocalVariableWriteNode") || !strcmp(ety, "LocalVariableOperatorWriteNode") ||
+                  !strcmp(ety, "LocalVariableOrWriteNode") || !strcmp(ety, "LocalVariableAndWriteNode"))) {
+        emit_stmt(c, expr, g_pre, g_indent);
+        const char *vn = nt_str(nt, expr, "name");
+        LocalVar *lvp = vn ? scope_local(comp_scope_of(c, expr), vn) : NULL;
+        if (lvp) t = lvp->type;
+        int tv = ++g_tmp;
+        emit_indent(g_pre, g_indent); emit_ctype(c, t, g_pre);
+        buf_printf(g_pre, " _t%d = ", tv); emit_local_ref(c, expr, vn, g_pre); buf_puts(g_pre, ";\n");
+        snprintf(vexpr, sizeof vexpr, "_t%d", tv);
+      }
+      #define EMIT_IV() do { if (vexpr[0]) buf_puts(&argbuf, vexpr); else emit_expr(c, expr, &argbuf); } while (0)
       buf_puts(&argbuf, ", ");
       if (t == TY_INT) {
         buf_puts(&fmt, "%lld"); buf_puts(&argbuf, "(long long)");
-        emit_expr(c, expr, &argbuf);
+        EMIT_IV();
       }
       else if (t == TY_STRING) {
-        buf_puts(&fmt, "%s"); emit_expr(c, expr, &argbuf);
+        buf_puts(&fmt, "%s"); EMIT_IV();
       }
       else if (t == TY_FLOAT) {
         buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_float_to_s(");
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
       }
       else if (t == TY_BOOL) {
         buf_puts(&fmt, "%s"); buf_puts(&argbuf, "(");
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, " ? \"true\" : \"false\")");
+        EMIT_IV(); buf_puts(&argbuf, " ? \"true\" : \"false\")");
       }
       else if (t == TY_SYMBOL) {
         buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_sym_to_s(");
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
       }
       else if (t == TY_POLY) {
         buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_poly_to_s(");
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_EXCEPTION) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_exc_message(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_NIL) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "((void)(");
+        EMIT_IV(); buf_puts(&argbuf, "), \"\")");
       }
       else if (t == TY_POLY_ARRAY) {
         buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_PolyArray_inspect(");
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
       }
       else if (ty_is_array(t) && array_kind(t)) {
         buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sArray_inspect(", array_kind(t));
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
       }
       else if (ty_is_object(t) && comp_method_in_chain(c, ty_object_class(t), "to_s", NULL) >= 0) {
         buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%s_to_s(", c->classes[ty_object_class(t)].name);
-        emit_expr(c, expr, &argbuf); buf_puts(&argbuf, ")");
+        EMIT_IV(); buf_puts(&argbuf, ")");
       }
       else {
         free(fmt.p); free(argbuf.p);
         unsupported(c, pid, "interpolation value");
+      #undef EMIT_IV
       }
       nargs++;
     }
