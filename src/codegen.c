@@ -1236,7 +1236,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0) {
+  if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0 && !ty_is_object(rt)) {
     buf_puts(b, name[0] == '-' ? "(-" : "(+");
     emit_expr(c, recv, b); buf_puts(b, ")");
     return;
@@ -1273,7 +1273,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  if (recv >= 0 && argc == 1 && int_arith_fn(name)) {
+  if (recv >= 0 && argc == 1 && int_arith_fn(name) && !ty_is_object(rt)) {
     if (rt == TY_STRING && !strcmp(name, "+")) {
       buf_puts(b, "sp_str_concat(");
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
@@ -1654,10 +1654,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       else {
         int t = ++g_tmp;
+        /* emit the receiver first so any setup it pushes into g_pre is fully
+           flushed before we write this temp's declaration line */
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
         emit_indent(g_pre, g_indent);
         emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", t);
-        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
         snprintf(selfptr, sizeof selfptr, "_t%d", t);
       }
