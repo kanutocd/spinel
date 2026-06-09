@@ -3593,15 +3593,21 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
   }
-  if (!strcmp(name, "each") && ty_is_array(rt)) {
-    const char *k = array_kind(rt);
+  if ((!strcmp(name, "each") || !strcmp(name, "each_entry") || !strcmp(name, "reverse_each")) &&
+      ty_is_array(rt)) {
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
     if (!k) return 0;
-    int t = ++g_tmp;
+    int rev = !strcmp(name, "reverse_each");
+    int t = ++g_tmp, tn = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb);
     emit_expr(c, recv, &rb);
+    if (rev) { emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = sp_%sArray_length(%s);\n", tn, k, rb.p); }
     emit_indent(b, indent);
-    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(", t, t, k);
-    buf_puts(b, rb.p); buf_printf(b, "); _t%d++) {\n", t);
+    if (rev) buf_printf(b, "for (mrb_int _t%d = _t%d - 1; _t%d >= 0; _t%d--) {\n", t, tn, t, t);
+    else {
+      buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(", t, t, k);
+      buf_puts(b, rb.p); buf_printf(b, "); _t%d++) {\n", t);
+    }
     if (p0) {
       emit_indent(b, indent + 1);
       buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);

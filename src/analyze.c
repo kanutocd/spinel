@@ -1928,6 +1928,7 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "find") || !strcmp(name, "detect") ||
               !strcmp(name, "max_by") || !strcmp(name, "min_by") || !strcmp(name, "sort_by") ||
               !strcmp(name, "take_while") || !strcmp(name, "drop_while") ||
+              !strcmp(name, "reverse_each") || !strcmp(name, "each_entry") ||
               !strcmp(name, "each_with_index")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
