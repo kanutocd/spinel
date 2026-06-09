@@ -4527,13 +4527,19 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int sc = comp_scope_of(c, id)->class_id;
     TyKind vt = TY_UNKNOWN;
     if (sc >= 0) { int iv = comp_ivar_index(&c->classes[sc], nm); if (iv >= 0) vt = c->classes[sc].ivar_types[iv]; }
+    char ref[300];
+    Scope *cs = comp_scope_of(c, id);
+    if (cs && cs->is_cmethod && cs->class_id >= 0)
+      snprintf(ref, sizeof ref, "civ_%s_%s", c->classes[cs->class_id].name, nm + 1);
+    else
+      snprintf(ref, sizeof ref, "%s->iv_%s", g_self, nm + 1);
     emit_indent(b, indent);
     if (vt == TY_STRING && op && !strcmp(op, "+")) {
-      buf_printf(b, "%s->iv_%s = sp_str_concat(%s->iv_%s, ", g_self, nm + 1, g_self, nm + 1);
+      buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ");\n");
     }
     else {
-      buf_printf(b, "%s->iv_%s %s= ", g_self, nm + 1, op ? op : "+");
+      buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ";\n");
     }
     return;
