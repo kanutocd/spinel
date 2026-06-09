@@ -3673,6 +3673,39 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
+  /* array.each_cons(n) { |a, b, ...| } -- sliding window of n consecutive
+     elements; a single param binds the n-element sub-array, multiple params
+     destructure the window */
+  if (!strcmp(name, "each_cons") && ty_is_array(rt)) {
+    int args = nt_ref(nt, id, "arguments");
+    int ec = 0; const int *eav = args >= 0 ? nt_arr(nt, args, "arguments", &ec) : NULL;
+    if (ec != 1) return 0;
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    if (!k) return 0;
+    int np = 0; while (block_param_name(c, block, np)) np++;
+    int ta = ++g_tmp, tnn = ++g_tmp, ti = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent); emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = ", tnn); emit_expr(c, eav[0], b); buf_puts(b, ";\n");
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, tnn, k, ta, ti);
+    if (np == 1) {
+      const char *pn = block_param_name(c, block, 0);
+      emit_indent(b, indent + 1);
+      buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", rename_local(pn), k, ta, ti, tnn);
+    }
+    else {
+      for (int pj = 0; pj < np; pj++) {
+        const char *pn = block_param_name(c, block, pj);
+        emit_indent(b, indent + 1);
+        buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n", rename_local(pn), k, ta, ti, pj);
+      }
+    }
+    emit_stmts(c, body, b, indent + 1);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+
   /* (a..b).each { |i| ... } -- any range-typed receiver */
   if (!strcmp(name, "each") && rt == TY_RANGE && p0) {
     int t = ++g_tmp;

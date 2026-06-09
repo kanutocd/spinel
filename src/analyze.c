@@ -1939,6 +1939,21 @@ static int infer_block_params(Compiler *c) {
              ty_is_array(rt))
       pt = ty_array_elem(rt);
 
+    /* array.each_cons(n) { |a, b, ...| } -- a single param binds the n-element
+       sub-array; multiple params destructure consecutive elements */
+    if (!strcmp(name, "each_cons") && ty_is_array(rt)) {
+      Scope *es = comp_scope_of(c, block);
+      int np = 0; while (block_param_name(c, block, np)) np++;
+      for (int pj = 0; pj < np; pj++) {
+        const char *pn = block_param_name(c, block, pj);
+        LocalVar *lp = scope_local_intern(es, pn); lp->is_block_param = 1;
+        TyKind want = (np == 1) ? rt : ty_array_elem(rt);
+        TyKind m = ty_unify(lp->type, want);
+        if (m != lp->type) { lp->type = m; changed = 1; }
+      }
+      continue;
+    }
+
     /* array.each_with_index { |x, i| } binds element + int index */
     if (!strcmp(name, "each_with_index") && ty_is_array(rt)) {
       Scope *es = comp_scope_of(c, block);
