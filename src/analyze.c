@@ -999,8 +999,9 @@ static TyKind infer_uncached(Compiler *c, int id) {
     return r;
   }
   if (!strcmp(ty, "IfNode") || !strcmp(ty, "UnlessNode")) {
+    int is_unless = !strcmp(ty, "UnlessNode");
     int then_b = nt_ref(nt, id, "statements");
-    int else_b = nt_ref(nt, id, "subsequent");
+    int else_b = nt_ref(nt, id, is_unless ? "else_clause" : "subsequent");
     TyKind tt = then_b >= 0 ? infer_type(c, then_b) : TY_NIL;
     TyKind et = else_b >= 0 ? infer_type(c, else_b) : TY_NIL;
     return ty_unify(tt, et);

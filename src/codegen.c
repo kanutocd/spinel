@@ -1331,7 +1331,19 @@ static void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Bu
   TyKind pt = p ? p->type : TY_INT;
   if (provided >= 0) {
     if (pt == TY_POLY) emit_boxed(c, provided, out);   /* box into a poly param */
-    else emit_expr(c, provided, out);
+    else {
+      /* empty array literal `[]` defaults to IntArray in emit_expr; if the
+         parameter expects a different array type, emit the right constructor */
+      int nen = 0;
+      const char *pty_node = nt_type(c->nt, provided);
+      int is_empty_arr = pty_node && !strcmp(pty_node, "ArrayNode") &&
+                         (nt_arr(c->nt, provided, "elements", &nen), nen == 0);
+      if (is_empty_arr && ty_is_array(pt) && pt != TY_INT_ARRAY) {
+        if (pt == TY_POLY_ARRAY) buf_puts(out, "sp_PolyArray_new()");
+        else { const char *k = array_kind(pt); if (k) buf_printf(out, "sp_%sArray_new()", k); else emit_expr(c, provided, out); }
+      }
+      else emit_expr(c, provided, out);
+    }
     return;
   }
   int dv = m->pdefault[idx];
@@ -5206,8 +5218,8 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
        value-expressions */
     int pred = nt_ref(nt, id, "predicate");
     int then_b = nt_ref(nt, id, "statements");
-    int sub = nt_ref(nt, id, "subsequent");
     int is_unless = !strcmp(ty, "UnlessNode");
+    int sub = nt_ref(nt, id, is_unless ? "else_clause" : "subsequent");
     int tn = 0;
     const int *tb = then_b >= 0 ? nt_arr(nt, then_b, "body", &tn) : NULL;
     int else_stmts = -1;
@@ -5637,7 +5649,7 @@ static void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int 
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
   int then_b = nt_ref(nt, id, "statements");
-  int sub = nt_ref(nt, id, "subsequent");
+  int sub = nt_ref(nt, id, is_unless ? "else_clause" : "subsequent");
 
   emit_indent(b, indent);
   buf_puts(b, "if (");
