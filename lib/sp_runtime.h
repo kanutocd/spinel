@@ -2526,6 +2526,10 @@ typedef uint64_t sp_RbValue;
 #define SP_BUILTIN_RANGE (-10) /* sp_Range *, heap copy of stack-typed sp_Range when crossing into poly */
 #define SP_BUILTIN_TIME (-11) /* sp_Time *, heap copy of stack-typed sp_Time when crossing into poly */
 #define SP_BUILTIN_POLY_ARRAY (-12) /* sp_PolyArray *, array of sp_RbVal */
+#define SP_BUILTIN_EXCEPTION (-13) /* sp_Exception *, a rescued exception crossing into poly */
+struct sp_Exception_s;
+static const char *sp_exc_class_name(volatile struct sp_Exception_s *ve);
+static const char *sp_exc_message(volatile struct sp_Exception_s *ve);
 /* Hash variant cls_ids — boxed into the cls_id of a poly slot so
    Hash#dig can recover the concrete hash type at runtime. */
 #define SP_BUILTIN_STR_INT_HASH (-13)
@@ -2803,6 +2807,7 @@ static inline const char *sp_poly_to_s(sp_RbVal v) {
         case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect((sp_PtrArray *)v.v.p);
         case SP_BUILTIN_RANGE: return sp_Range_inspect((sp_Range *)v.v.p);
         case SP_BUILTIN_TIME: return sp_Time_inspect((sp_Time *)v.v.p);
+        case SP_BUILTIN_EXCEPTION: return sp_exc_message((volatile struct sp_Exception_s *)v.v.p);
         default: return sp_str_empty;
       }
     default: return sp_str_empty;
@@ -2827,6 +2832,7 @@ static const char *sp_poly_class_name(sp_RbVal v) {
         case SP_BUILTIN_PTR_ARRAY: return SPL("Array");
         case SP_BUILTIN_RANGE: return SPL("Range");
         case SP_BUILTIN_TIME: return SPL("Time");
+        case SP_BUILTIN_EXCEPTION: return sp_exc_class_name((volatile struct sp_Exception_s *)v.v.p);
         default: { sp_Class c = {v.cls_id}; return sp_class_to_s(c); }
       }
     default: return SPL("Object");
@@ -3321,6 +3327,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
         case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_inspect((sp_PolyArray *)v.v.p);
         case SP_BUILTIN_RANGE:     return sp_Range_inspect((sp_Range *)v.v.p);
         case SP_BUILTIN_TIME:      return sp_Time_inspect((sp_Time *)v.v.p);
+        case SP_BUILTIN_EXCEPTION: return sp_sprintf("#<%s: %s>", sp_exc_class_name((volatile struct sp_Exception_s *)v.v.p), sp_exc_message((volatile struct sp_Exception_s *)v.v.p));
         default:                   return SPL("#<Object>");
       }
     default:          return sp_str_empty;

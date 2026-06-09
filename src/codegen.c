@@ -6113,6 +6113,7 @@ static const char *hash_box_cls(TyKind t) {
 
 static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   if (t == TY_POLY) { buf_puts(b, expr); return; }
+  if (t == TY_EXCEPTION) { buf_printf(b, "sp_box_obj(%s, SP_BUILTIN_EXCEPTION)", expr); return; }
   if (ty_is_object(t)) { buf_printf(b, "sp_box_obj(%s, %d)", expr, ty_object_class(t)); return; }
   if (ty_is_hash(t) && hash_box_cls(t)) { buf_printf(b, "sp_box_obj(%s, %s)", expr, hash_box_cls(t)); return; }
   const char *fn = NULL;
@@ -6152,6 +6153,10 @@ static void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
 static void emit_boxed(Compiler *c, int node, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (t == TY_POLY) { emit_expr(c, node, b); return; }
+  if (t == TY_EXCEPTION) {
+    buf_printf(b, "sp_box_obj("); emit_expr(c, node, b); buf_puts(b, ", SP_BUILTIN_EXCEPTION)");
+    return;
+  }
   if (ty_is_object(t)) {
     buf_printf(b, "sp_box_obj(");
     emit_expr(c, node, b);
