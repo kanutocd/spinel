@@ -4358,6 +4358,24 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     return 1;
   }
 
+  /* int_array.combination(k) { |c| ... } -- yield each k-combination as a
+     fresh int_array */
+  if (!strcmp(name, "combination") && rt == TY_INT_ARRAY) {
+    int args = nt_ref(nt, id, "arguments");
+    int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+    if (ac != 1) return 0;
+    int ta = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent); buf_printf(b, "{ sp_IntArray *_t%d = ", ta); buf_puts(b, rb.p ? rb.p : ""); buf_puts(b, ";\n"); free(rb.p);
+    emit_indent(b, indent + 1); buf_printf(b, "sp_PtrArray *_t%d = sp_IntArray_combination(_t%d, ", tc, ta); emit_expr(c, av[0], b); buf_puts(b, "); SP_GC_ROOT(_t"); buf_printf(b, "%d);\n", tc);
+    emit_indent(b, indent + 1); buf_printf(b, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
+    if (p0) { emit_indent(b, indent + 2); buf_printf(b, "lv_%s = (sp_IntArray *)_t%d->data[_t%d];\n", p0, tc, ti); }
+    emit_stmts(c, body, b, indent + 2);
+    emit_indent(b, indent + 1); buf_puts(b, "}\n");
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+
   /* array.each_cons(n) { |a, b, ...| } -- sliding window of n consecutive
      elements; a single param binds the n-element sub-array, multiple params
      destructure the window */

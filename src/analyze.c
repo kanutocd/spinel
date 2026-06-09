@@ -2063,6 +2063,14 @@ static int infer_block_params(Compiler *c) {
       continue;
     }
 
+    /* array.combination(k) { |c| } binds the k-element sub-array (same kind) */
+    if (!strcmp(name, "combination") && ty_is_array(rt)) {
+      LocalVar *lp = scope_local_intern(comp_scope_of(c, block), p0); lp->is_block_param = 1;
+      TyKind m = ty_unify(lp->type, rt);
+      if (m != lp->type) { lp->type = m; changed = 1; }
+      continue;
+    }
+
     /* array.each_with_index { |x, i| } binds element + int index */
     if (!strcmp(name, "each_with_index") && ty_is_array(rt)) {
       Scope *es = comp_scope_of(c, block);
