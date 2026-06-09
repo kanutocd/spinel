@@ -2906,6 +2906,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_delete(", k); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "tally") && argc == 0) {
+        if (rt == TY_INT_ARRAY) { buf_printf(b, "sp_IntArray_tally_int("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
+        if (rt == TY_STR_ARRAY) { buf_printf(b, "sp_StrArray_tally("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
+      }
       if ((!strcmp(name, "all?") || !strcmp(name, "any?") ||
            !strcmp(name, "none?") || !strcmp(name, "one?")) &&
           argc == 0 && nt_ref(nt, id, "block") < 0) {

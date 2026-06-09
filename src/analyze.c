@@ -539,6 +539,10 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count") || !strcmp(name, "index")) return TY_INT;
     if (!strcmp(name, "sum"))                         return ty_array_elem(rt);
+    if (!strcmp(name, "tally") && argc == 0) {
+      if (rt == TY_INT_ARRAY) return TY_INT_INT_HASH;
+      if (rt == TY_STR_ARRAY) return TY_STR_INT_HASH;
+    }
     if ((!strcmp(name, "first") || !strcmp(name, "last")) && argc == 1) return rt;  /* first(n)/last(n) -> subarray */
     if (!strcmp(name, "first") || !strcmp(name, "last") ||
         !strcmp(name, "min") || !strcmp(name, "max") ||
