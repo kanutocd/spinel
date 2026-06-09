@@ -2294,6 +2294,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if (!strcmp(name, "nil?"))    { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 1)"); return; }
   }
 
+  /* <str>.encoding.name -> the encoding name (the poly encoding's to_s) */
+  if (!strcmp(name, "name") && argc == 0 && recv >= 0 && comp_ntype(c, recv) == TY_POLY &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "encoding")) {
+    buf_puts(b, "sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
+  }
+
   /* poly receiver: nil? / conversions / a few type-agnostic queries */
   if (recv >= 0 && rt == TY_POLY && argc == 0) {
     if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
@@ -3775,6 +3782,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "oct") && argc == 0) buf_printf(b, "sp_str_oct(%s)", r);
       else if (!strcmp(name, "ord") && argc == 0) buf_printf(b, "sp_str_ord(%s)", r);
       else if ((!strcmp(name, "force_encoding") || !strcmp(name, "b") || !strcmp(name, "encode")) && argc <= 1) buf_printf(b, "(%s)", r);
+      else if (!strcmp(name, "encoding") && argc == 0) buf_printf(b, "((void)(%s), sp_box_encoding(sp_encoding_utf8()))", r);
       else if (!strcmp(name, "casecmp") && argc == 1) { buf_printf(b, "sp_str_casecmp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "casecmp?") && argc == 1) { buf_printf(b, "(sp_str_casecmp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ") == 0)"); }
       else if (!strcmp(name, "byteslice") && argc == 2) { buf_printf(b, "sp_str_byteslice(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }

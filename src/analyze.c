@@ -721,8 +721,15 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "empty?")) return TY_BOOL;
   }
 
+  /* <str>.encoding.name -> the encoding name string */
+  if (!strcmp(name, "name") && argc == 0 && recv >= 0 &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "encoding"))
+    return TY_STRING;
+
   /* string receiver methods */
   if (recv >= 0 && rt == TY_STRING) {
+    if (!strcmp(name, "encoding") && argc == 0) return TY_POLY;  /* an Encoding value */
     if (!strcmp(name, "upcase") || !strcmp(name, "downcase") ||
         !strcmp(name, "capitalize") || !strcmp(name, "reverse") ||
         !strcmp(name, "strip") || !strcmp(name, "lstrip") ||
