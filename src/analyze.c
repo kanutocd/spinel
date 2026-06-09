@@ -498,6 +498,8 @@ static TyKind infer_call(Compiler *c, int id) {
         if (iv >= 0) return c->classes[self->class_id].ivar_types[iv];
       }
       int mi = comp_method_in_chain(c, self->class_id, name, NULL);
+      if (mi < 0 && self->is_cmethod)
+        mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
       if (mi >= 0) return method_call_ret(c, mi, id);
     }
   }
@@ -1128,6 +1130,16 @@ static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
       for (int i = 0; i < on; i++) {
         const char *pname = nt_str(c->nt, opts[i], "name");
         int dv = nt_ref(c->nt, opts[i], "value");
+        if (pname) scope_add_param(s, pname, dv);
+      }
+      /* keyword parameters: `tag:` (required) or `tag: default` (optional) */
+      int kn = 0;
+      const int *kws = nt_arr(c->nt, pn, "keywords", &kn);
+      for (int i = 0; i < kn; i++) {
+        const char *pty = nt_type(c->nt, kws[i]);
+        if (!pty) continue;
+        const char *pname = nt_str(c->nt, kws[i], "name");
+        int dv = !strcmp(pty, "OptionalKeywordParameterNode") ? nt_ref(c->nt, kws[i], "value") : -1;
         if (pname) scope_add_param(s, pname, dv);
       }
       /* `&block` parameter: tracked for yield-style inlining, no typed slot.
@@ -1785,19 +1797,43 @@ static int bind_call_params(Compiler *c, int call_id, int mi) {
   int argc = 0;
   const int *argv = NULL;
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
-  int n = argc < m->nparams ? argc : m->nparams;
   int changed = 0;
+  /* Separate positional args from the trailing keyword-hash arg (if any). */
+  int kwh = -1;
+  int pos_argc = argc;
+  if (argc > 0 && nt_type(nt, argv[argc - 1]) &&
+      !strcmp(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh = argv[argc - 1];
+    pos_argc = argc - 1;
+  }
+  int n = pos_argc < m->nparams ? pos_argc : m->nparams;
   for (int k = 0; k < n; k++) {
     TyKind at = infer_type(c, argv[k]);
     LocalVar *p = scope_local(m, m->pnames[k]);
     if (!p) continue;
     TyKind merged = ty_unify(p->type, at);
     if (merged != p->type) { p->type = merged; changed = 1; }
-    /* a proc passed as an argument carries its body return type to the param,
-       so `f.call(...)` inside the method knows its result type */
     if (merged == TY_PROC) {
       TyKind pr = proc_ret_of(c, argv[k]);
       if (pr != TY_UNKNOWN && p->proc_ret != (int)pr) { p->proc_ret = (int)pr; changed = 1; }
+    }
+  }
+  /* Keyword arguments: match KeywordHashNode elements to named params. */
+  if (kwh >= 0) {
+    int en = 0;
+    const int *elems = nt_arr(nt, kwh, "elements", &en);
+    for (int e = 0; e < en; e++) {
+      int key = nt_ref(nt, elems[e], "key");
+      int val = nt_ref(nt, elems[e], "value");
+      if (key < 0 || val < 0) continue;
+      const char *kty = nt_type(nt, key);
+      const char *kname = (kty && !strcmp(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+      if (!kname) continue;
+      LocalVar *p = scope_local(m, kname);
+      if (!p) continue;
+      TyKind at = infer_type(c, val);
+      TyKind merged = ty_unify(p->type, at);
+      if (merged != p->type) { p->type = merged; changed = 1; }
     }
   }
   return changed;
@@ -1879,7 +1915,12 @@ static int infer_param_types(Compiler *c) {
       int mi = comp_method_index(c, name);
       if (mi < 0) {
         Scope *self = comp_scope_of(c, id);
-        if (self->class_id >= 0) mi = comp_method_in_chain(c, self->class_id, name, NULL);
+        if (self->class_id >= 0) {
+          mi = comp_method_in_chain(c, self->class_id, name, NULL);
+          /* inside a class method: also check sibling class methods */
+          if (mi < 0 && self->is_cmethod)
+            mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
+        }
       }
       if (mi < 0) mi = comp_included_method_index(c, name);
       changed |= bind_call_params(c, id, mi);

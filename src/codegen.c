@@ -1365,13 +1365,42 @@ static void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Bu
 
 /* Emit a comma-separated argument list filling defaults for omitted
    optional params. `lead` is prepended before the first arg. */
+/* Find the value node for keyword param named `kname` in a KeywordHashNode `kwh`. */
+static int kwh_lookup(const NodeTable *nt, int kwh, const char *kname) {
+  if (kwh < 0 || !kname) return -1;
+  int en = 0;
+  const int *elems = nt_arr(nt, kwh, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    int key = nt_ref(nt, elems[e], "key");
+    if (key < 0) continue;
+    const char *kty = nt_type(nt, key);
+    const char *kn = (kty && !strcmp(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+    if (kn && !strcmp(kn, kname)) return nt_ref(nt, elems[e], "value");
+  }
+  return -1;
+}
+
 static void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
+  const NodeTable *nt = c->nt;
   int argc = 0;
-  const int *argv = argsNode >= 0 ? nt_arr(c->nt, argsNode, "arguments", &argc) : NULL;
+  const int *argv = argsNode >= 0 ? nt_arr(nt, argsNode, "arguments", &argc) : NULL;
+  /* Separate trailing keyword-hash arg (if any) from positional args. */
+  int kwh = -1;
+  int pos_argc = argc;
+  if (argc > 0 && nt_type(nt, argv[argc - 1]) &&
+      !strcmp(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh = argv[argc - 1];
+    pos_argc = argc - 1;
+  }
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
-    emit_arg_or_default(c, m, i, i < argc ? argv[i] : -1, out);
+    /* Check if this param has a keyword match (lookup by param name in kwh). */
+    int kv = kwh >= 0 ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
+    if (kv >= 0)
+      emit_arg_or_default(c, m, i, kv, out);
+    else
+      emit_arg_or_default(c, m, i, i < pos_argc ? argv[i] : -1, out);
   }
 }
 
@@ -1408,14 +1437,21 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
 
   int argc = 0;
   const int *argv = argsNode >= 0 ? nt_arr(nt, argsNode, "arguments", &argc) : NULL;
-  int np = m ? m->nparams : argc;
+  /* separate keyword-hash arg */
+  int kwh_d = -1, pos_argc_d = argc;
+  if (argc > 0 && nt_type(nt, argv[argc - 1]) &&
+      !strcmp(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh_d = argv[argc - 1]; pos_argc_d = argc - 1;
+  }
+  int np = m ? m->nparams : pos_argc_d;
   /* evaluate each param value (provided arg or default) into a temp so the
      virtual-dispatch cases reuse them without re-evaluating */
   int *atmp = np ? malloc(sizeof(int) * np) : NULL;
   for (int k = 0; k < np; k++) {
     atmp[k] = ++g_tmp;
     Buf ab; memset(&ab, 0, sizeof ab);
-    emit_arg_or_default(c, m, k, k < argc ? argv[k] : -1, &ab);
+    int kv = (m && kwh_d >= 0) ? kwh_lookup(nt, kwh_d, m->pnames[k]) : -1;
+    emit_arg_or_default(c, m, k, kv >= 0 ? kv : (k < pos_argc_d ? argv[k] : -1), &ab);
     LocalVar *p = scope_local(m, m->pnames[k]);
     emit_indent(g_pre, g_indent);
     emit_ctype(c, p ? p->type : comp_ntype(c, k < argc ? argv[k] : -1), g_pre);
@@ -1665,6 +1701,21 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   }
 
   if (recv < 0 && comp_method_index(c, name) >= 0) { emit_method_call(c, id, b); return; }
+  /* bare call to a sibling class method (inside def self.foo, calling bar()) */
+  if (recv < 0) {
+    Scope *encl = comp_scope_of(c, id);
+    if (encl && encl->is_cmethod && encl->class_id >= 0) {
+      int smi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
+      if (smi >= 0) {
+        Scope *ms = &c->scopes[smi];
+        emit_method_cname(c, ms, b);
+        buf_puts(b, "(");
+        emit_args_filled(c, smi, nt_ref(nt, id, "arguments"), "", b);
+        buf_puts(b, ")");
+        return;
+      }
+    }
+  }
   /* bare call to a module_function method made available via top-level include */
   if (recv < 0) {
     int imi = comp_included_method_index(c, name);
