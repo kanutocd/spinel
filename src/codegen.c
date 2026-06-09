@@ -1235,6 +1235,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_re_match_poly(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ")");
       return;
     }
+    /* /re/.source and /re/.options are compile-time constants of the literal */
+    if (rre >= 0 && !strcmp(name, "source") && argc == 0) {
+      emit_str_literal(b, nt_str(nt, recv, "unescaped")); return;
+    }
+    if (rre >= 0 && !strcmp(name, "options") && argc == 0) {
+      int pf = (int)nt_int(nt, recv, "flags", 0);
+      int opt = ((pf & 4) ? 1 : 0) | ((pf & 8) ? 2 : 0) | ((pf & 16) ? 4 : 0);
+      buf_printf(b, "%d", opt); return;
+    }
   }
   if (recv >= 0 && argc >= 1 && (!strcmp(name, "match?") || !strcmp(name, "!~") || !strcmp(name, "=~"))) {
     int are = re_lit_index(c, argv[0]);

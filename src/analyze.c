@@ -726,6 +726,11 @@ static TyKind infer_call(Compiler *c, int id) {
     if ((rrt && !strcmp(rrt, "RegularExpressionNode")) ||
         (art && !strcmp(art, "RegularExpressionNode"))) return TY_POLY;
   }
+  /* /re/.source -> String, /re/.options -> Integer (compile-time constants) */
+  if (recv >= 0 && argc == 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "RegularExpressionNode")) {
+    if (!strcmp(name, "source")) return TY_STRING;
+    if (!strcmp(name, "options")) return TY_INT;
+  }
 
   if (recv >= 0 && argc == 1 && is_arith_op(name)) {
     if (rt == TY_STRING) {
