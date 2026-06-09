@@ -356,6 +356,7 @@ static void emit_expr(Compiler *c, int id, Buf *b);
 static void emit_stmt(Compiler *c, int id, Buf *b, int indent);
 static void emit_stmts(Compiler *c, int id, Buf *b, int indent);
 static void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
+static void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar);
 static int  emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent);
 static int  emit_output_call(Compiler *c, int id, Buf *b, int indent);
 static int  emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent);
@@ -5457,6 +5458,33 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  if (!strcmp(ty, "BeginNode")) {
+    /* begin/rescue as an rvalue: hoist the block into g_pre so the temp
+       is assigned before the surrounding expression reads it. */
+    TyKind rt = comp_ntype(c, id);
+    int t = ++g_tmp;
+    char rv[32]; snprintf(rv, sizeof rv, "_t%d", t);
+    int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
+    if (g_pre) {
+      emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+      buf_printf(g_pre, " _t%d = %s;\n", t, default_value(rt));
+      emit_begin(c, id, g_pre, g_indent, rv);
+    }
+    else {
+      /* No prelude available (e.g. inside another expression's prelude):
+         fall back to a GCC statement expression. */
+      buf_puts(b, "({ ");
+      emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;\n", t, default_value(rt));
+      emit_begin(c, id, b, 0, rv);
+      buf_printf(b, "_t%d; })", t);
+      g_result_poly = sp;
+      return;
+    }
+    g_result_poly = sp;
+    buf_printf(b, "_t%d", t);
+    return;
+  }
+
   unsupported(c, id, "expression");
 }
 
@@ -6294,6 +6322,7 @@ static void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resu
     else {
       if (has_retval) buf_printf(b, "if (_retf%d) return _retv%d;\n", eid, eid);
       else if (g_ret_type == TY_POLY) buf_printf(b, "if (_retf%d) return sp_box_nil();\n", eid);
+      else if (g_ret_type == TY_UNKNOWN) buf_printf(b, "if (_retf%d) return 0;\n", eid); /* main() */
       else buf_printf(b, "if (_retf%d) return;\n", eid);
     }
     return;
