@@ -2512,6 +2512,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
                re_lit_index(c, argv[0]) < 0) {
         buf_printf(b, "sp_str_%s(%s, ", name, r); emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
+      else if (!strcmp(name, "partition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
+        /* [before, match, after] from the first regex match, else [s, "", ""] */
+        int tr = ++g_tmp;
+        buf_printf(b, "({ sp_StrArray *_t%d = sp_StrArray_new();"
+                      " if (sp_re_match(sp_re_pat_%d, %s) >= 0) {"
+                      " sp_StrArray_push(_t%d, sp_re_match_pre); sp_StrArray_push(_t%d, sp_re_match_str);"
+                      " sp_StrArray_push(_t%d, sp_re_match_post); } else {"
+                      " sp_StrArray_push(_t%d, %s); sp_StrArray_push(_t%d, SPL(\"\")); sp_StrArray_push(_t%d, SPL(\"\")); }"
+                      " _t%d; })",
+                   tr, re_lit_index(c, argv[0]), r, tr, tr, tr, tr, r, tr, tr, tr);
+      }
       else if (!strcmp(name, "rindex") && argc == 1) { buf_printf(b, "sp_str_rindex(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "crypt") && argc == 1) { buf_printf(b, "sp_str_crypt(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "scrub") && argc == 0) buf_printf(b, "sp_str_scrub(%s, 0)", r);
