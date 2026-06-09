@@ -3149,11 +3149,22 @@ static void emit_interp(Compiler *c, int id, Buf *b) {
         buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%s_to_s(", c->classes[ty_object_class(t)].name);
         EMIT_IV(); buf_puts(&argbuf, ")");
       }
+      else if (ty_is_hash(t) && ty_hash_cname(t)) {
+        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sHash_inspect(", ty_hash_cname(t));
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_UNKNOWN && ety && !strcmp(ety, "ArrayNode") &&
+               (nt_arr(nt, expr, "elements", (int[]){0}), 1)) {
+        /* a bare empty array literal interpolates as "[]" */
+        int en = 0; nt_arr(nt, expr, "elements", &en);
+        if (en == 0) { buf_puts(&fmt, "%s"); buf_puts(&argbuf, "\"[]\""); }
+        else { free(fmt.p); free(argbuf.p); unsupported(c, pid, "interpolation value"); }
+      }
       else {
         free(fmt.p); free(argbuf.p);
         unsupported(c, pid, "interpolation value");
-      #undef EMIT_IV
       }
+      #undef EMIT_IV
       nargs++;
     }
     else {
