@@ -306,6 +306,7 @@ static TyKind infer_call(Compiler *c, int id) {
       int ci = comp_class_index(c, cn);
       if (ci >= 0) return ty_object(ci);
       if (cn && !strcmp(cn, "Array") && argc == 2) return ty_array_of(infer_type(c, argv[1]));
+      if (cn && !strcmp(cn, "Array")) return TY_POLY_ARRAY; /* Array.new / Array.new(n) */
       if (cn && !strcmp(cn, "String")) return TY_STRING;
       if (cn && !strcmp(cn, "StringIO")) return TY_STRINGIO;
       if (cn && !strcmp(cn, "StringScanner")) return TY_STRINGSCANNER;
@@ -1754,10 +1755,16 @@ static int infer_write_types(Compiler *c) {
 
     TyKind before = *slot;
     if (is_push) {
-      /* explicit push/append: definitely array */
+      /* explicit push/append: definitely array.  A PolyArray stays PolyArray
+         regardless of the pushed value type; mixing typed arrays widens to
+         PolyArray (ty_unify would return TY_POLY scalar, so use array-aware
+         widening instead). */
       if (vt == TY_UNKNOWN) continue;
       if (*slot != TY_UNKNOWN && !ty_is_array(*slot)) continue;
-      *slot = ty_unify(*slot, ty_array_of(vt));
+      if (*slot == TY_POLY_ARRAY) continue;  /* already widest array type */
+      TyKind want = ty_array_of(vt);
+      if (*slot != TY_UNKNOWN && want != *slot) want = TY_POLY_ARRAY;
+      *slot = want;
     }
     else if (kt == TY_INT) {
       /* int key []=: if slot already array, leave it; otherwise infer int-keyed hash */
@@ -2200,8 +2207,9 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "max_by") || !strcmp(name, "min_by") || !strcmp(name, "sort_by") ||
               !strcmp(name, "take_while") || !strcmp(name, "drop_while") ||
               !strcmp(name, "reverse_each") || !strcmp(name, "each_entry") ||
-              !strcmp(name, "sum") ||
-              !strcmp(name, "each_with_index")) &&
+              !strcmp(name, "sum") || !strcmp(name, "count") ||
+              !strcmp(name, "any?") || !strcmp(name, "all?") || !strcmp(name, "none?") ||
+              !strcmp(name, "one?") || !strcmp(name, "each_with_index")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
 

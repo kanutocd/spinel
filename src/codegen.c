@@ -510,7 +510,7 @@ static int ty_matches_class(TyKind t, const char *cn, int exact) {
   if (!strcmp(cn, self_cls)) return 1;
   if (exact) return 0;
   if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject") || !strcmp(cn, "Kernel")) return 1;
-  if (!strcmp(cn, "Comparable") && (t == TY_STRING || t == TY_INT || t == TY_FLOAT)) return 1;
+  if (!strcmp(cn, "Comparable") && (t == TY_STRING || t == TY_INT || t == TY_FLOAT || t == TY_SYMBOL)) return 1;
   if (!strcmp(cn, "Numeric") && (t == TY_INT || t == TY_FLOAT)) return 1;
   if (!strcmp(cn, "Enumerable") && (ty_is_array(t) || ty_is_hash(t) || t == TY_RANGE)) return 1;
   return 0;
@@ -1945,6 +1945,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if (cn && !strcmp(cn, "StringScanner") && argc == 1) {
         buf_puts(b, "sp_StringScanner_new("); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
+      }
+      if (cn && !strcmp(cn, "Array") && argc == 0) {
+        buf_puts(b, "sp_PolyArray_new()"); return;
       }
       if (cn && !strcmp(cn, "Array") && argc == 2) {
         /* Array.new(n, v) -> n copies of v */
@@ -3633,9 +3636,37 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_printf(b, ") %s)", op);
         return;
       }
-      if ((!strcmp(name, "length") || !strcmp(name, "size")) && argc == 0) {
+      if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) &&
+          argc == 0 && nt_ref(nt, id, "block") < 0) {
         buf_printf(b, "sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
+      }
+      if (!strcmp(name, "count") && argc == 0 && nt_ref(nt, id, "block") >= 0) {
+        /* count { |x| cond } -- loop and count truthy block results */
+        int blk = nt_ref(nt, id, "block");
+        const char *bp = block_param_name(c, blk, 0); if (bp) bp = rename_local(bp);
+        int body2 = nt_ref(nt, blk, "body");
+        int bn2 = 0; const int *bb2 = body2 >= 0 ? nt_arr(nt, body2, "body", &bn2) : NULL;
+        if (bn2 > 0) {
+          int trecv = ++g_tmp, tcnt = ++g_tmp, ti = ++g_tmp;
+          Buf rb2; memset(&rb2, 0, sizeof rb2); emit_expr(c, recv, &rb2);
+          emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+          buf_printf(g_pre, " _t%d = %s;\n", trecv, rb2.p ? rb2.p : ""); free(rb2.p);
+          emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = 0;\n", tcnt);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
+                     ti, ti, k, trecv, ti);
+          if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", bp, k, trecv, ti); }
+          for (int j = 0; j < bn2 - 1; j++) emit_stmt(c, bb2[j], g_pre, g_indent + 1);
+          int saveI = g_indent; g_indent = g_indent + 1;
+          Buf vb2; memset(&vb2, 0, sizeof vb2); emit_expr(c, bb2[bn2 - 1], &vb2);
+          g_indent = saveI;
+          emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (%s) _t%d++;\n", vb2.p ? vb2.p : "0", tcnt);
+          free(vb2.p);
+          emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+          buf_printf(b, "_t%d", tcnt);
+          return;
+        }
       }
       if (!strcmp(name, "empty?") && argc == 0) {
         buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
