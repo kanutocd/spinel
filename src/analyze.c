@@ -327,6 +327,7 @@ static TyKind infer_call(Compiler *c, int id) {
       if (cn && !strcmp(cn, "String")) return TY_STRING;
       if (cn && !strcmp(cn, "StringIO")) return TY_STRINGIO;
       if (cn && !strcmp(cn, "StringScanner")) return TY_STRINGSCANNER;
+      if (cn && !strcmp(cn, "Hash")) return TY_SYM_POLY_HASH;
     }
   }
 
@@ -624,6 +625,7 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "to_a") || !strcmp(name, "dup") || !strcmp(name, "clone") ||
         !strcmp(name, "compact") || !strcmp(name, "compact!") || !strcmp(name, "flatten") || !strcmp(name, "clear") ||
         !strcmp(name, "transpose") ||
+        !strcmp(name, "shuffle") ||
         !strcmp(name, "reverse!") || !strcmp(name, "sort!") || !strcmp(name, "shuffle!") ||
         !strcmp(name, "rotate!") || !strcmp(name, "insert") || !strcmp(name, "freeze") ||
         (!strcmp(name, "fill") && argc == 1) ||
@@ -633,7 +635,8 @@ static TyKind infer_call(Compiler *c, int id) {
       return ty_array_elem(rt);
     if (!strcmp(name, "shift") && argc == 0) return ty_array_elem(rt);
     if (!strcmp(name, "slice!") && argc == 2) return rt;  /* removed subarray */
-    if (!strcmp(name, "[]="))                         return ty_array_elem(rt);
+    if (!strcmp(name, "[]=") && argc == 2)            return ty_array_elem(rt);
+    if (!strcmp(name, "[]=") && argc == 3)            return a0 != TY_UNKNOWN ? a0 : rt;
     if ((!strcmp(name, "assoc") || !strcmp(name, "rassoc")) && rt == TY_POLY_ARRAY)
       return TY_POLY_ARRAY;  /* the matching sub-array, or nil (NULL ptr) */
   }
@@ -731,6 +734,11 @@ static TyKind infer_call(Compiler *c, int id) {
   }
 
   /* hash receiver methods */
+  if (recv >= 0 && !strcmp(name, "default") && argc == 0 &&
+      nt_type(nt, recv) && (!strcmp(nt_type(nt, recv), "HashNode") ||
+                             !strcmp(nt_type(nt, recv), "KeywordHashNode"))) {
+    return TY_POLY; /* {}.default -> nil (poly nil) */
+  }
   if (recv >= 0 && ty_is_hash(rt)) {
     if (!strcmp(name, "[]"))     return ty_hash_val(rt);
     if (!strcmp(name, "[]="))    return ty_hash_val(rt);
@@ -746,6 +754,7 @@ static TyKind infer_call(Compiler *c, int id) {
       return vt;
     }
     if (!strcmp(name, "delete")) return ty_hash_val(rt);
+    if (!strcmp(name, "default") && argc == 0) return TY_POLY;
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count")) return TY_INT;
     if (!strcmp(name, "keys"))   return ty_array_of(ty_hash_key(rt));
@@ -919,13 +928,20 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "options")) return TY_INT;
   }
 
+  /* array set operations: &, |, - (not arith ops but share same arity/recv pattern) */
+  if (recv >= 0 && argc == 1 &&
+      (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "-"))) {
+    if (ty_is_array(rt) && a0 == rt) return rt;
+    if (ty_is_array(rt) && a0 == TY_POLY_ARRAY) return rt;
+    if (ty_is_array(a0) && rt == TY_POLY_ARRAY) return a0;
+  }
   if (recv >= 0 && argc == 1 && is_arith_op(name)) {
     if (rt == TY_STRING) {
       if (!strcmp(name, "%")) return TY_STRING;  /* sprintf (array or single value) */
       if (!strcmp(name, "+") || !strcmp(name, "*")) return TY_STRING;
       return TY_UNKNOWN;
     }
-    /* array + array (same kind) -> a concatenated array of that kind */
+    /* array + (same kind) -> same kind */
     if (!strcmp(name, "+") && ty_is_array(rt) && a0 == rt) return rt;
     if (ty_is_numeric(rt) && ty_is_numeric(a0))
       return (rt == TY_FLOAT || a0 == TY_FLOAT) ? TY_FLOAT : TY_INT;
