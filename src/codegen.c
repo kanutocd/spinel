@@ -5205,7 +5205,8 @@ static void emit_proc_literal(Compiler *c, int create, Buf *b) {
 
 /* Emit the struct + the constructor (sp_<Class>_new) for one class. */
 static void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
-  buf_printf(b, "typedef struct sp_%s_s sp_%s;\n", ci->name, ci->name);
+  /* the typedef is forward-declared for every class first (see codegen_program)
+     so a class can embed a pointer to a class defined later in the file */
   buf_printf(b, "struct sp_%s_s {\n", ci->name);
   buf_puts(b, "  mrb_int cls_id;\n");  /* runtime class tag for virtual dispatch */
   for (int i = 0; i < ci->nivars; i++) {
@@ -5382,7 +5383,10 @@ char *codegen_program(const NodeTable *nt) {
   }
   buf_puts(&b, "static const char *sp_class_to_s(sp_Class c){(void)c;return \"\";}\n\n\n");
 
-  /* class structs + GC scan functions */
+  /* class structs + GC scan functions. Forward-declare every typedef first so
+     a class struct may embed a pointer to a class defined later. */
+  for (int i = 0; i < c->nclasses; i++)
+    buf_printf(&b, "typedef struct sp_%s_s sp_%s;\n", c->classes[i].name, c->classes[i].name);
   for (int i = 0; i < c->nclasses; i++) emit_class_struct(c, &c->classes[i], &b);
   for (int i = 0; i < c->nclasses; i++) emit_class_scan(c, &c->classes[i], &b);
   if (c->nclasses > 0) buf_puts(&b, "\n");
