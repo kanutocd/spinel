@@ -6143,6 +6143,46 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_puts(b, ")");
     return;
   }
+  if (!strcmp(ty, "ClassVariableOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    const char *op = nt_str(nt, id, "binary_operator");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
+    TyKind ct = TY_INT;
+    int idx = comp_cvar_index(&c->classes[s->class_id], nm);
+    if (idx >= 0) ct = c->classes[s->class_id].cvar_types[idx];
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    if (ct == TY_STRING && op && !strcmp(op, "+")) {
+      buf_printf(b, "(%s = sp_str_concat(%s, ", ref, ref);
+      emit_expr(c, v, b); buf_puts(b, "))");
+    }
+    else {
+      buf_printf(b, "(%s %s= ", ref, op ? op : "+");
+      emit_expr(c, v, b); buf_puts(b, ")");
+    }
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableOrWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    buf_printf(b, "(%s ? %s : (%s = ", ref, ref, ref);
+    emit_expr(c, v, b); buf_puts(b, "))");
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableAndWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    buf_printf(b, "(%s ? (%s = ", ref, ref);
+    emit_expr(c, v, b); buf_puts(b, ") : 0)");
+    return;
+  }
   if (!strcmp(ty, "GlobalVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     /* predefined punctuation globals: $/ is the record separator "\n"; $! / $; /
@@ -6185,12 +6225,14 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
       return;
     }
     if (nm && !strcmp(nm, "RUBY_DESCRIPTION")) { buf_puts(b, "SPL(\"spinel\")"); return; }
+    if (nm && !strcmp(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
     unsupported(c, id, "constant read");
   }
   if (!strcmp(ty, "ConstantPathNode")) {
     /* M::CONST -> the flat constant named by the final path component */
     const char *nm = nt_str(nt, id, "name");
     if (nm && comp_const(c, nm)) { buf_printf(b, "cst_%s", nm); return; }
+    if (nm && !strcmp(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
     unsupported(c, id, "constant path read");
   }
   if (!strcmp(ty, "DefinedNode")) {
@@ -7652,7 +7694,8 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     const char *nm = nt_str(nt, id, "name");  /* "@@x" */
     int v = nt_ref(nt, id, "value");
     int sc = comp_scope_of(c, id)->class_id;
-    if (sc < 0) unsupported(c, id, "class variable write (no class scope)");
+    if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) { unsupported(c, id, "class variable write (no class scope)"); return; }
     TyKind ct = TY_INT;
     int idx = comp_cvar_index(&c->classes[sc], nm);
     if (idx >= 0) ct = c->classes[sc].cvar_types[idx];
@@ -7660,6 +7703,52 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "cvar_%s_%s = ", c->classes[sc].name, nm + 2);
     if (ct == TY_POLY) emit_boxed(c, v, b); else emit_expr(c, v, b);
     buf_puts(b, ";\n");
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    const char *op = nt_str(nt, id, "binary_operator");
+    int v = nt_ref(nt, id, "value");
+    int sc = comp_scope_of(c, id)->class_id;
+    if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
+    TyKind ct = TY_INT;
+    int idx = comp_cvar_index(&c->classes[sc], nm);
+    if (idx >= 0) ct = c->classes[sc].cvar_types[idx];
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
+    emit_indent(b, indent);
+    if (ct == TY_STRING && op && !strcmp(op, "+")) {
+      buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
+      emit_expr(c, v, b); buf_puts(b, ");\n");
+    }
+    else {
+      buf_printf(b, "%s %s= ", ref, op ? op : "+");
+      emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableOrWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    int sc = comp_scope_of(c, id)->class_id;
+    if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
+    emit_indent(b, indent);
+    buf_printf(b, "if (!(%s)) { %s = ", ref, ref); emit_expr(c, v, b);
+    buf_puts(b, "; }\n");
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableAndWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    int sc = comp_scope_of(c, id)->class_id;
+    if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
+    emit_indent(b, indent);
+    buf_printf(b, "if (%s) { %s = ", ref, ref); emit_expr(c, v, b);
+    buf_puts(b, "; }\n");
     return;
   }
   if (!strcmp(ty, "InstanceVariableOperatorWriteNode")) {
@@ -8878,6 +8967,7 @@ char *codegen_program(const NodeTable *nt) {
   buf_puts(&body, "int main(int argc,char**argv){\n");
   buf_puts(&body, "    SP_GC_SAVE();\n");
   buf_puts(&body, "    sp_re_init();\n");
+  buf_puts(&body, "    { sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
   emit_scope_decls(c, &c->scopes[0], &body);
   buf_puts(&body, "\n");
   emit_stmts(c, c->scopes[0].body, &body, 1);

@@ -1046,6 +1046,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
     if (lv) return lv->type;
     if (nm && !strcmp(nm, "RUBY_DESCRIPTION")) return TY_STRING;
+    if (nm && !strcmp(nm, "ARGV")) return TY_STR_ARRAY;
     return TY_UNKNOWN;
   }
   if (!strcmp(ty, "DefinedNode")) return TY_STRING;  /* a label string, or nil (NULL) */
@@ -1056,7 +1057,9 @@ static TyKind infer_uncached(Compiler *c, int id) {
        under their unqualified name) */
     const char *nm = nt_str(nt, id, "name");
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
-    return lv ? lv->type : TY_UNKNOWN;
+    if (lv) return lv->type;
+    if (nm && !strcmp(nm, "ARGV")) return TY_STR_ARRAY;
+    return TY_UNKNOWN;
   }
   if (!strcmp(ty, "SelfNode")) {
     Scope *s = comp_scope_of(c, id);
@@ -1077,7 +1080,10 @@ static TyKind infer_uncached(Compiler *c, int id) {
     int idx = nm ? comp_cvar_index(&c->classes[s->class_id], nm) : -1;
     return idx >= 0 ? c->classes[s->class_id].cvar_types[idx] : TY_UNKNOWN;
   }
-  if (!strcmp(ty, "ClassVariableWriteNode"))
+  if (!strcmp(ty, "ClassVariableWriteNode") ||
+      !strcmp(ty, "ClassVariableOperatorWriteNode") ||
+      !strcmp(ty, "ClassVariableOrWriteNode") ||
+      !strcmp(ty, "ClassVariableAndWriteNode"))
     return infer_type(c, nt_ref(nt, id, "value"));
   if (!strcmp(ty, "ParenthesesNode")) {
     int body = nt_ref(nt, id, "body");
@@ -1621,6 +1627,28 @@ static int infer_inherited_ivars(Compiler *c) {
 static int infer_cvar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  /* Pass 1: class body-level writes (comp_scope_of returns scope 0, class_id=-1,
+     so use the class's def_node to find which class owns them). */
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    int body = nt_ref(nt, c->classes[ci].def_node, "body");
+    int n = 0;
+    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    for (int k = 0; k < n; k++) {
+      int s = stmts[k];
+      const char *sty = nt_type(nt, s);
+      if (!sty) continue;
+      if (!strcmp(sty, "ClassVariableWriteNode")) {
+        const char *nm = nt_str(nt, s, "name");
+        if (!nm) continue;
+        int idx = comp_cvar_intern(&c->classes[ci], nm);
+        TyKind vt = infer_type(c, nt_ref(nt, s, "value"));
+        if (vt == TY_NIL) continue;
+        TyKind merged = ty_unify(c->classes[ci].cvar_types[idx], vt);
+        if (merged != c->classes[ci].cvar_types[idx]) { c->classes[ci].cvar_types[idx] = merged; changed = 1; }
+      }
+    }
+  }
+  /* Pass 2: method-level writes (comp_scope_of has class_id set). */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "ClassVariableWriteNode")) continue;

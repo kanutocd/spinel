@@ -2082,6 +2082,14 @@ static const char *sp_re_match_post = NULL;
    underlying issue is unconditional. */
 typedef struct{const char**data;mrb_int len;}sp_Argv;
 static sp_Argv sp_argv;
+static sp_StrArray *sp_argv_array_cache = NULL;
+static sp_StrArray *sp_get_ARGV(void) {
+  if (!sp_argv_array_cache) {
+    sp_argv_array_cache = sp_StrArray_new();
+    for (mrb_int i = 0; i < sp_argv.len; i++) sp_StrArray_push(sp_argv_array_cache, sp_argv.data[i]);
+  }
+  return sp_argv_array_cache;
+}
 
 /* Mark active in-flight exception messages. Most raises pass string
    literals (rodata, marker byte ≠ 0xfe → no-op for sp_mark_string),
@@ -2114,6 +2122,7 @@ static void sp_re_mark_globals(void) {
   sp_mark_string(sp_re_match_pre);
   sp_mark_string(sp_re_match_post);
   for (mrb_int i = 0; i < sp_argv.len; i++) sp_mark_string(sp_argv.data[i]);
+  if (sp_argv_array_cache) sp_gc_mark(sp_argv_array_cache);
   sp_mark_in_flight_exceptions();
   sp_mark_fiber_root_storage();
 }
