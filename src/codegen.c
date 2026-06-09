@@ -1384,7 +1384,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if (en == 0) {
         if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) { buf_puts(b, "0"); return; }
         if (!strcmp(name, "empty?") && argc == 0) { buf_puts(b, "1"); return; }
-        if ((!strcmp(name, "first") || !strcmp(name, "last")) && argc == 0) { buf_puts(b, "SP_INT_NIL"); return; }
+        if ((!strcmp(name, "first") || !strcmp(name, "last") ||
+             !strcmp(name, "min") || !strcmp(name, "max") ||
+             !strcmp(name, "pop") || !strcmp(name, "shift")) && argc == 0) { buf_puts(b, "SP_INT_NIL"); return; }
         if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) { buf_puts(b, "\"[]\""); return; }
         if ((!strcmp(name, "flatten") || !strcmp(name, "compact") || !strcmp(name, "uniq") ||
              !strcmp(name, "sort") || !strcmp(name, "reverse") || !strcmp(name, "dup") ||

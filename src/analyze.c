@@ -217,8 +217,11 @@ static TyKind infer_call(Compiler *c, int id) {
     if (rty && !strcmp(rty, "ArrayNode")) {
       int en = 0; nt_arr(nt, recv, "elements", &en);
       if (en == 0) {
-        /* first/last of an empty array is nil; carry it as a nullable int */
-        if ((!strcmp(name, "first") || !strcmp(name, "last")) && argc == 0) return TY_INT;
+        /* first/last/min/max/pop/shift of an empty array is nil; carry it as
+           a nullable int */
+        if ((!strcmp(name, "first") || !strcmp(name, "last") ||
+             !strcmp(name, "min") || !strcmp(name, "max") ||
+             !strcmp(name, "pop") || !strcmp(name, "shift")) && argc == 0) return TY_INT;
         rt = TY_POLY_ARRAY;
       }
     }
