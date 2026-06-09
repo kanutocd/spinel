@@ -2026,6 +2026,39 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && (!strcmp(name, "<<") || !strcmp(name, "push") || !strcmp(name, "append")) &&
       argc >= 1 && ty_is_array(comp_ntype(c, recv))) {
     TyKind art = comp_ntype(c, recv);
+    /* Lift: when a typed-array literal is pushed a heterogeneous element,
+       rebuild the receiver as a PolyArray rather than emitting a type mismatch. */
+    int needs_lift = 0;
+    if (art != TY_POLY_ARRAY && array_kind(art)) {
+      TyKind elem_t = ty_array_elem(art);
+      const char *rty = nt_type(nt, recv);
+      if (rty && !strcmp(rty, "ArrayNode")) {
+        for (int a = 0; a < argc; a++) {
+          TyKind at = comp_ntype(c, argv[a]);
+          if (at != TY_UNKNOWN && at != elem_t) { needs_lift = 1; break; }
+        }
+      }
+    }
+    if (needs_lift) {
+      int en = 0;
+      const int *els = nt_arr(nt, recv, "elements", &en);
+      int t = ++g_tmp;
+      buf_puts(b, "({ ");
+      buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); ", t);
+      for (int j = 0; j < en; j++) {
+        Buf el; memset(&el, 0, sizeof el);
+        emit_boxed(c, els[j], &el);
+        buf_printf(b, "sp_PolyArray_push(_t%d, %s); ", t, el.p ? el.p : "sp_box_nil()");
+        free(el.p);
+      }
+      for (int a = 0; a < argc; a++) {
+        buf_printf(b, "sp_PolyArray_push(_t%d, ", t);
+        emit_boxed(c, argv[a], b);
+        buf_puts(b, "); ");
+      }
+      buf_printf(b, "_t%d; })", t);
+      return;
+    }
     const char *k = (art == TY_POLY_ARRAY) ? "Poly" : array_kind(art);
     int t = ++g_tmp;
     buf_puts(b, "({ ");

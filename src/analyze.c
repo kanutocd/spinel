@@ -655,6 +655,19 @@ static TyKind infer_call(Compiler *c, int id) {
          !strcmp(name, "keep_if") || !strcmp(name, "delete_if")) && block >= 0) return rt;
     if (!strcmp(name, "find_index") || !strcmp(name, "index")) return TY_INT;  /* int or nil */
     if (!strcmp(name, "each_index")) return rt;
+    if ((!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append")) &&
+        argc >= 1 && argv && rt != TY_POLY_ARRAY && ty_array_elem(rt) != TY_UNKNOWN) {
+      /* Heterogeneous push on a typed-array literal: lift to poly. */
+      TyKind elem_t = ty_array_elem(rt);
+      const char *rty = nt_type(nt, recv);
+      if (rty && !strcmp(rty, "ArrayNode")) {
+        for (int ai = 0; ai < argc; ai++) {
+          TyKind at = infer_type(c, argv[ai]);
+          if (at != TY_UNKNOWN && at != elem_t) return TY_POLY_ARRAY;
+        }
+      }
+      return rt;
+    }
     if (!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append") ||
         !strcmp(name, "reverse") || !strcmp(name, "sort") || !strcmp(name, "uniq") ||
         !strcmp(name, "to_a") || !strcmp(name, "dup") || !strcmp(name, "clone") ||
@@ -664,6 +677,7 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "reverse!") || !strcmp(name, "sort!") || !strcmp(name, "shuffle!") ||
         !strcmp(name, "rotate!") || !strcmp(name, "insert") || !strcmp(name, "freeze") ||
         (!strcmp(name, "fill") && argc == 1) ||
+        !strcmp(name, "replace") ||
         !strcmp(name, "values_at")) return rt;
     if (!strcmp(name, "frozen?")) return TY_BOOL;
     if ((!strcmp(name, "delete_at") || !strcmp(name, "delete")) && argc == 1)
