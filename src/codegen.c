@@ -4087,6 +4087,9 @@ static void emit_case(Compiler *c, int id, Buf *b, int indent) {
         else if (pt == TY_STRING) {
           buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
         }
+        else if (pt == TY_POLY) {
+          buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")");
+        }
         else {
           buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
         }
@@ -4163,6 +4166,7 @@ static void emit_case_expr(Compiler *c, int id, Buf *b) {
           buf_puts(b, "0");
         }
         else if (pt == TY_STRING) { buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
+        else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
         else { buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
       }
       else { buf_puts(b, "("); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
