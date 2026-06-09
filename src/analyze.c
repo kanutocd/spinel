@@ -1316,8 +1316,15 @@ static void register_globals_consts(Compiler *c) {
     }
     else if (!strcmp(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
+      /* a constant bound to a regex literal is resolved at compile time to a
+         precompiled pattern, not stored as a runtime value */
+      int rv = nt_ref(nt, id, "value");
+      if (rv >= 0 && nt_type(nt, rv) && !strcmp(nt_type(nt, rv), "CallNode") &&
+          nt_str(nt, rv, "name") && !strcmp(nt_str(nt, rv, "name"), "freeze"))
+        rv = nt_ref(nt, rv, "receiver");
+      int is_regex_const = rv >= 0 && nt_type(nt, rv) && !strcmp(nt_type(nt, rv), "RegularExpressionNode");
       /* a Struct/Data const names a class, not a value constant */
-      if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0) {
+      if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0 && !is_regex_const) {
         LocalVar *cv = comp_const_intern(c, nm);
         /* `CONST = SomeClass.new(...)`: reads of CONST during the new()
            (i.e. inside initialize or anything it calls) must raise

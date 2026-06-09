@@ -104,6 +104,7 @@ static int re_engine_flags(int pf) {
    isn't the start of a non-capturing/extension group '(?...'. scan returns
    nested arrays for capturing patterns, which the str_array path can't model. */
 static int re_has_captures(const char *src) {
+  if (!src) return 0;
   for (const char *p = src; *p; p++) {
     if (*p == '\\') { if (p[1]) p++; continue; }
     if (*p == '(' && p[1] != '?') return 1;
@@ -116,7 +117,27 @@ static int re_has_captures(const char *src) {
 static int re_lit_index(Compiler *c, int nid) {
   if (nid < 0) return -1;
   const char *ty = nt_type(c->nt, nid);
-  if (!ty || strcmp(ty, "RegularExpressionNode")) return -1;
+  if (!ty) return -1;
+  /* a constant bound to a regex literal (PATTERN = /re/[.freeze], possibly
+     namespaced) resolves to that literal's precompiled pattern */
+  if (!strcmp(ty, "ConstantReadNode") || !strcmp(ty, "ConstantPathNode")) {
+    const char *nm = nt_str(c->nt, nid, "name");
+    if (!nm) return -1;
+    for (int k = 0; k < c->nt->count; k++) {
+      const char *kt = nt_type(c->nt, k);
+      if (!kt || (strcmp(kt, "ConstantWriteNode") && strcmp(kt, "ConstantPathWriteNode"))) continue;
+      const char *kn = nt_str(c->nt, k, "name");
+      if (!kn || strcmp(kn, nm)) continue;
+      int v = nt_ref(c->nt, k, "value");
+      if (v >= 0 && nt_type(c->nt, v) && !strcmp(nt_type(c->nt, v), "CallNode") &&
+          nt_str(c->nt, v, "name") && !strcmp(nt_str(c->nt, v, "name"), "freeze"))
+        v = nt_ref(c->nt, v, "receiver");
+      if (v >= 0 && nt_type(c->nt, v) && !strcmp(nt_type(c->nt, v), "RegularExpressionNode"))
+        return re_lit_index(c, v);
+    }
+    return -1;
+  }
+  if (strcmp(ty, "RegularExpressionNode")) return -1;
   const char *src = nt_str(c->nt, nid, "unescaped");
   if (!src) return -1;
   int flg = re_engine_flags((int)nt_int(c->nt, nid, "flags", 0));
@@ -130,6 +151,31 @@ static int re_lit_index(Compiler *c, int nid) {
   g_re_src[g_re_count] = (char *)src;
   g_re_flg[g_re_count] = flg;
   return g_re_count++;
+}
+/* The unescaped source of a regex literal or a constant bound to one (for
+   capture detection). Returns NULL when nid is not a resolvable regex. */
+static const char *re_lit_src(Compiler *c, int nid) {
+  if (nid < 0) return NULL;
+  const char *ty = nt_type(c->nt, nid);
+  if (!ty) return NULL;
+  if (!strcmp(ty, "RegularExpressionNode")) return nt_str(c->nt, nid, "unescaped");
+  if (!strcmp(ty, "ConstantReadNode") || !strcmp(ty, "ConstantPathNode")) {
+    const char *nm = nt_str(c->nt, nid, "name");
+    if (!nm) return NULL;
+    for (int k = 0; k < c->nt->count; k++) {
+      const char *kt = nt_type(c->nt, k);
+      if (!kt || (strcmp(kt, "ConstantWriteNode") && strcmp(kt, "ConstantPathWriteNode"))) continue;
+      const char *kn = nt_str(c->nt, k, "name");
+      if (!kn || strcmp(kn, nm)) continue;
+      int v = nt_ref(c->nt, k, "value");
+      if (v >= 0 && nt_type(c->nt, v) && !strcmp(nt_type(c->nt, v), "CallNode") &&
+          nt_str(c->nt, v, "name") && !strcmp(nt_str(c->nt, v, "name"), "freeze"))
+        v = nt_ref(c->nt, v, "receiver");
+      if (v >= 0 && nt_type(c->nt, v) && !strcmp(nt_type(c->nt, v), "RegularExpressionNode"))
+        return nt_str(c->nt, v, "unescaped");
+    }
+  }
+  return NULL;
 }
 /* A set of local names (borrowed pointers into the node table). */
 typedef struct { const char **v; int n, cap; } NameSet;
@@ -3703,7 +3749,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_re_split(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
       }
       else if (!strcmp(name, "scan") && argc == 1 && re_lit_index(c, argv[0]) >= 0 &&
-               !re_has_captures(nt_str(c->nt, argv[0], "unescaped"))) {
+               !re_has_captures(re_lit_src(c, argv[0]))) {
         buf_printf(b, "sp_re_scan(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
       }
       else if (!strcmp(name, "to_sym") || !strcmp(name, "intern")) buf_printf(b, "sp_sym_intern(%s)", r);
