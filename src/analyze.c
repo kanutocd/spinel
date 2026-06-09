@@ -666,6 +666,7 @@ static TyKind infer_call(Compiler *c, int id) {
   if (!strcmp(name, "!")) return TY_BOOL;
   if (!strcmp(name, "respond_to?") && recv >= 0) return TY_BOOL;
   if (!strcmp(name, "nil?") && recv >= 0 && argc == 0) return TY_BOOL;
+  if (!strcmp(name, "object_id") && recv >= 0 && argc == 0) return TY_INT;
   if ((!strcmp(name, "match?") || !strcmp(name, "!~")) && recv >= 0) return TY_BOOL;
   if (!strcmp(name, "=~") && recv >= 0 && argc == 1) {
     const char *rrt = nt_type(nt, recv), *art = nt_type(nt, argv[0]);

@@ -1402,6 +1402,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if (!strcmp(name, "to_f")) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
   }
 
+  /* object_id: a stable integer id. Int uses MRI's 2n+1; pointer-backed
+     values use the pointer bit pattern; a symbol uses its interned id. */
+  if (!strcmp(name, "object_id") && recv >= 0 && argc == 0) {
+    if (rt == TY_INT) { buf_puts(b, "(2*("); emit_expr(c, recv, b); buf_puts(b, ")+1)"); }
+    else if (rt == TY_SYMBOL) { buf_puts(b, "((mrb_int)("); emit_expr(c, recv, b); buf_puts(b, ")*2)"); }
+    else if (rt == TY_BOOL || rt == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 0)"); }
+    else { buf_puts(b, "((mrb_int)(uintptr_t)("); emit_expr(c, recv, b); buf_puts(b, "))"); }
+    return;
+  }
+
   /* nil? on an integer: a nullable int carries the SP_INT_NIL sentinel
      (e.g. an int-valued hash miss). A plain int is never the sentinel, so
      `5.nil?` constant-folds to false; a missing-key value reads true. */
