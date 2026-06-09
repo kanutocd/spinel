@@ -4459,11 +4459,15 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int sc = comp_scope_of(c, id)->class_id;
     TyKind ivt = TY_INT;
     if (sc >= 0) { int iv = comp_ivar_index(&c->classes[sc], nm); if (iv >= 0) ivt = c->classes[sc].ivar_types[iv]; }
+    int ven = 0;
+    int v_empty_array = vty && !strcmp(vty, "ArrayNode") && (nt_arr(nt, v, "elements", &ven), ven == 0);
     if (vty && !strcmp(vty, "NilNode")) {
       if (ivt == TY_RANGE) buf_puts(b, "(sp_Range){0}");
       else if (ivt == TY_POLY) buf_puts(b, "sp_box_nil()");
       else buf_puts(b, default_value(ivt));
     }
+    else if (v_empty_array && ivt == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
+    else if (v_empty_array && array_kind(ivt)) buf_printf(b, "sp_%sArray_new()", array_kind(ivt));
     else if (ivt == TY_POLY && comp_ntype(c, v) != TY_POLY) {
       /* a poly ivar slot needs a boxed RHS */
       emit_boxed(c, v, b);
