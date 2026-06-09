@@ -3067,6 +3067,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_PolyArray_compact("); emit_expr(c, recv, b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "compact!") && argc == 0) {
+        buf_puts(b, "sp_PolyArray_compact_bang("); emit_expr(c, recv, b); buf_puts(b, ")");
+        return;
+      }
       if (!strcmp(name, "flatten") && argc <= 1) {
         if (argc == 1) { buf_puts(b, "sp_PolyArray_flatten_n("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
         else { buf_puts(b, "sp_PolyArray_flatten("); emit_expr(c, recv, b); buf_puts(b, ")"); }

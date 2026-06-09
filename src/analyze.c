@@ -548,7 +548,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "push") || !strcmp(name, "<<") || !strcmp(name, "append") ||
         !strcmp(name, "reverse") || !strcmp(name, "sort") || !strcmp(name, "uniq") ||
         !strcmp(name, "to_a") || !strcmp(name, "dup") || !strcmp(name, "clone") ||
-        !strcmp(name, "compact") || !strcmp(name, "flatten") || !strcmp(name, "clear") ||
+        !strcmp(name, "compact") || !strcmp(name, "compact!") || !strcmp(name, "flatten") || !strcmp(name, "clear") ||
         !strcmp(name, "reverse!") || !strcmp(name, "sort!") || !strcmp(name, "shuffle!") ||
         !strcmp(name, "rotate!") || !strcmp(name, "insert") || !strcmp(name, "freeze") ||
         (!strcmp(name, "fill") && argc == 1) ||
