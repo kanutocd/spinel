@@ -1427,6 +1427,18 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  /* SomeClass.superclass -> the parent class name (Object when implicit) */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "superclass") &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name")) {
+    int ci = comp_class_index(c, nt_str(nt, recv, "name"));
+    if (ci >= 0) {
+      int par = c->classes[ci].parent;
+      buf_printf(b, "SPL(\"%s\")", par >= 0 ? c->classes[par].name : "Object");
+      return;
+    }
+  }
+
   /* x.class -> the class-name string (compile-time for known types) */
   if (recv >= 0 && !strcmp(name, "class") && argc == 0) {
     TyKind rt = comp_ntype(c, recv);

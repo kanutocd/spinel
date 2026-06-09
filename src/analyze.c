@@ -278,7 +278,8 @@ static TyKind infer_call(Compiler *c, int id) {
 
   /* SomeClass.name / .to_s / .inspect -> the class-name string */
   if (recv >= 0 && argc == 0 &&
-      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect")) &&
+      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect") ||
+       !strcmp(name, "superclass")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
     return TY_STRING;
