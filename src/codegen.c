@@ -1655,6 +1655,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* Class.const_defined?(:K): compile-time presence check. Constants are
+     recorded in a flat namespace, so this consults the global const and class
+     tables rather than the receiver's own constants. */
+  if (!strcmp(name, "const_defined?") && recv >= 0 && argc >= 1 &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode")) {
+    const char *aty = nt_type(nt, argv[0]);
+    const char *qm = NULL;
+    if (aty && !strcmp(aty, "SymbolNode")) qm = nt_str(nt, argv[0], "value");
+    else if (aty && !strcmp(aty, "StringNode")) qm = nt_str(nt, argv[0], "content");
+    if (qm) {
+      int yes = comp_const(c, qm) != NULL || comp_class_index(c, qm) >= 0;
+      buf_printf(b, "%d", yes);
+      return;
+    }
+  }
+
   if ((!strcmp(name, "-@") || !strcmp(name, "+@")) && recv >= 0 && argc == 0 && !ty_is_object(rt)) {
     buf_puts(b, name[0] == '-' ? "(-" : "(+");
     emit_expr(c, recv, b); buf_puts(b, ")");
