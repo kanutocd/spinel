@@ -4932,6 +4932,20 @@ static int emit_output_call(Compiler *c, int id, Buf *b, int indent) {
   }
   if (!strcmp(name, "print")) { for (int k = 0; k < argc; k++) emit_print_one(c, argv[k], b, indent); return 1; }
   if (!strcmp(name, "p"))     { for (int k = 0; k < argc; k++) emit_p_one(c, argv[k], b, indent); return 1; }
+  if (!strcmp(name, "warn")) {
+    /* Kernel#warn: each argument to stderr with a trailing newline */
+    for (int k = 0; k < argc; k++) {
+      TyKind at = comp_ntype(c, argv[k]);
+      emit_indent(b, indent); buf_puts(b, "fputs(");
+      if (at == TY_STRING) emit_expr(c, argv[k], b);
+      else if (at == TY_INT) { buf_puts(b, "sp_int_to_s("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+      else if (at == TY_FLOAT) { buf_puts(b, "sp_float_to_s("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+      else if (at == TY_SYMBOL) { buf_puts(b, "sp_sym_to_s("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+      else { buf_puts(b, "((void)("); emit_expr(c, argv[k], b); buf_puts(b, "), \"\")"); }
+      buf_puts(b, ", stderr); fputc('\\n', stderr);\n");
+    }
+    return 1;
+  }
   return 0;
 }
 
