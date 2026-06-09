@@ -2174,7 +2174,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       if (!strcmp(name, "merge") && argc == 1 &&
           (rt == TY_STR_INT_HASH || rt == TY_STR_POLY_HASH || rt == TY_SYM_POLY_HASH)) {
-        buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* a str_poly receiver may be merged with a concrete str-keyed hash;
+           coerce the argument to the receiver's variant first */
+        TyKind at = comp_ntype(c, argv[0]);
+        if (rt == TY_STR_POLY_HASH && (at == TY_STR_STR_HASH || at == TY_STR_INT_HASH)) {
+          buf_printf(b, "sp_StrPolyHash_from_%s(", at == TY_STR_STR_HASH ? "str_str_hash" : "str_int_hash");
+          emit_expr(c, argv[0], b); buf_puts(b, ")");
+        }
+        else emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
         return;
       }
       if (!strcmp(name, "delete") && argc == 1 &&
