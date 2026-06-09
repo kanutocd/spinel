@@ -2547,7 +2547,9 @@ void analyze_program(Compiler *c) {
   }
 
   /* Backstop: a parameter still unknown but with a `= nil` default is a
-     nullable param -- represent it as poly so it can hold nil or a value. */
+     nullable param -- represent it as poly so it can hold nil or a value.
+     Also widen TY_SYMBOL/TY_BOOL params: those types have no nil sentinel
+     and must be boxed into poly when the nil default is reachable. */
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     for (int i = 0; i < sc->nparams; i++) {
@@ -2555,7 +2557,9 @@ void analyze_program(Compiler *c) {
       const char *dty = nt_type(c->nt, sc->pdefault[i]);
       if (!dty || strcmp(dty, "NilNode")) continue;
       LocalVar *p = scope_local(sc, sc->pnames[i]);
-      if (p && p->type == TY_UNKNOWN) p->type = TY_POLY;
+      if (!p) continue;
+      if (p->type == TY_UNKNOWN || p->type == TY_SYMBOL || p->type == TY_BOOL)
+        p->type = TY_POLY;
     }
   }
 

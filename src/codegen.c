@@ -1336,8 +1336,15 @@ static void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Bu
   }
   int dv = m->pdefault[idx];
   const char *dty = dv >= 0 ? nt_type(c->nt, dv) : NULL;
-  if (dv < 0 || (dty && !strcmp(dty, "NilNode")))
+  if (dv < 0) {
     buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
+  } else if (dty && !strcmp(dty, "NilNode")) {
+    /* nil default: emit the nil sentinel for the type */
+    if (pt == TY_INT)    buf_puts(out, "SP_INT_NIL");
+    else if (pt == TY_FLOAT) buf_puts(out, "sp_float_nil()");
+    else if (pt == TY_STRING) buf_puts(out, "NULL");
+    else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
+  }
   else if (pt == TY_POLY) emit_boxed(c, dv, out);
   else
     emit_expr(c, dv, out);
@@ -1712,6 +1719,29 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
     if (ck && !strcmp(name, "frozen?")) {
       buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ")->frozen != 0)");
+      return;
+    }
+  }
+
+  /* freeze / frozen? on hashes: use the GC-header frozen bit */
+  if (recv >= 0 && argc == 0 && ty_is_hash(comp_ntype(c, recv))) {
+    if (!strcmp(name, "freeze")) {
+      buf_puts(b, "sp_gc_freeze("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return;
+    }
+    if (!strcmp(name, "frozen?")) {
+      buf_puts(b, "sp_gc_is_frozen("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return;
+    }
+  }
+
+  /* frozen? on numeric/symbol scalars: always frozen in Ruby semantics.
+     TY_STRING is excluded -- dup/String.new produce unfrozen strings so
+     string frozen-ness cannot be determined statically. */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "frozen?")) {
+    TyKind frt = comp_ntype(c, recv);
+    if (frt == TY_INT || frt == TY_FLOAT || frt == TY_SYMBOL || frt == TY_BOOL || frt == TY_NIL) {
+      buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 1)");
       return;
     }
   }
@@ -2484,6 +2514,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
      last of an empty float array). A real float is never the sentinel. */
   if (recv >= 0 && rt == TY_FLOAT && !strcmp(name, "nil?") && argc == 0) {
     buf_puts(b, "sp_float_is_nil("); emit_expr(c, recv, b); buf_puts(b, ")");
+    return;
+  }
+  /* nil? on an array/hash: a nil container is a NULL pointer */
+  if (recv >= 0 && (ty_is_array(rt) || ty_is_hash(rt)) && !strcmp(name, "nil?") && argc == 0) {
+    buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") == NULL)");
     return;
   }
   /* a predicate on an empty array literal folds to a constant: the block (if
@@ -4184,6 +4219,8 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (ty_is_hash(rt)) {
     const char *hn = ty_hash_cname(rt);
     if (hn && !strcmp(name, "[]=") && argc == 2) {
+      emit_indent(b, indent);
+      buf_puts(b, "if (sp_gc_is_frozen("); emit_expr(c, recv, b); buf_puts(b, ")) sp_raise_frozen_hash();\n");
       emit_indent(b, indent);
       buf_printf(b, "sp_%sHash_set(", hn);
       emit_expr(c, recv, b); buf_puts(b, ", ");
