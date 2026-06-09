@@ -1015,6 +1015,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
   }
   if (!strcmp(ty, "DefinedNode")) return TY_STRING;  /* a label string, or nil (NULL) */
   if (!strcmp(ty, "NumberedReferenceReadNode")) return TY_STRING;  /* $1..$9: capture, or nil (NULL) */
+  if (!strcmp(ty, "BackReferenceReadNode")) return TY_STRING;  /* $&/$`/$'/$~/$+: nullable string */
   if (!strcmp(ty, "ConstantPathNode")) {
     /* M::CONST -> resolve by the final path component (constants register
        under their unqualified name) */

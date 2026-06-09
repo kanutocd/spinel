@@ -5904,6 +5904,19 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     else buf_puts(b, "NULL");
     return;
   }
+  if (!strcmp(ty, "BackReferenceReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) { buf_puts(b, "NULL"); return; }
+    if (!strcmp(nm, "$&") || !strcmp(nm, "$~")) buf_puts(b, "sp_re_match_str");
+    else if (!strcmp(nm, "$`"))                 buf_puts(b, "sp_re_match_pre");
+    else if (!strcmp(nm, "$'"))                 buf_puts(b, "sp_re_match_post");
+    else if (!strcmp(nm, "$+")) {
+      /* last group that participated: scan captures[] backwards */
+      buf_puts(b, "({ int _bri = 9; while (_bri > 0 && !sp_re_captures[_bri-1]) _bri--; _bri > 0 ? sp_re_captures[_bri-1] : NULL; })");
+    }
+    else buf_puts(b, "NULL");
+    return;
+  }
   if (!strcmp(ty, "ConstantReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     LocalVar *cv = nm ? comp_const(c, nm) : NULL;
