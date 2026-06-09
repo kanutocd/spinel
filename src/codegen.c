@@ -1069,6 +1069,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  /* JSON.generate(x) / JSON.dump(x) -> serialize a boxed value */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
+      (!strcmp(name, "generate") || !strcmp(name, "dump")) && argc == 1 &&
+      !ty_is_object(comp_ntype(c, argv[0]))) {  /* user objects have no JSON serializer yet */
+    buf_puts(b, "sp_json_val("); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    return;
+  }
+
   /* Dir.exist? / Dir.exists? -> directory test */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Dir") &&
@@ -4517,9 +4526,21 @@ static int needs_root(TyKind t) { return t == TY_STRING || ty_is_array(t) || ty_
 /* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
    passed through unboxed (double-boxing is a classic silent-corruption bug). */
 /* Box a C-text expression `expr` of static type `t` into an sp_RbVal. */
+static const char *hash_box_cls(TyKind t) {
+  switch (t) {
+    case TY_STR_INT_HASH:  return "SP_BUILTIN_STR_INT_HASH";
+    case TY_STR_STR_HASH:  return "SP_BUILTIN_STR_STR_HASH";
+    case TY_INT_STR_HASH:  return "SP_BUILTIN_INT_STR_HASH";
+    case TY_STR_POLY_HASH: return "SP_BUILTIN_STR_POLY_HASH";
+    case TY_SYM_POLY_HASH: return "SP_BUILTIN_SYM_POLY_HASH";
+    default:               return NULL;
+  }
+}
+
 static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   if (t == TY_POLY) { buf_puts(b, expr); return; }
   if (ty_is_object(t)) { buf_printf(b, "sp_box_obj(%s, %d)", expr, ty_object_class(t)); return; }
+  if (ty_is_hash(t) && hash_box_cls(t)) { buf_printf(b, "sp_box_obj(%s, %s)", expr, hash_box_cls(t)); return; }
   const char *fn = NULL;
   switch (t) {
     case TY_INT: fn = "sp_box_int"; break;       case TY_FLOAT: fn = "sp_box_float"; break;
@@ -4547,14 +4568,8 @@ static void emit_boxed(Compiler *c, int node, Buf *b) {
     return;
   }
   if (ty_is_hash(t)) {
-    static const struct { TyKind t; const char *id; } hids[] = {
-      {TY_STR_INT_HASH, "SP_BUILTIN_STR_INT_HASH"}, {TY_STR_STR_HASH, "SP_BUILTIN_STR_STR_HASH"},
-      {TY_INT_STR_HASH, "SP_BUILTIN_INT_STR_HASH"}, {TY_INT_INT_HASH, NULL} };
-    for (unsigned i = 0; i < sizeof hids / sizeof hids[0]; i++)
-      if (hids[i].t == t && hids[i].id) {
-        buf_printf(b, "sp_box_obj("); emit_expr(c, node, b); buf_printf(b, ", %s)", hids[i].id);
-        return;
-      }
+    const char *hid = hash_box_cls(t);
+    if (hid) { buf_printf(b, "sp_box_obj("); emit_expr(c, node, b); buf_printf(b, ", %s)", hid); return; }
     unsupported(c, node, "boxing value into poly"); return;
   }
   const char *fn = NULL;

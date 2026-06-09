@@ -316,6 +316,10 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "sqrt"))
       return TY_INT;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
+        (!strcmp(name, "generate") || !strcmp(name, "dump")))
+      return TY_STRING;
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Dir") &&
         (!strcmp(name, "exist?") || !strcmp(name, "exists?")))
       return TY_BOOL;
