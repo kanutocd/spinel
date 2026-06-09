@@ -1070,6 +1070,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* self.class.new(args) in a leaf-class instance method -> construct the
+     enclosing class statically (no subclass can shadow it at runtime). */
+  if (recv >= 0 && !strcmp(name, "new") && nt_type(nt, recv) &&
+      !strcmp(nt_type(nt, recv), "CallNode") && nt_str(nt, recv, "name") &&
+      !strcmp(nt_str(nt, recv, "name"), "class")) {
+    Scope *self = comp_scope_of(c, id);
+    int cid = self ? self->class_id : -1;
+    int has_sub = 0;
+    for (int j = 0; cid >= 0 && j < c->nclasses; j++) if (c->classes[j].parent == cid) { has_sub = 1; break; }
+    if (cid >= 0 && !has_sub) {
+      buf_printf(b, "sp_%s_new(", c->classes[cid].name);
+      for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
+      buf_puts(b, ")");
+      return;
+    }
+  }
+
   /* Class.new(args) -> sp_<Class>_new(args) */
   if (recv >= 0 && !strcmp(name, "new")) {
     const char *rty = nt_type(nt, recv);
@@ -1480,7 +1497,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  if (recv >= 0 && argc == 1 && int_arith_fn(name) && !ty_is_object(rt)) {
+  if (recv >= 0 && argc == 1 && int_arith_fn(name) && !ty_is_object(rt) && !ty_is_array(rt)) {
     if (rt == TY_STRING && !strcmp(name, "+")) {
       buf_puts(b, "sp_str_concat(");
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
@@ -2566,6 +2583,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "+") && argc == 1 && a0 == rt) {
+        /* array + array of the same kind -> a fresh concatenation */
+        buf_printf(b, "sp_%sArray_concat(", k);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return;
+      }
       if (!strcmp(name, "clear") && argc == 0) {
         /* empty the array in place, evaluate to it (Ruby returns self) */
         int t = ++g_tmp;
@@ -2729,6 +2752,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         int t = ++g_tmp;
         buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
         buf_printf(b, "; if (_t%d) _t%d->len = 0; _t%d; })", t, t, t);
+        return;
+      }
+      if (!strcmp(name, "+") && argc == 1 && a0 == TY_POLY_ARRAY) {
+        buf_puts(b, "sp_PolyArray_concat("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
       if ((!strcmp(name, "all?") || !strcmp(name, "any?") ||

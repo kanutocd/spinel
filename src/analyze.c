@@ -278,6 +278,14 @@ static TyKind infer_call(Compiler *c, int id) {
       nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
     return TY_STRING;
 
+  /* self.class.new(...) -> an instance of the enclosing class */
+  if (recv >= 0 && !strcmp(name, "new") && nt_type(nt, recv) &&
+      !strcmp(nt_type(nt, recv), "CallNode") && nt_str(nt, recv, "name") &&
+      !strcmp(nt_str(nt, recv, "name"), "class")) {
+    Scope *self = comp_scope_of(c, id);
+    if (self && self->class_id >= 0) return ty_object(self->class_id);
+  }
+
   /* Class.new(...) -> an instance of that class; built-in .new constructors */
   if (recv >= 0 && !strcmp(name, "new")) {
     const char *rty = nt_type(nt, recv);
@@ -755,6 +763,8 @@ static TyKind infer_call(Compiler *c, int id) {
       if (!strcmp(name, "+") || !strcmp(name, "*")) return TY_STRING;
       return TY_UNKNOWN;
     }
+    /* array + array (same kind) -> a concatenated array of that kind */
+    if (!strcmp(name, "+") && ty_is_array(rt) && a0 == rt) return rt;
     if (ty_is_numeric(rt) && ty_is_numeric(a0))
       return (rt == TY_FLOAT || a0 == TY_FLOAT) ? TY_FLOAT : TY_INT;
     return TY_UNKNOWN;
