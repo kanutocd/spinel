@@ -59,6 +59,10 @@ static char g_ren_from[MAX_RENAME][96];
 static char g_ren_to[MAX_RENAME][112];
 static int  g_nren = 0;
 static int  g_block_id = -1;
+/* When a yielding method is inlined, g_yield_block_fallback holds the block
+   that was active in the CALLER's context so nested `yield`s inside the
+   passed block can chain back to the outermost caller's block. */
+static int  g_yield_block_fallback = -1;
 /* Name of the `&block` parameter of the method currently being inlined, so
    `<blk>.call(args)` inside it expands the active block like `yield args`. */
 static const char *g_block_param_name = NULL;
@@ -1638,11 +1642,17 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
   /* evaluate each param value (provided arg or default) into a temp so the
      virtual-dispatch cases reuse them without re-evaluating */
   int *atmp = np ? malloc(sizeof(int) * np) : NULL;
+  const char *saved_self = g_self;
   for (int k = 0; k < np; k++) {
     atmp[k] = ++g_tmp;
     Buf ab; memset(&ab, 0, sizeof ab);
     int kv = (m && kwh_d >= 0) ? kwh_lookup(nt, kwh_d, m->pnames[k]) : -1;
-    emit_arg_or_default(c, m, k, kv >= 0 ? kv : (k < pos_argc_d ? argv[k] : -1), &ab);
+    int provided = kv >= 0 ? kv : (k < pos_argc_d ? argv[k] : -1);
+    /* Default expressions (e.g. `@ivar * 10`) reference the callee's self,
+       not the caller's. Temporarily point g_self at the receiver. */
+    if (provided < 0) g_self = selfptr;
+    emit_arg_or_default(c, m, k, provided, &ab);
+    g_self = saved_self;
     LocalVar *p = scope_local(m, m->pnames[k]);
     emit_indent(g_pre, g_indent);
     emit_ctype(c, p ? p->type : comp_ntype(c, k < argc ? argv[k] : -1), g_pre);
@@ -4986,7 +4996,11 @@ static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_ex
   int saved_nren = g_nren, saved_block = g_block_id;
   const char *saved_self = g_self;
   const char *saved_bpn = g_block_param_name;
+  int saved_yfb = g_yield_block_fallback;
   static char selfbuf[64];
+  /* Nested `yield` inside the block body should chain to the block that was
+     active before this inline, not to the inner block. */
+  g_yield_block_fallback = saved_block;
   g_block_id = block;
   g_block_param_name = m->blk_param;
 
@@ -5053,6 +5067,7 @@ static int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_ex
   g_block_id = saved_block;
   g_self = saved_self;
   g_block_param_name = saved_bpn;
+  g_yield_block_fallback = saved_yfb;
   return 1;
 }
 
@@ -5087,8 +5102,11 @@ static void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, in
   for (int k = 0; ; k++) {
     const char *bp = block_param_name(c, blk, k);
     if (!bp) break;
+    /* When inside an inlined method, block params may be renamed (e.g. x →
+       _y3_x); apply the rename table so we write the right C variable. */
+    const char *bpr = rename_local(bp);
     if (!as_expr) emit_indent(b, indent);
-    buf_printf(b, "lv_%s = ", bp);
+    buf_printf(b, "lv_%s = ", bpr);
     if (k < yc) emit_expr(c, yargs[k], b);
     else {
       LocalVar *bl = scope_local(bsc, bp);
@@ -5097,24 +5115,16 @@ static void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, in
     }
     buf_puts(b, as_expr ? "; " : ";\n");
   }
-  /* Save the outer rename table (entries 0..sv-1) before clearing, because
-     any nested inline inside the block body writes at index 0 and up,
-     corrupting the outer entries. */
-  int sv = g_nren;
-  char sv_ren_from[MAX_RENAME][96], sv_ren_to[MAX_RENAME][112];
-  for (int _ri = 0; _ri < sv; _ri++) {
-    memcpy(sv_ren_from[_ri], g_ren_from[_ri], sizeof g_ren_from[0]);
-    memcpy(sv_ren_to[_ri],   g_ren_to[_ri],   sizeof g_ren_to[0]);
-  }
-  g_nren = 0;
-  int svb = g_block_id; g_block_id = -1;
+  /* Keep the rename table active for the block body: the block's variable
+     references are in the same lexical scope as the surrounding inlined
+     method, so renames like x → _y3_x must stay visible. Nested inlines
+     inside the block body append at the current g_nren and self-restore.
+     Set g_block_id to the fallback (the block active before the enclosing
+     inline started) so that a nested `yield` inside the block chains to
+     the outermost caller's block rather than going dead. */
+  int svb = g_block_id; g_block_id = g_yield_block_fallback;
   const char *svbpn = g_block_param_name; g_block_param_name = NULL;
   emit_stmts(c, bbody, b, as_expr ? 0 : indent);
-  g_nren = sv;
-  for (int _ri = 0; _ri < sv; _ri++) {
-    memcpy(g_ren_from[_ri], sv_ren_from[_ri], sizeof g_ren_from[0]);
-    memcpy(g_ren_to[_ri],   sv_ren_to[_ri],   sizeof g_ren_to[0]);
-  }
   g_block_id = svb; g_block_param_name = svbpn;
   if (as_expr) buf_puts(b, "})");
 }
@@ -8337,10 +8347,9 @@ static void emit_super(Compiler *c, int id, Buf *b) {
     for (int i = 0; i < s->nparams; i++) buf_printf(b, ", lv_%s", s->pnames[i]);
   }
   else {
-    int args = nt_ref(c->nt, id, "arguments");
-    int argc = 0; const int *argv = NULL;
-    if (args >= 0) argv = nt_arr(c->nt, args, "arguments", &argc);
-    for (int k = 0; k < argc; k++) { buf_puts(b, ", "); emit_expr(c, argv[k], b); }
+    /* SuperNode: fill in defaults for any omitted trailing params, exactly
+       like a normal call through emit_args_filled. */
+    emit_args_filled(c, mi, nt_ref(c->nt, id, "arguments"), ", ", b);
   }
   buf_puts(b, ")");
 }
