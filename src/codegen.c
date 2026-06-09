@@ -308,9 +308,20 @@ static void emit_cond(Compiler *c, int id, Buf *b);
 static int  needs_root(TyKind t);
 static int  method_is_void(Scope *s);
 static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
+static void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
+  if (comp_ntype(c, key) == TY_POLY) {
+    buf_puts(b, "(");
+    emit_expr(c, key, b);
+    buf_puts(b, kt == TY_STRING ? ").v.s" : ").v.i");  /* int/sym share v.i */
+    return;
+  }
+  emit_expr(c, key, b);
+}
 static void emit_super(Compiler *c, int id, Buf *b);
 static void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out);
 static void emit_boxed(Compiler *c, int node, Buf *b);
+/* Emit a hash key, unboxing a poly value to the typed-hash's key type. */
+static void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
 static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b);
 static void emit_proc_literal(Compiler *c, int create, Buf *b);
 static int proc_slot_is_direct(TyKind t);
@@ -2063,7 +2074,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         /* int-valued hashes have a nullable get_opt; string-valued use get */
         const char *getter = ty_hash_val(rt) == TY_INT ? "get_opt" : "get";
         buf_printf(b, "sp_%sHash_%s(", hn, getter);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
         return;
       }
       if (!strcmp(name, "fetch") && argc == 1) {
@@ -2073,7 +2084,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           TyKind vt = ty_hash_val(rt);
           int th = ++g_tmp, tk = ++g_tmp;
           buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-          buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_expr(c, argv[0], b);
+          buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
           buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
           int bbody = nt_ref(nt, blk, "body");
           int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
@@ -2092,7 +2103,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         TyKind vt = ty_hash_val(rt);
         int th = ++g_tmp, tk = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
         buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d)"
                       " : (sp_raise_cls(\"KeyError\", \"key not found\"), %s); })",
                    hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
@@ -2103,7 +2114,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         TyKind vt = ty_hash_val(rt);
         int th = ++g_tmp, tk = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
         buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
         if (vt == TY_POLY && comp_ntype(c, argv[1]) != TY_POLY) emit_boxed(c, argv[1], b);
         else emit_expr(c, argv[1], b);
@@ -2121,7 +2132,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if ((!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
            !strcmp(name, "include?") || !strcmp(name, "member?")) && argc == 1) {
         buf_printf(b, "sp_%sHash_has_key(", hn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
         return;
       }
       if (!strcmp(name, "keys") && argc == 0 && rt == TY_SYM_POLY_HASH) {
@@ -2158,7 +2169,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         TyKind vt = ty_hash_val(rt);
         int th = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
         buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
                    c_type_name(vt), tv, hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
         buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
@@ -2905,7 +2916,7 @@ static void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     if (!hn) unsupported(c, id, "index operator assignment (hash)");
     emit_indent(b, indent);
     buf_printf(b, "{ %s _t%d = ", c_type_name(rt), ta); emit_expr(c, recv, b);
-    buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tb); emit_expr(c, argv[0], b);
+    buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tb); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
     buf_puts(b, "; ");
     buf_printf(b, "sp_%sHash_set(_t%d, _t%d, ", hn, ta, tb);
     const char *pf = vt == TY_POLY ?
