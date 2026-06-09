@@ -5510,6 +5510,12 @@ static void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
             class_needs_scan(ci) ? "_scan" : "");
   buf_printf(b, "  SP_GC_ROOT(self);\n");
   buf_printf(b, "  self->cls_id = %d;\n", cid);
+  /* calloc zero-inits fields; a poly (boxed) ivar's zero pattern is not nil,
+     so set poly ivars to boxed-nil before initialize runs (read-only ivars
+     stay nil; written ones are overwritten). */
+  for (int i = 0; i < ci->nivars; i++)
+    if (ci->ivar_types[i] == TY_POLY)
+      buf_printf(b, "  self->iv_%s = sp_box_nil();\n", ci->ivars[i] + 1);
   if (init >= 0) {
     buf_printf(b, "  sp_%s_initialize(", c->classes[initcls].name);
     if (initcls != cid) buf_printf(b, "(sp_%s *)", c->classes[initcls].name);

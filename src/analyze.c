@@ -2298,6 +2298,14 @@ void analyze_program(Compiler *c) {
     int iv = comp_ivar_index(ci, nt_str(c->nt, id, "name"));
     if (iv >= 0 && ci->ivar_types[iv] == TY_UNKNOWN) ci->ivar_types[iv] = TY_INT_ARRAY;
   }
+  /* A read-only ivar (referenced but never assigned a typed value) stays
+     TY_UNKNOWN -> it has no C type. Such a slot always reads nil at runtime;
+     give it a boxed-nil poly field so `.nil?`/`.inspect` behave (#712). */
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    ClassInfo *cl = &c->classes[ci];
+    for (int iv = 0; iv < cl->nivars; iv++)
+      if (cl->ivar_types[iv] == TY_UNKNOWN) cl->ivar_types[iv] = TY_POLY;
+  }
   /* recompute returns: a method returning such a param is now poly */
   for (int iter = 0; iter < 8; iter++) if (!infer_return_types(c)) break;
 
