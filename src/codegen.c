@@ -1817,10 +1817,36 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* JSON.generate(x) / JSON.dump(x) -> serialize a boxed value */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
-      (!strcmp(name, "generate") || !strcmp(name, "dump")) && argc == 1 &&
-      !ty_is_object(comp_ntype(c, argv[0]))) {  /* user objects have no JSON serializer yet */
-    buf_puts(b, "sp_json_val("); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-    return;
+      (!strcmp(name, "generate") || !strcmp(name, "dump")) && argc == 1) {
+    TyKind at = comp_ntype(c, argv[0]);
+    /* a Struct serializes as a JSON object of its members */
+    if (ty_is_object(at) && c->classes[ty_object_class(at)].is_struct) {
+      ClassInfo *cls = &c->classes[ty_object_class(at)];
+      int ts = ++g_tmp;
+      buf_printf(b, "({ sp_%s *_t%d = ", cls->name, ts); emit_expr(c, argv[0], b); buf_puts(b, "; sp_sprintf(\"{");
+      for (int a = 0; a < cls->nivars; a++) {
+        if (a) buf_puts(b, ",");
+        buf_printf(b, "\\\"%s\\\":%%s", cls->ivars[a] + 1);  /* member name, sans @ */
+      }
+      buf_puts(b, "}\"");
+      for (int a = 0; a < cls->nivars; a++) {
+        TyKind mt = cls->ivar_types[a];
+        const char *iv = cls->ivars[a] + 1;  /* field name, sans @ */
+        buf_puts(b, ", ");
+        if (mt == TY_INT) buf_printf(b, "(_t%d->iv_%s == SP_INT_NIL ? SPL(\"null\") : sp_int_to_s(_t%d->iv_%s))", ts, iv, ts, iv);
+        else if (mt == TY_STRING) buf_printf(b, "(_t%d->iv_%s ? sp_json_str(_t%d->iv_%s) : SPL(\"null\"))", ts, iv, ts, iv);
+        else if (mt == TY_FLOAT) buf_printf(b, "sp_float_to_s(_t%d->iv_%s)", ts, iv);
+        else if (mt == TY_BOOL) buf_printf(b, "(_t%d->iv_%s ? SPL(\"true\") : SPL(\"false\"))", ts, iv);
+        else if (mt == TY_POLY) buf_printf(b, "sp_json_val(_t%d->iv_%s)", ts, iv);
+        else buf_puts(b, "SPL(\"null\")");
+      }
+      buf_printf(b, "); })");
+      return;
+    }
+    if (!ty_is_object(at)) {  /* other user objects have no JSON serializer yet */
+      buf_puts(b, "sp_json_val("); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
   }
 
   /* Dir.exist? / Dir.exists? -> directory test */
