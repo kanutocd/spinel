@@ -341,6 +341,16 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "reset") || !strcmp(name, "terminate") || !strcmp(name, "unscan")) return TY_STRINGSCANNER;
   }
 
+  /* MatchData instance methods */
+  if (recv >= 0 && rt == TY_MATCHDATA) {
+    if (!strcmp(name, "[]") && argc == 1) return TY_STRING;
+    if (!strcmp(name, "pre_match") || !strcmp(name, "post_match") || !strcmp(name, "to_s")) return TY_STRING;
+    if (!strcmp(name, "begin") || !strcmp(name, "end") || !strcmp(name, "length") || !strcmp(name, "size")) return TY_INT;
+    if (!strcmp(name, "offset")) return TY_INT_ARRAY;
+    if (!strcmp(name, "captures") || !strcmp(name, "to_a") || !strcmp(name, "named_captures")) return TY_POLY_ARRAY;
+    if (!strcmp(name, "nil?")) return TY_BOOL;
+  }
+
   /* StringIO.open(args) { |io| body } -> the block body's value */
   if (recv >= 0 && !strcmp(name, "open") && nt_type(nt, recv) &&
       !strcmp(nt_type(nt, recv), "ConstantReadNode") && nt_str(nt, recv, "name") &&
@@ -784,7 +794,8 @@ static TyKind infer_call(Compiler *c, int id) {
       if (aty && !strcmp(aty, "RegularExpressionNode")) return TY_POLY;  /* nil on no match */
     }
     if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count") ||
-        !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp")) return TY_INT;
+        !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp") ||
+        !strcmp(name, "bytesize")) return TY_INT;
     if (!strcmp(name, "scrub") || !strcmp(name, "crypt")) return TY_STRING;
     if (!strcmp(name, "rindex")) return TY_INT;
     if (!strcmp(name, "partition") || !strcmp(name, "rpartition")) return TY_STR_ARRAY;
@@ -875,6 +886,11 @@ static TyKind infer_call(Compiler *c, int id) {
   if (!strcmp(name, "object_id") && recv >= 0 && argc == 0) return TY_INT;
   if (!strcmp(name, "between?") && argc == 2 && (rt == TY_STRING || ty_is_numeric(rt))) return TY_BOOL;
   if ((!strcmp(name, "match?") || !strcmp(name, "!~")) && recv >= 0) return TY_BOOL;
+  if (!strcmp(name, "match") && recv >= 0 && (argc == 1 || argc == 2)) {
+    const char *rrt = nt_type(nt, recv), *art = argc > 0 ? nt_type(nt, argv[0]) : NULL;
+    if ((rrt && !strcmp(rrt, "RegularExpressionNode")) ||
+        (art && !strcmp(art, "RegularExpressionNode"))) return TY_MATCHDATA;
+  }
   if (!strcmp(name, "=~") && recv >= 0 && argc == 1) {
     const char *rrt = nt_type(nt, recv), *art = nt_type(nt, argv[0]);
     if ((rrt && !strcmp(rrt, "RegularExpressionNode")) ||

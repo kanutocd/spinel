@@ -265,6 +265,7 @@ static const char *c_type_name(TyKind t) {
     case TY_TIME:        return "sp_Time";
     case TY_STRINGIO:    return "sp_StringIO *";
     case TY_STRINGSCANNER: return "sp_StringScanner *";
+    case TY_MATCHDATA:   return "sp_MatchData *";
     case TY_EXCEPTION:   return "sp_Exception *";
     case TY_INT_ARRAY:   return "sp_IntArray *";
     case TY_FLOAT_ARRAY: return "sp_FloatArray *";
@@ -283,7 +284,7 @@ static const char *c_type_name(TyKind t) {
 }
 static int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
-         t == TY_SYMBOL || t == TY_RANGE || t == TY_TIME || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_EXCEPTION ||
+         t == TY_SYMBOL || t == TY_RANGE || t == TY_TIME || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_MATCHDATA || t == TY_EXCEPTION ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
          t == TY_POLY || t == TY_POLY_ARRAY || t == TY_PROC ||
          ty_is_hash(t) || ty_is_object(t);
@@ -299,6 +300,7 @@ static const char *default_value(TyKind t) {
     case TY_TIME:   return "(sp_Time){0}";
     case TY_STRINGIO: return "NULL";
     case TY_STRINGSCANNER: return "NULL";
+    case TY_MATCHDATA:  return "NULL";
     case TY_EXCEPTION: return "NULL";
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
@@ -2422,7 +2424,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "%d", opt); return;
     }
   }
-  if (recv >= 0 && argc >= 1 && (!strcmp(name, "match?") || !strcmp(name, "!~") || !strcmp(name, "=~"))) {
+  if (recv >= 0 && argc >= 1 && (!strcmp(name, "match?") || !strcmp(name, "!~") || !strcmp(name, "=~") || !strcmp(name, "match"))) {
     int are = re_lit_index(c, argv[0]);
     if (are >= 0 && !strcmp(name, "=~") && rt == TY_STRING) {
       buf_printf(b, "sp_re_match_poly(sp_re_pat_%d, ", are); emit_expr(c, recv, b); buf_puts(b, ")");
@@ -2436,6 +2438,30 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if (argc == 1) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, ", are); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
       buf_printf(b, "sp_str_re_match_p_at(sp_re_pat_%d, ", are); emit_expr(c, recv, b);
       buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+      return;
+    }
+    if (are >= 0 && !strcmp(name, "match")) {
+      if (argc == 1) {
+        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", are); emit_expr(c, recv, b); buf_puts(b, ")");
+      }
+      else {
+        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", are); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+      }
+      return;
+    }
+  }
+  /* /re/.match(str) and /re/.match(str, pos) */
+  {
+    int rre = re_lit_index(c, recv);
+    if (rre >= 0 && !strcmp(name, "match") && (argc == 1 || argc == 2)) {
+      if (argc == 1) {
+        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
+      else {
+        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b);
+        buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+      }
       return;
     }
   }
@@ -2901,8 +2927,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, eq ? "sp_float_is_nil(" : "(!sp_float_is_nil(");
         emit_expr(c, other, b); buf_puts(b, eq ? ")" : "))");
       }
-      else if (ot == TY_STRING) {
-        /* a nullable string carries NULL */
+      else if (ot == TY_STRING || ot == TY_MATCHDATA || ot == TY_STRINGIO || ot == TY_STRINGSCANNER) {
+        /* nullable pointer: NULL == nil */
         buf_puts(b, "(("); emit_expr(c, other, b); buf_printf(b, ") %s 0)", eq ? "==" : "!=");
       }
       else { buf_puts(b, "(("); emit_expr(c, other, b); buf_printf(b, "), %d)", eq ? 0 : 1); }
@@ -3207,6 +3233,35 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     else done = 0;
     free(rs.p);
     if (done) return;
+  }
+
+  /* MatchData instance methods (sp_MatchData *, nullable on no-match). */
+  if (recv >= 0 && rt == TY_MATCHDATA) {
+    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    if (!strcmp(name, "[]") && argc == 1) {
+      buf_printf(b, "sp_MatchData_aref(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "pre_match"))  buf_printf(b, "sp_MatchData_pre_match(%s)", r);
+    else if (!strcmp(name, "post_match")) buf_printf(b, "sp_MatchData_post_match(%s)", r);
+    else if (!strcmp(name, "to_s"))       buf_printf(b, "sp_MatchData_to_s(%s)", r);
+    else if ((!strcmp(name, "length") || !strcmp(name, "size")) && argc == 0)
+      buf_printf(b, "sp_MatchData_length(%s)", r);
+    else if (!strcmp(name, "begin") && argc == 1) {
+      buf_printf(b, "sp_MatchData_begin(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "end") && argc == 1) {
+      buf_printf(b, "sp_MatchData_end(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "offset") && argc == 1) {
+      buf_printf(b, "sp_MatchData_offset(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "captures"))  buf_printf(b, "sp_MatchData_captures(%s)", r);
+    else if (!strcmp(name, "to_a"))      buf_printf(b, "sp_MatchData_to_a(%s)", r);
+    else if (!strcmp(name, "nil?"))      buf_printf(b, "(%s == 0)", r);
+    else unsupported(c, id, "MatchData method");
+    free(rs.p);
+    return;
   }
 
   /* StringIO instance methods (a non-GC heap buffer behind sp_StringIO *). */
@@ -4353,6 +4408,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       else if (!strcmp(name, "to_sym") || !strcmp(name, "intern")) buf_printf(b, "sp_sym_intern(%s)", r);
       else if (!strcmp(name, "length") || !strcmp(name, "size")) buf_printf(b, "sp_str_length(%s)", r);
+      else if (!strcmp(name, "bytesize")) buf_printf(b, "(mrb_int)sp_str_byte_len(%s)", r);
       else if (!strcmp(name, "upcase"))     buf_printf(b, "sp_str_upcase(%s)", r);
       else if (!strcmp(name, "downcase"))   buf_printf(b, "sp_str_downcase(%s)", r);
       else if (!strcmp(name, "capitalize")) buf_printf(b, "sp_str_capitalize(%s)", r);
@@ -6088,7 +6144,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     else if (lt == TY_INT)  buf_printf(b, "(_t%d != SP_INT_NIL)", t);  /* a nullable int reads falsy at the sentinel; a plain int is always truthy */
     else if (lt == TY_FLOAT) buf_printf(b, "(!sp_float_is_nil(_t%d))", t);
     else if (lt == TY_STRING || ty_is_array(lt) || ty_is_hash(lt) || ty_is_object(lt) ||
-             lt == TY_PROC || lt == TY_STRINGIO || lt == TY_STRINGSCANNER || lt == TY_EXCEPTION)
+             lt == TY_PROC || lt == TY_STRINGIO || lt == TY_STRINGSCANNER || lt == TY_MATCHDATA || lt == TY_EXCEPTION)
       buf_printf(b, "(_t%d != 0)", t);  /* nullable pointer: NULL reads falsy */
     else                    buf_puts(b, "1");  /* concrete value: always truthy */
     buf_puts(b, " ? ");
@@ -6514,7 +6570,7 @@ static void emit_cond(Compiler *c, int id, Buf *b) {
      falsy at its sentinel (NULL string / SP_INT_NIL / NaN float); a pointer
      value is falsy when NULL. Every other concrete value is truthy. */
   if (t == TY_STRING || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) ||
-      t == TY_PROC || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_EXCEPTION) {
+      t == TY_PROC || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_MATCHDATA || t == TY_EXCEPTION) {
     buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != 0)"); return;
   }
   if (t == TY_INT)   { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != SP_INT_NIL)"); return; }

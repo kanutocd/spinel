@@ -15,6 +15,7 @@ const char *ty_name(TyKind t) {
     case TY_TIME:    return "time";
     case TY_STRINGIO: return "stringio";
     case TY_STRINGSCANNER: return "stringscanner";
+    case TY_MATCHDATA: return "matchdata";
     case TY_EXCEPTION: return "exception";
     case TY_INT_ARRAY:   return "int_array";
     case TY_FLOAT_ARRAY: return "float_array";
