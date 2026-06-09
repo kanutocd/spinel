@@ -323,6 +323,7 @@ static void emit_boxed(Compiler *c, int node, Buf *b);
 /* Emit a hash key, unboxing a poly value to the typed-hash's key type. */
 static void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
 static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b);
+static void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b);
 static void emit_proc_literal(Compiler *c, int create, Buf *b);
 static int proc_slot_is_direct(TyKind t);
 static int proc_slot_is_ptr(TyKind t);
@@ -5281,6 +5282,45 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
             }
           }
         }
+        /* poly receiver: switch on cls_id and store into each candidate
+           class's ivar, converting the rhs to that ivar's slot type. */
+        else if (rt == TY_POLY) {
+          char base[256];
+          if (ln - 1 < sizeof base) {
+            memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
+            int args = nt_ref(nt, id, "arguments");
+            int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+            int ncand = 0;
+            for (int k = 0; k < c->nclasses; k++)
+              if (comp_is_writer(&c->classes[k], base)) ncand++;
+            if (an >= 1 && ncand > 0) {
+              TyKind at = comp_ntype(c, argv[0]);
+              int tv = ++g_tmp, tval = ++g_tmp;
+              emit_indent(b, indent);
+              buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+              emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
+              buf_printf(b, " switch (_t%d.cls_id) {", tv);
+              char src[32]; snprintf(src, sizeof src, "_t%d", tval);
+              for (int k = 0; k < c->nclasses; k++) {
+                if (!comp_is_writer(&c->classes[k], base)) continue;
+                char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", base);
+                int iv = comp_ivar_index(&c->classes[k], ivn);
+                TyKind ivt = iv >= 0 ? c->classes[k].ivar_types[iv] : at;
+                /* skip a class whose slot can't hold this concrete rhs (the
+                   runtime object isn't that class anyway): a raw assignment
+                   between mismatched C types would not compile */
+                if (at != ivt && at != TY_POLY && ivt != TY_POLY) continue;
+                buf_printf(b, " case %d: ((sp_%s *)_t%d.v.p)->iv_%s = ", k, c->classes[k].name, tv, base);
+                if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
+                else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
+                else buf_puts(b, src);
+                buf_puts(b, "; break;");
+              }
+              buf_puts(b, " } }\n");
+              return;
+            }
+          }
+        }
       }
     }
     if (emit_array_mutate_stmt(c, id, b, indent)) return;
@@ -5638,6 +5678,23 @@ static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   }
   if (fn) buf_printf(b, "%s(%s)", fn, expr);
   else buf_printf(b, "sp_box_int(%s)", expr);  /* fallback */
+}
+
+/* Emit `expr` (a poly value) unboxed to its concrete C representation. */
+static void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
+  if (t == TY_POLY) { buf_puts(b, expr); return; }
+  switch (t) {
+    case TY_INT:    buf_printf(b, "(%s).v.i", expr); return;
+    case TY_FLOAT:  buf_printf(b, "(%s).v.f", expr); return;
+    case TY_STRING: buf_printf(b, "(%s).v.s", expr); return;
+    case TY_BOOL:   buf_printf(b, "(%s).v.b", expr); return;
+    case TY_SYMBOL: buf_printf(b, "(sp_sym)(%s).v.i", expr); return;
+    default: break;
+  }
+  if (ty_is_object(t)) { buf_printf(b, "(sp_%s *)(%s).v.p", c->classes[ty_object_class(t)].name, expr); return; }
+  const char *cn = c_type_name(t);
+  if (cn) buf_printf(b, "(%s)(%s).v.p", cn, expr);
+  else buf_printf(b, "(%s).v.i", expr);
 }
 
 static void emit_boxed(Compiler *c, int node, Buf *b) {
