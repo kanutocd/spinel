@@ -877,7 +877,9 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "ConstantReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     LocalVar *lv = nm ? comp_const(c, nm) : NULL;
-    return lv ? lv->type : TY_UNKNOWN;
+    if (lv) return lv->type;
+    if (nm && !strcmp(nm, "RUBY_DESCRIPTION")) return TY_STRING;
+    return TY_UNKNOWN;
   }
   if (!strcmp(ty, "SelfNode")) {
     Scope *s = comp_scope_of(c, id);

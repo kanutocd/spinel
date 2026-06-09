@@ -4565,6 +4565,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
       else buf_printf(b, "cst_%s", nm);
       return;
     }
+    if (nm && !strcmp(nm, "RUBY_DESCRIPTION")) { buf_puts(b, "SPL(\"spinel\")"); return; }
     unsupported(c, id, "constant read");
   }
   if (!strcmp(ty, "ParenthesesNode")) {
