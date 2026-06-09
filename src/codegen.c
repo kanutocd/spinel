@@ -2223,6 +2223,28 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
         return;
       }
+      if ((!strcmp(name, "values_at") || !strcmp(name, "fetch_values")) && argc >= 1) {
+        /* collect looked-up values into a poly array; values_at yields nil for
+           a missing key, fetch_values raises KeyError */
+        int is_fetch = !strcmp(name, "fetch_values");
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int th = ++g_tmp, tr = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        for (int a = 0; a < argc; a++) {
+          int tk = ++g_tmp;
+          buf_printf(b, " %s _t%d = ", c_type_name(kt), tk); emit_hash_key(c, argv[a], kt, b); buf_puts(b, ";");
+          buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) sp_PolyArray_push(_t%d, ", hn, th, tk, tr);
+          char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+          if (vt == TY_POLY) buf_puts(b, getexpr);
+          else emit_boxed_text(c, vt, getexpr, b);
+          buf_puts(b, ");");
+          if (is_fetch) buf_puts(b, " else sp_raise_cls(\"KeyError\", \"key not found\");");
+          else buf_printf(b, " else sp_PolyArray_push(_t%d, sp_box_nil());", tr);
+        }
+        buf_printf(b, " _t%d; })", tr);
+        return;
+      }
       if (!strcmp(name, "fetch") && argc == 1) {
         int blk = nt_ref(nt, id, "block");
         if (blk >= 0) {

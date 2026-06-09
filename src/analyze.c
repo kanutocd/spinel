@@ -632,6 +632,7 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "count")) return TY_INT;
     if (!strcmp(name, "keys"))   return ty_array_of(ty_hash_key(rt));
     if (!strcmp(name, "values")) return ty_array_of(ty_hash_val(rt));
+    if (!strcmp(name, "values_at") || !strcmp(name, "fetch_values")) return TY_POLY_ARRAY;
     {
       int block = nt_ref(nt, id, "block");
       if (block >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
