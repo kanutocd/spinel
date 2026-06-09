@@ -2042,6 +2042,18 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
+      if (!strcmp(name, "delete") && argc == 1 &&
+          (rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH || rt == TY_SYM_POLY_HASH)) {
+        /* returns the deleted value (or nil on a miss), then removes the key */
+        TyKind vt = ty_hash_val(rt);
+        int th = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
+                   c_type_name(vt), tv, hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
+        buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
+        return;
+      }
     }
   }
 

@@ -579,6 +579,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "[]"))     return ty_hash_val(rt);
     if (!strcmp(name, "[]="))    return ty_hash_val(rt);
     if (!strcmp(name, "fetch"))  return ty_hash_val(rt);
+    if (!strcmp(name, "delete")) return ty_hash_val(rt);
     if (!strcmp(name, "length") || !strcmp(name, "size") ||
         !strcmp(name, "count")) return TY_INT;
     if (!strcmp(name, "keys"))   return ty_array_of(ty_hash_key(rt));
