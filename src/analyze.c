@@ -630,6 +630,8 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "eql?") || !strcmp(name, "==") || !strcmp(name, "!=") ||
         !strcmp(name, "overlap?")) return TY_BOOL;
     if (!strcmp(name, "step")) return TY_INT_ARRAY;
+    if (!strcmp(name, "all?") || !strcmp(name, "any?") ||
+        !strcmp(name, "none?") || !strcmp(name, "one?")) return TY_BOOL;
     if (!strcmp(name, "each") && nt_ref(nt, id, "block") < 0) return TY_INT_ARRAY;
     if (!strcmp(name, "sum") || !strcmp(name, "min") || !strcmp(name, "max") ||
         !strcmp(name, "first") || !strcmp(name, "last") ||

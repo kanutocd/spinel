@@ -701,6 +701,75 @@ static int emit_collect_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* all?/any?/none?/one? with a block: loop, count the truthy block results,
+   and reduce to the predicate. Returns 1 if handled. */
+static int emit_predicate_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name) return 0;
+  int is_all = !strcmp(name, "all?"), is_any = !strcmp(name, "any?"),
+      is_none = !strcmp(name, "none?"), is_one = !strcmp(name, "one?");
+  if (!(is_all || is_any || is_none || is_one)) return 0;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  int range_recv = (rt == TY_RANGE);
+  if (!ty_is_array(rt) && !range_recv) return 0;
+  const char *k = range_recv ? "Int" : (rt == TY_POLY_ARRAY ? "Poly" : array_kind(rt));
+  if (!k) return 0;
+  int body = nt_ref(nt, block, "body");
+  int bn = 0;
+  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+  /* the block's last expression is used as a C condition: require a scalar */
+  TyKind vt = comp_ntype(c, bb[bn - 1]);
+  if (!(vt == TY_BOOL || vt == TY_INT || vt == TY_FLOAT)) return 0;
+
+  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  int trecv = ++g_tmp, tcnt = ++g_tmp, ti = ++g_tmp;
+
+  Buf rb; memset(&rb, 0, sizeof rb);
+  if (range_recv) {
+    int tr = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_Range _t%d = ", tr); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+    buf_printf(&rb, "sp_IntArray_from_range(_t%d.first, _t%d.last - _t%d.excl)", tr, tr, tr);
+    rt = TY_INT_ARRAY;
+  }
+  else emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "mrb_int _t%d = 0;\n", tcnt);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, k, trecv, ti);
+  int bodyIndent = g_indent + 1;
+  if (p0) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+  }
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndent);
+  int saveIndent = g_indent;
+  g_indent = bodyIndent;
+  Buf vb; memset(&vb, 0, sizeof vb);
+  emit_expr(c, bb[bn - 1], &vb);
+  g_indent = saveIndent;
+  emit_indent(g_pre, bodyIndent);
+  buf_printf(g_pre, "if (%s) _t%d++;\n", vb.p ? vb.p : "0", tcnt);
+  free(vb.p);
+  emit_indent(g_pre, g_indent);
+  buf_puts(g_pre, "}\n");
+
+  if (is_all) buf_printf(b, "(_t%d == sp_%sArray_length(_t%d))", tcnt, k, trecv);
+  else if (is_any) buf_printf(b, "(_t%d > 0)", tcnt);
+  else if (is_none) buf_printf(b, "(_t%d == 0)", tcnt);
+  else buf_printf(b, "(_t%d == 1)", tcnt);
+  return 1;
+}
+
 /* Emit the `pattern === elem` membership test for grep, given the element
    bound to C variable `ev`. Returns 1 if the pattern kind is supported. */
 static int emit_grep_pred(Compiler *c, int pat, const char *ev, Buf *b) {
@@ -898,6 +967,7 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
 static void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   if (emit_collect_expr(c, id, b)) return;
+  if (emit_predicate_expr(c, id, b)) return;
   if (emit_grep_expr(c, id, b)) return;
   if (emit_minmax_by_expr(c, id, b)) return;
   if (emit_sortby_expr(c, id, b)) return;
@@ -1752,9 +1822,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, "sp_float_is_nil("); emit_expr(c, recv, b); buf_puts(b, ")");
     return;
   }
-  /* a no-block predicate on an empty array literal folds to a constant
-     (empty: all?/none? true, any?/one? false) */
-  if (recv >= 0 && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+  /* a predicate on an empty array literal folds to a constant: the block (if
+     any) never runs, so empty all?/none? are true, any?/one? false */
+  if (recv >= 0 && argc == 0 &&
       (!strcmp(name, "all?") || !strcmp(name, "any?") ||
        !strcmp(name, "none?") || !strcmp(name, "one?")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ArrayNode") &&
