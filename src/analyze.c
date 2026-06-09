@@ -553,6 +553,7 @@ static TyKind infer_call(Compiler *c, int id) {
       if (!strcmp(name, "max_by") || !strcmp(name, "min_by") ||
           !strcmp(name, "find") || !strcmp(name, "detect"))
         return ty_array_elem(rt);  /* returns an element */
+      if (!strcmp(name, "partition")) return TY_POLY_ARRAY;  /* [[truthy...],[falsy...]] */
     }
     /* grep/grep_v without a block filter by `pattern === e`, preserving the
        receiver's array type. */
@@ -648,6 +649,7 @@ static TyKind infer_call(Compiler *c, int id) {
       if ((!strcmp(name, "gsub") || !strcmp(name, "sub")) && argc == 2) return TY_STRING;
       if (!strcmp(name, "to_i") || !strcmp(name, "length") || !strcmp(name, "size")) return TY_INT;
       if (!strcmp(name, "to_f")) return TY_FLOAT;
+      if (!strcmp(name, "[]") && argc == 1) return TY_POLY;  /* boxed array element access */
       /* poly method dispatch: unify the return type over every class that
          defines `name` (the runtime cls_id picks the impl). */
       TyKind r = TY_UNKNOWN; int found = 0;
@@ -922,6 +924,27 @@ static TyKind infer_call(Compiler *c, int id) {
   if (!strcmp(name, "to_sym")) return TY_SYMBOL;
 
   if (is_void_call(name) && recv < 0) return TY_VOID;
+
+  /* tap: run block, return self */
+  if (!strcmp(name, "tap") && recv >= 0) return rt;
+  /* then / yield_self: run block, return block result */
+  if (!strcmp(name, "then") || !strcmp(name, "yield_self")) {
+    int blk_id = nt_ref(nt, id, "block");
+    if (blk_id >= 0) {
+      int bdy = nt_ref(nt, blk_id, "body");
+      int bbn = 0; const int *bbb = bdy >= 0 ? nt_arr(nt, bdy, "body", &bbn) : NULL;
+      if (bbn <= 0) return TY_NIL;
+      /* Pin block param to receiver type so body inference uses the right type */
+      const char *bp0 = block_param_name(c, blk_id, 0);
+      Scope *bs = bp0 ? comp_scope_of(c, blk_id) : NULL;
+      LocalVar *blv = (bs && bp0) ? scope_local(bs, bp0) : NULL;
+      TyKind saved_blv = blv ? blv->type : TY_UNKNOWN;
+      if (blv && rt != TY_UNKNOWN) blv->type = rt;
+      TyKind result = infer_type(c, bbb[bbn - 1]);
+      if (blv) blv->type = saved_blv;
+      return result;
+    }
+  }
 
   return TY_UNKNOWN;
 }
@@ -2205,6 +2228,15 @@ static int infer_block_params(Compiler *c) {
     const char *p0 = block_param_name(c, block, 0);
     if (!p0) continue;
 
+    /* then / yield_self: block param receives the receiver value */
+    if (!strcmp(name, "then") || !strcmp(name, "yield_self")) {
+      Scope *bs = comp_scope_of(c, block);
+      LocalVar *lv = scope_local_intern(bs, p0); lv->is_block_param = 1;
+      TyKind m = ty_unify(lv->type, rt);
+      if (m != lv->type) { lv->type = m; changed = 1; }
+      continue;
+    }
+
     TyKind pt = TY_UNKNOWN;
     if (!strcmp(name, "step") && (rt == TY_INT || rt == TY_FLOAT)) {
       /* a float receiver or float limit/step yields floats */
@@ -2382,6 +2414,7 @@ static TyKind return_node_type(Compiler *c, int id) {
   if (args < 0) return TY_NIL;
   int n = 0;
   const int *a = nt_arr(c->nt, args, "arguments", &n);
+  if (n > 1) return TY_POLY_ARRAY;
   return n > 0 ? infer_type(c, a[0]) : TY_NIL;
 }
 

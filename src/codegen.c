@@ -1146,6 +1146,100 @@ static int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* partition { |x| ... } as an expression: emits two typed result arrays
+   pushed into a PolyArray. Returns 1 if handled. */
+static int emit_partition_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "partition")) return 0;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  TyKind rt = infer_type(c, recv);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+  if (!k) return 0;
+
+  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0;
+  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+
+  TyKind et = ty_array_elem(rt);
+  Scope *psc = p0 ? comp_scope_of(c, block) : NULL;
+  LocalVar *plv0 = (psc && p0) ? scope_local(psc, p0) : NULL;
+  TyKind psaved0 = plv0 ? plv0->type : TY_UNKNOWN;
+  int use_shadow = plv0 && plv0->type != et && et != TY_UNKNOWN;
+  if (use_shadow) {
+    plv0->type = et;
+    for (int j = 0; j < bn; j++) infer_type(c, bb[j]);
+  }
+
+  int trecv = ++g_tmp, ttrue = ++g_tmp, tfalse = ++g_tmp, ti = ++g_tmp;
+
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, ttrue, k);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ttrue);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, tfalse, k);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tfalse);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
+             ti, ti, k, trecv, ti);
+
+  int bodyIndent = g_indent + 1;
+  int innerIndent = use_shadow ? bodyIndent + 1 : bodyIndent;
+  if (use_shadow) {
+    emit_indent(g_pre, bodyIndent); buf_puts(g_pre, "{\n");
+    emit_indent(g_pre, innerIndent); emit_ctype(c, et, g_pre);
+    buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+  }
+  else if (p0) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+  }
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, innerIndent);
+  int saveIndent = g_indent; g_indent = innerIndent;
+  Buf vb; memset(&vb, 0, sizeof vb);
+  emit_expr(c, bb[bn - 1], &vb);
+  g_indent = saveIndent;
+
+  emit_indent(g_pre, innerIndent);
+  buf_printf(g_pre, "if (%s) sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));\n",
+             vb.p ? vb.p : "0", k, ttrue, k, trecv, ti);
+  emit_indent(g_pre, innerIndent);
+  buf_printf(g_pre, "else sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));\n",
+             k, tfalse, k, trecv, ti);
+  free(vb.p);
+
+  if (use_shadow) { emit_indent(g_pre, bodyIndent); buf_puts(g_pre, "}\n"); }
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  if (use_shadow && plv0) plv0->type = psaved0;
+
+  int tres = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new();\n", tres);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres);
+
+  const char *box_fn = (rt == TY_INT_ARRAY) ? "sp_box_int_array"
+                     : (rt == TY_STR_ARRAY) ? "sp_box_str_array"
+                     : (rt == TY_FLOAT_ARRAY) ? "sp_box_float_array"
+                     : "sp_box_poly_array";
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s(_t%d));\n", tres, box_fn, ttrue);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s(_t%d));\n", tres, box_fn, tfalse);
+
+  buf_printf(b, "_t%d", tres);
+  return 1;
+}
+
 /* map/select/reject/filter as an expression: build a result array via a
    loop emitted into the statement prelude; the expression value is the
    temp array. Returns 1 if handled. */
@@ -1205,38 +1299,59 @@ static int emit_collect_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, k, trecv, ti);
 
+  TyKind et_elem = ty_array_elem(rt);
+  /* If the block param's scope type was widened (e.g. TY_POLY), pin it to
+     the element type and use a C shadow declaration so body emission sees the
+     right type. */
+  Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
+  LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
+  TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
+  int use_shadow = clv0 && clv0->type != et_elem && et_elem != TY_UNKNOWN;
+  if (use_shadow) {
+    clv0->type = et_elem;
+    for (int j = 0; j < bn; j++) infer_type(c, bb[j]);
+  }
+
   int bodyIndent = g_indent + 1;
-  if (p0) {
+  int innerIndent = use_shadow ? bodyIndent + 1 : bodyIndent;
+  if (use_shadow) {
+    emit_indent(g_pre, bodyIndent); buf_puts(g_pre, "{\n");
+    emit_indent(g_pre, innerIndent); emit_ctype(c, et_elem, g_pre);
+    buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+  } else if (p0) {
     emit_indent(g_pre, bodyIndent);
     buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
   }
   /* body statements except the last */
-  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, bodyIndent);
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, innerIndent);
 
   int saveIndent = g_indent;
-  g_indent = bodyIndent;
+  g_indent = innerIndent;
   Buf vb; memset(&vb, 0, sizeof vb);
-  emit_expr(c, bb[bn - 1], &vb);  /* value preludes flow to g_pre at bodyIndent */
+  emit_expr(c, bb[bn - 1], &vb);  /* value preludes flow to g_pre at innerIndent */
   g_indent = saveIndent;
 
+  TyKind body_ty = comp_ntype(c, bb[bn - 1]);
   if (is_map) {
-    emit_indent(g_pre, bodyIndent);
+    emit_indent(g_pre, innerIndent);
     buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk, tres);
     /* a poly result array stores boxed values */
-    if (res_poly && comp_ntype(c, bb[bn - 1]) != TY_POLY) {
-      Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, comp_ntype(c, bb[bn - 1]), vb.p ? vb.p : "", &bx);
+    if (res_poly && body_ty != TY_POLY) {
+      Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, body_ty, vb.p ? vb.p : "", &bx);
       buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
     }
     else buf_puts(g_pre, vb.p ? vb.p : "");
     buf_puts(g_pre, ");\n");
   }
   else {
-    emit_indent(g_pre, bodyIndent);
+    emit_indent(g_pre, innerIndent);
     buf_printf(g_pre, "if (%s(", is_rej ? "!" : "");
     buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ")) ");
     buf_printf(g_pre, "sp_%sArray_push(_t%d, lv_%s);\n", rk, tres, p0 ? p0 : "");
   }
   free(vb.p);
+  if (use_shadow) { emit_indent(g_pre, bodyIndent); buf_puts(g_pre, "}\n"); }
+  if (use_shadow && clv0) clv0->type = csaved0;
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "}\n");
 
@@ -1565,6 +1680,7 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
 
 static void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
+  if (emit_partition_expr(c, id, b)) return;
   if (emit_collect_expr(c, id, b)) return;
   if (emit_predicate_expr(c, id, b)) return;
   if (emit_grep_expr(c, id, b)) return;
@@ -1905,6 +2021,55 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     int args = nt_ref(nt, id, "arguments");
     int argc0 = 0; if (args >= 0) nt_arr(nt, args, "arguments", &argc0);
     if (argc0 == 0) { emit_expr(c, recv, b); return; }
+  }
+
+  /* then / yield_self: pass receiver to block, return block result */
+  if (recv >= 0 && (!strcmp(name, "then") || !strcmp(name, "yield_self"))) {
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0) {
+      TyKind rtype = infer_type(c, recv);
+      const char *bp0 = block_param_name(c, blk, 0); if (bp0) bp0 = rename_local(bp0);
+      int blk_body = nt_ref(nt, blk, "body");
+      int then_bn = 0; const int *then_bb = blk_body >= 0 ? nt_arr(nt, blk_body, "body", &then_bn) : NULL;
+      if (then_bn >= 1) {
+        Scope *tsc = bp0 ? comp_scope_of(c, blk) : NULL;
+        LocalVar *tlv0 = (tsc && bp0) ? scope_local(tsc, bp0) : NULL;
+        TyKind tsaved0 = tlv0 ? tlv0->type : TY_UNKNOWN;
+        int use_shadow_th = tlv0 && tlv0->type != rtype && rtype != TY_UNKNOWN;
+        /* Pin block param type early so body_ty is computed with correct cache */
+        if (use_shadow_th && tlv0) {
+          tlv0->type = rtype;
+          for (int j = 0; j < then_bn; j++) infer_type(c, then_bb[j]);
+        }
+        TyKind body_ty = infer_type(c, then_bb[then_bn - 1]);
+        int tr = ++g_tmp, tres = ++g_tmp;
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+        emit_indent(g_pre, g_indent); emit_ctype(c, rtype, g_pre);
+        buf_printf(g_pre, " _t%d = %s;\n", tr, rb.p ? rb.p : ""); free(rb.p);
+        /* Declare tres at outer scope so it is visible after any shadow block */
+        emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
+        buf_printf(g_pre, " _t%d;\n", tres);
+        int bodyIndent = g_indent;
+        if (use_shadow_th) {
+          emit_indent(g_pre, g_indent); buf_puts(g_pre, "{\n");
+          bodyIndent = g_indent + 1;
+          emit_indent(g_pre, bodyIndent); emit_ctype(c, rtype, g_pre);
+          buf_printf(g_pre, " lv_%s = _t%d;\n", bp0, tr);
+        }
+        else if (bp0) {
+          emit_indent(g_pre, g_indent); buf_printf(g_pre, "lv_%s = _t%d;\n", bp0, tr);
+        }
+        for (int j = 0; j < then_bn - 1; j++) emit_stmt(c, then_bb[j], g_pre, bodyIndent);
+        int save_ind = g_indent; g_indent = bodyIndent;
+        Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, then_bb[then_bn - 1], &vb);
+        g_indent = save_ind;
+        emit_indent(g_pre, bodyIndent); buf_printf(g_pre, "_t%d = %s;\n", tres, vb.p ? vb.p : "0"); free(vb.p);
+        if (use_shadow_th) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }
+        if (use_shadow_th && tlv0) tlv0->type = tsaved0;
+        buf_printf(b, "_t%d", tres);
+        return;
+      }
+    }
   }
 
   /* implicit-self call inside an instance method */
@@ -3194,7 +3359,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         free(cb.p);
       }
       if (is_index) {
-        buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+        if (ret == TY_POLY) {
+          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_box_int(sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
+          buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = sp_box_str(sp_StrArray_get((sp_StrArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
+          buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = sp_box_float(sp_FloatArray_get((sp_FloatArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
+          buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = sp_PolyArray_get((sp_PolyArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+        }
+        else {
+          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+        }
       }
       /* the poly value may actually be a string-keyed hash: dispatch `[]` /
          `fetch` to the matching hash storage, boxing the value into the poly
@@ -4111,23 +4284,43 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     int is_line = !strcmp(name, "each_line");
     int is_byte = !strcmp(name, "each_byte");
+    Scope *cs_ech = p0 ? comp_scope_of(c, id) : NULL;
+    LocalVar *clv_ech = (p0 && cs_ech) ? scope_local(cs_ech, p0) : NULL;
+    int p0_box_poly_ech = clv_ech && clv_ech->type == TY_POLY;
     buf_printf(b, "({ const char *_t%d = %s; ", ts, rb.p ? rb.p : ""); free(rb.p);
+    /* Save outer variable before loop to restore it afterward */
+    int tsv_ech = 0;
+    if (p0 && clv_ech) {
+      tsv_ech = ++g_tmp;
+      Buf sv_ech; memset(&sv_ech, 0, sizeof sv_ech); emit_ctype(c, clv_ech->type, &sv_ech);
+      buf_printf(b, "%s _t%d = lv_%s; ", sv_ech.p ? sv_ech.p : "sp_RbVal", tsv_ech, p0); free(sv_ech.p);
+    }
     if (is_line) {
       int tl = ++g_tmp;
       buf_printf(b, "sp_StrArray *_t%d = sp_str_lines(_t%d); for (mrb_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) { ", tl, ts, ti, ti, tl, ti);
-      if (p0) buf_printf(b, "lv_%s = sp_StrArray_get(_t%d, _t%d); ", p0, tl, ti);
+      if (p0) {
+        if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_str(sp_StrArray_get(_t%d, _t%d)); ", p0, tl, ti);
+        else buf_printf(b, "lv_%s = sp_StrArray_get(_t%d, _t%d); ", p0, tl, ti);
+      }
     }
     else if (is_byte) {
       buf_printf(b, "for (mrb_int _t%d = 0; _t%d < (mrb_int)sp_str_byte_len(_t%d); _t%d++) { ", ti, ti, ts, ti);
-      if (p0) buf_printf(b, "lv_%s = (unsigned char)_t%d[_t%d]; ", p0, ts, ti);
+      if (p0) {
+        if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_int((unsigned char)_t%d[_t%d]); ", p0, ts, ti);
+        else buf_printf(b, "lv_%s = (unsigned char)_t%d[_t%d]; ", p0, ts, ti);
+      }
     }
     else {
       buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_str_length(_t%d); _t%d++) { ", ti, ti, ts, ti);
-      if (p0) buf_printf(b, "lv_%s = sp_str_char_at_or_nil(_t%d, _t%d); ", p0, ts, ti);
+      if (p0) {
+        if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_str(sp_str_char_at_or_nil(_t%d, _t%d)); ", p0, ts, ti);
+        else buf_printf(b, "lv_%s = sp_str_char_at_or_nil(_t%d, _t%d); ", p0, ts, ti);
+      }
     }
     int sv = g_nren; g_nren = 0;
     emit_stmts(c, body, b, 0);
     g_nren = sv;
+    if (p0 && tsv_ech > 0) buf_printf(b, " lv_%s = _t%d;", p0, tsv_ech);
     buf_printf(b, " } _t%d; })", ts);
     return;
   }
@@ -5027,6 +5220,20 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
     int t = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    Scope *cs_ewi = comp_scope_of(c, id);
+    LocalVar *clv_ewi_p1 = (p1 && cs_ewi) ? scope_local(cs_ewi, p1) : NULL;
+    LocalVar *clv_ewi_p0 = (p0 && cs_ewi) ? scope_local(cs_ewi, p0) : NULL;
+    int p1_box_poly = clv_ewi_p1 && clv_ewi_p1->type == TY_POLY;
+    /* Save outer variables before loop */
+    int ts_p0 = 0, ts_p1 = 0;
+    if (p0 && clv_ewi_p0) {
+      ts_p0 = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_ctype(c, clv_ewi_p0->type, &ot);
+      emit_indent(b, indent); buf_printf(b, "%s _t%d = lv_%s;\n", ot.p ? ot.p : "sp_RbVal", ts_p0, p0); free(ot.p);
+    }
+    if (p1 && clv_ewi_p1) {
+      ts_p1 = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_ctype(c, clv_ewi_p1->type, &ot);
+      emit_indent(b, indent); buf_printf(b, "%s _t%d = lv_%s;\n", ot.p ? ot.p : "sp_RbVal", ts_p1, p1); free(ot.p);
+    }
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(", t, t, k);
     buf_puts(b, rb.p); buf_printf(b, "); _t%d++) {\n", t);
@@ -5035,9 +5242,16 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
       buf_puts(b, rb.p); buf_printf(b, ", _t%d);\n", t);
     }
-    if (p1) { emit_indent(b, indent + 1); buf_printf(b, "lv_%s = _t%d;\n", p1, t); }
+    if (p1) {
+      emit_indent(b, indent + 1);
+      if (p1_box_poly) buf_printf(b, "lv_%s = sp_box_int(_t%d);\n", p1, t);
+      else buf_printf(b, "lv_%s = _t%d;\n", p1, t);
+    }
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
+    /* Restore outer variables */
+    if (p0 && ts_p0 > 0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p0, ts_p0); }
+    if (p1 && ts_p1 > 0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p1, ts_p1); }
     free(rb.p);
     return 1;
   }
@@ -5153,8 +5367,27 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, tnn, k, ta, ti);
     if (np == 1) {
       const char *pn = block_param_name(c, block, 0);
-      emit_indent(b, indent + 1);
-      buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", rename_local(pn), k, ta, ti, tnn);
+      const char *rpn = rename_local(pn);
+      Scope *csc_ec = comp_scope_of(c, block);
+      LocalVar *clv_ec = csc_ec ? scope_local(csc_ec, pn) : NULL;
+      TyKind csaved_ec = clv_ec ? clv_ec->type : TY_UNKNOWN;
+      int use_shadow_ec = clv_ec && clv_ec->type != rt && rt != TY_UNKNOWN;
+      if (use_shadow_ec) {
+        int bodyBn = 0; const int *bodyBb = body >= 0 ? nt_arr(nt, body, "body", &bodyBn) : NULL;
+        clv_ec->type = rt;
+        for (int j = 0; j < bodyBn; j++) infer_type(c, bodyBb[j]);
+        emit_indent(b, indent + 1); buf_puts(b, "{\n");
+        emit_indent(b, indent + 2); emit_ctype(c, rt, b);
+        buf_printf(b, " lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", rpn, k, ta, ti, tnn);
+        emit_stmts(c, body, b, indent + 2);
+        emit_indent(b, indent + 1); buf_puts(b, "}\n");
+        clv_ec->type = csaved_ec;
+      }
+      else {
+        emit_indent(b, indent + 1);
+        buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", rpn, k, ta, ti, tnn);
+        emit_stmts(c, body, b, indent + 1);
+      }
     }
     else {
       for (int pj = 0; pj < np; pj++) {
@@ -5162,8 +5395,8 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
         emit_indent(b, indent + 1);
         buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n", rename_local(pn), k, ta, ti, pj);
       }
+      emit_stmts(c, body, b, indent + 1);
     }
-    emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
   }
@@ -5220,6 +5453,159 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent + 1); buf_printf(b, "if (_t%d == 0) break;\n", tcmp);
     emit_indent(b, indent + 1); buf_printf(b, "_t%d = sp_str_succ(_t%d);\n", tc, tc);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+
+  /* recv.tap { |p| body } -- run block for side effects, preserve outer var */
+  if (!strcmp(name, "tap") && recv >= 0) {
+    TyKind et = infer_type(c, recv);
+    Scope *tsc = p0 ? comp_scope_of(c, block) : NULL;
+    LocalVar *tlv0 = (tsc && p0) ? scope_local(tsc, p0) : NULL;
+    TyKind tsaved0 = tlv0 ? tlv0->type : TY_UNKNOWN;
+    int use_shadow_t = tlv0 && tlv0->type != et && et != TY_UNKNOWN;
+    int tr = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent); emit_ctype(c, et, b);
+    buf_printf(b, " _t%d = %s;\n", tr, rb.p ? rb.p : ""); free(rb.p);
+    if (use_shadow_t) {
+      int tbody_bn = 0; const int *tbody_bb = body >= 0 ? nt_arr(nt, body, "body", &tbody_bn) : NULL;
+      tlv0->type = et;
+      for (int j = 0; j < tbody_bn; j++) infer_type(c, tbody_bb[j]);
+      emit_indent(b, indent); buf_puts(b, "{\n");
+      emit_indent(b, indent + 1); emit_ctype(c, et, b);
+      buf_printf(b, " lv_%s = _t%d;\n", p0, tr);
+      emit_stmts(c, body, b, indent + 1);
+      emit_indent(b, indent); buf_puts(b, "}\n");
+      tlv0->type = tsaved0;
+    }
+    else {
+      if (p0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p0, tr); }
+      emit_stmts(c, body, b, indent);
+    }
+    return 1;
+  }
+
+  /* array.cycle(n) { |p| body } -- repeat n times over the array */
+  if (!strcmp(name, "cycle") && ty_is_array(rt)) {
+    int args = nt_ref(nt, id, "arguments");
+    int cyc_argc = 0; const int *cyc_argv = args >= 0 ? nt_arr(nt, args, "arguments", &cyc_argc) : NULL;
+    if (cyc_argc != 1) return 0;
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    if (!k) return 0;
+    TyKind et = ty_array_elem(rt);
+    Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
+    LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
+    TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
+    int use_shadow_cy = clv0 && clv0->type != et && et != TY_UNKNOWN;
+    int ta = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent); emit_ctype(c, rt, b);
+    buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = ", tn);
+    emit_expr(c, cyc_argv[0], b); buf_puts(b, ";\n");
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
+    emit_indent(b, indent + 1);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", tj, tj, k, ta, tj);
+    int innerIndent = indent + 2;
+    if (use_shadow_cy) {
+      int cyb_bn = 0; const int *cyb_bb = body >= 0 ? nt_arr(nt, body, "body", &cyb_bn) : NULL;
+      clv0->type = et;
+      for (int j = 0; j < cyb_bn; j++) infer_type(c, cyb_bb[j]);
+      emit_indent(b, innerIndent); buf_puts(b, "{\n"); innerIndent++;
+      emit_indent(b, innerIndent); emit_ctype(c, et, b);
+      buf_printf(b, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, tj);
+      emit_stmts(c, body, b, innerIndent);
+      innerIndent--;
+      emit_indent(b, innerIndent); buf_puts(b, "}\n");
+      clv0->type = csaved0;
+    }
+    else {
+      if (p0) { emit_indent(b, innerIndent); buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, ta, tj); }
+      emit_stmts(c, body, b, innerIndent);
+    }
+    emit_indent(b, indent + 1); buf_puts(b, "}\n");
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+
+  /* array.each_slice(n) { |p| body } -- yield subarrays of size n */
+  if (!strcmp(name, "each_slice") && ty_is_array(rt)) {
+    int args = nt_ref(nt, id, "arguments");
+    int es_argc = 0; const int *es_argv = args >= 0 ? nt_arr(nt, args, "arguments", &es_argc) : NULL;
+    if (es_argc != 1) return 0;
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    if (!k) return 0;
+    Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
+    LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
+    TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
+    int use_shadow_es = clv0 && clv0->type != rt && rt != TY_UNKNOWN;
+    int ta = ++g_tmp, ts = ++g_tmp, ti = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent); emit_ctype(c, rt, b);
+    buf_printf(b, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = ", ts);
+    emit_expr(c, es_argv[0], b); buf_puts(b, ";\n");
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d += _t%d) {\n",
+               ti, ti, k, ta, ti, ts);
+    int bodyIndent = indent + 1;
+    if (use_shadow_es) {
+      int esb_bn = 0; const int *esb_bb = body >= 0 ? nt_arr(nt, body, "body", &esb_bn) : NULL;
+      clv0->type = rt;
+      for (int j = 0; j < esb_bn; j++) infer_type(c, esb_bb[j]);
+      emit_indent(b, bodyIndent); buf_puts(b, "{\n"); bodyIndent++;
+      emit_indent(b, bodyIndent); emit_ctype(c, rt, b);
+      buf_printf(b, " lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", p0, k, ta, ti, ts);
+      emit_stmts(c, body, b, bodyIndent);
+      bodyIndent--;
+      emit_indent(b, bodyIndent); buf_puts(b, "}\n");
+      clv0->type = csaved0;
+    }
+    else {
+      if (p0) { emit_indent(b, bodyIndent); buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n", p0, k, ta, ti, ts); }
+      emit_stmts(c, body, b, bodyIndent);
+    }
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+
+  /* str.scan(/re/) { |m| body } -- iterate over regex matches */
+  if (!strcmp(name, "scan") && rt == TY_STRING) {
+    int args = nt_ref(nt, id, "arguments");
+    int sc_argc = 0; const int *sc_argv = args >= 0 ? nt_arr(nt, args, "arguments", &sc_argc) : NULL;
+    if (sc_argc != 1 || re_lit_index(c, sc_argv[0]) < 0) return 0;
+    TyKind et = TY_STRING;
+    Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
+    LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
+    TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
+    int use_shadow_sc = clv0 && clv0->type != et && et != TY_UNKNOWN;
+    int tm = ++g_tmp, ti = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    emit_indent(b, indent);
+    buf_printf(b, "sp_StrArray *_t%d = sp_re_scan(sp_re_pat_%d, %s);\n",
+               tm, re_lit_index(c, sc_argv[0]), rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(b, indent); buf_printf(b, "SP_GC_ROOT(_t%d);\n", tm);
+    emit_indent(b, indent);
+    buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) {\n",
+               ti, ti, tm, ti);
+    int bodyIndent = indent + 1;
+    if (use_shadow_sc) {
+      int scb_bn = 0; const int *scb_bb = body >= 0 ? nt_arr(nt, body, "body", &scb_bn) : NULL;
+      clv0->type = et;
+      for (int j = 0; j < scb_bn; j++) infer_type(c, scb_bb[j]);
+      emit_indent(b, bodyIndent); buf_puts(b, "{\n"); bodyIndent++;
+      emit_indent(b, bodyIndent); buf_printf(b, "const char *lv_%s = sp_StrArray_get(_t%d, _t%d);\n", p0, tm, ti);
+      emit_stmts(c, body, b, bodyIndent);
+      bodyIndent--;
+      emit_indent(b, bodyIndent); buf_puts(b, "}\n");
+      clv0->type = csaved0;
+    }
+    else {
+      if (p0) { emit_indent(b, bodyIndent); buf_printf(b, "lv_%s = sp_StrArray_get(_t%d, _t%d);\n", p0, tm, ti); }
+      emit_stmts(c, body, b, bodyIndent);
+    }
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
   }
@@ -6449,11 +6835,23 @@ static void emit_return(Compiler *c, int id, Buf *b, int indent) {
     EnsureCtx *ctx = &g_ensure_stack[g_ensure_depth - 1];
     emit_indent(b, indent);
     buf_puts(b, "{ ");
-    if (n > 0 && ctx->has_retval) {
-      buf_printf(b, "_retv%d = ", ctx->lid);
-      if (g_ret_type == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
-      else emit_expr(c, a[0], b);
-      buf_puts(b, "; ");
+    if (ctx->has_retval) {
+      if (n > 1) {
+        int ta = ++g_tmp;
+        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", ta, ta);
+        for (int k = 0; k < n; k++) {
+          buf_printf(b, "sp_PolyArray_push(_t%d, ", ta);
+          emit_boxed(c, a[k], b);
+          buf_puts(b, "); ");
+        }
+        buf_printf(b, "_retv%d = _t%d; ", ctx->lid, ta);
+      }
+      else if (n > 0) {
+        buf_printf(b, "_retv%d = ", ctx->lid);
+        if (g_ret_type == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
+        else emit_expr(c, a[0], b);
+        buf_puts(b, "; ");
+      }
     }
     buf_printf(b, "_retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
                ctx->lid, ctx->lid);
@@ -6461,7 +6859,17 @@ static void emit_return(Compiler *c, int id, Buf *b, int indent) {
   }
 
   emit_indent(b, indent);
-  if (n > 0) {
+  if (n > 1) {
+    int ta = ++g_tmp;
+    buf_printf(b, "{ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", ta, ta);
+    for (int k = 0; k < n; k++) {
+      buf_printf(b, " sp_PolyArray_push(_t%d, ", ta);
+      emit_boxed(c, a[k], b);
+      buf_puts(b, ");");
+    }
+    buf_printf(b, " return _t%d; }\n", ta);
+  }
+  else if (n > 0) {
     buf_puts(b, "return ");
     if (g_ret_type == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
     else emit_expr(c, a[0], b);
