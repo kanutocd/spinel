@@ -2234,6 +2234,25 @@ void analyze_program(Compiler *c) {
       if (p && p->type == TY_UNKNOWN) p->type = TY_POLY;
     }
   }
+
+  /* Backstop: an ivar assigned only an empty array literal (no element
+     evidence from usage) is left UNKNOWN, which falls back to int and a
+     scalar struct field. Default such a slot to an (empty) int array so the
+     field is a pointer matching the emitted sp_IntArray_new(). */
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || strcmp(ty, "InstanceVariableWriteNode")) continue;
+    int v = nt_ref(c->nt, id, "value");
+    const char *vty = v >= 0 ? nt_type(c->nt, v) : NULL;
+    if (!vty || strcmp(vty, "ArrayNode")) continue;
+    int en = 0; nt_arr(c->nt, v, "elements", &en);
+    if (en != 0) continue;
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0) continue;
+    ClassInfo *ci = &c->classes[s->class_id];
+    int iv = comp_ivar_index(ci, nt_str(c->nt, id, "name"));
+    if (iv >= 0 && ci->ivar_types[iv] == TY_UNKNOWN) ci->ivar_types[iv] = TY_INT_ARRAY;
+  }
   /* recompute returns: a method returning such a param is now poly */
   for (int iter = 0; iter < 8; iter++) if (!infer_return_types(c)) break;
 
