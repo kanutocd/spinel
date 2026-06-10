@@ -975,7 +975,8 @@ static TyKind infer_call(Compiler *c, int id) {
       pr = nt_ref(nt, pr, "receiver");
     if (pr >= 0 && nt_type(nt, pr) && !strcmp(nt_type(nt, pr), "CallNode") && nt_str(nt, pr, "name") &&
         (!strcmp(nt_str(nt, pr, "name"), "product") || !strcmp(nt_str(nt, pr, "name"), "slice_before") ||
-         !strcmp(nt_str(nt, pr, "name"), "slice_after")))
+         !strcmp(nt_str(nt, pr, "name"), "slice_after") || !strcmp(nt_str(nt, pr, "name"), "slice_when") ||
+         !strcmp(nt_str(nt, pr, "name"), "chunk")))
       return TY_STRING;
   }
 
@@ -2899,7 +2900,8 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "map!") || !strcmp(name, "collect!") ||
               !strcmp(name, "select!") || !strcmp(name, "filter!") || !strcmp(name, "reject!") ||
               !strcmp(name, "keep_if") || !strcmp(name, "delete_if") || !strcmp(name, "each_index") ||
-              !strcmp(name, "flat_map") || !strcmp(name, "each_with_object")) &&
+              !strcmp(name, "flat_map") || !strcmp(name, "each_with_object") ||
+              !strcmp(name, "chunk")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
     /* TY_POLY receiver with iteration methods: element type is TY_POLY */
@@ -2932,10 +2934,10 @@ static int infer_block_params(Compiler *c) {
       continue;
     }
 
-    /* array.sort/min/max/minmax { |a, b| cmp } -- a comparator block binds
-       both parameters to the element type */
+    /* array.sort/min/max/minmax/slice_when { |a, b| cmp } -- a comparator block
+       binds both parameters to the element type */
     if ((!strcmp(name, "sort") || !strcmp(name, "sort!") || !strcmp(name, "min") || !strcmp(name, "max") ||
-         !strcmp(name, "minmax")) && ty_is_array(rt)) {
+         !strcmp(name, "minmax") || !strcmp(name, "slice_when")) && ty_is_array(rt)) {
       Scope *cs = comp_scope_of(c, block);
       for (int pj = 0; pj < 2; pj++) {
         const char *pn = block_param_name(c, block, pj);

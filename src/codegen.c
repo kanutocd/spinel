@@ -829,6 +829,157 @@ static int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* int_array.slice_when { |a, b| cond }[.to_a].inspect  or
+   int_array.chunk { |x| key }[.to_a].inspect  ->  inspect string.
+   Emits setup to g_pre and the result variable to b. Returns 1 if handled. */
+static int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "inspect")) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  /* allow .to_a wrapper */
+  if (nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "to_a"))
+    recv = nt_ref(nt, recv, "receiver");
+  if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "CallNode")) return 0;
+  const char *m = nt_str(nt, recv, "name");
+  if (!m) return 0;
+  int is_sw = !strcmp(m, "slice_when");
+  int is_ck = !strcmp(m, "chunk");
+  if (!is_sw && !is_ck) return 0;
+  int block = nt_ref(nt, recv, "block");
+  if (block < 0) return 0;
+  int pr = nt_ref(nt, recv, "receiver");
+  if (pr < 0 || comp_ntype(c, pr) != TY_INT_ARRAY) return 0;
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+  const char *p0n = block_param_name(c, block, 0);
+  if (!p0n) return 0;
+  const char *p0 = rename_local(p0n);
+
+  if (is_sw) {
+    /* slice_when { |a, b| cond } */
+    const char *p1n = block_param_name(c, block, 1);
+    if (!p1n) return 0;
+    const char *p1 = rename_local(p1n);
+    int ta = ++g_tmp, tout = ++g_tmp, tcur = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, pr, &rb);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_IntArray *_t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_PtrArray *_t%d = sp_PtrArray_new(); SP_GC_ROOT(_t%d);\n", tout, tout);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_IntArray *_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d);\n", tcur, tcur);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "sp_IntArray_push(_t%d, lv_%s);\n", tcur, p0);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "if (_t%d + 1 < sp_IntArray_length(_t%d)) {\n", ti, ta);
+    emit_indent(g_pre, g_indent + 2);
+    buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d + 1);\n", p1, ta, ti);
+    /* emit block body condition */
+    Scope *bsc = comp_scope_of(c, block);
+    LocalVar *lva = bsc ? scope_local(bsc, p0n) : NULL;
+    LocalVar *lvb = bsc ? scope_local(bsc, p1n) : NULL;
+    TyKind pta = lva ? lva->type : TY_UNKNOWN, ptb = lvb ? lvb->type : TY_UNKNOWN;
+    if (lva) lva->type = TY_INT;
+    if (lvb) lvb->type = TY_INT;
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 2);
+    int save = g_indent; g_indent += 2;
+    Buf cb; memset(&cb, 0, sizeof cb); emit_expr(c, bb[bn - 1], &cb); g_indent = save;
+    if (lva) lva->type = pta;
+    if (lvb) lvb->type = ptb;
+    emit_indent(g_pre, g_indent + 2);
+    buf_printf(g_pre, "if (%s) {\n", cb.p ? cb.p : "0"); free(cb.p);
+    emit_indent(g_pre, g_indent + 3);
+    buf_printf(g_pre, "sp_PtrArray_push(_t%d, _t%d);\n", tout, tcur);
+    emit_indent(g_pre, g_indent + 3);
+    buf_printf(g_pre, "_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d);\n", tcur, tcur);
+    emit_indent(g_pre, g_indent + 2); buf_puts(g_pre, "}\n");
+    emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "if (sp_IntArray_length(_t%d) > 0) sp_PtrArray_push(_t%d, _t%d);\n", tcur, tout, tcur);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "const char *_t%d = sp_IntArrayPtrArray_inspect(_t%d);\n", tres, tout);
+    buf_printf(b, "_t%d", tres);
+    return 1;
+  }
+
+  /* chunk { |x| key_expr } -- group consecutive elements by key */
+  int ta = ++g_tmp, tkeys = ++g_tmp, tgrps = ++g_tmp, tcur = ++g_tmp;
+  int tpk = ++g_tmp, ti = ++g_tmp, tstr = ++g_tmp, tj = ++g_tmp, tres = ++g_tmp;
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, pr, &rb);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_IntArray *_t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_IntArray *_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d);\n", tkeys, tkeys);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PtrArray *_t%d = sp_PtrArray_new(); SP_GC_ROOT(_t%d);\n", tgrps, tgrps);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_IntArray *_t%d = NULL;\n", tcur);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "mrb_int _t%d = 0;\n", tpk);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  /* emit key expression */
+  Scope *bsc = comp_scope_of(c, block);
+  LocalVar *lv0 = bsc ? scope_local(bsc, p0n) : NULL;
+  TyKind pt0 = lv0 ? lv0->type : TY_UNKNOWN;
+  if (lv0) lv0->type = TY_INT;
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+  int save = g_indent; g_indent++;
+  Buf kb; memset(&kb, 0, sizeof kb); emit_expr(c, bb[bn - 1], &kb); g_indent = save;
+  if (lv0) lv0->type = pt0;
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "mrb_int _tkey_%d = %s;\n", ta, kb.p ? kb.p : "0"); free(kb.p);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "if (_t%d == 0 || _tkey_%d != _t%d) {\n", ti, ta, tpk);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d);\n", tcur, tcur);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "sp_IntArray_push(_t%d, _tkey_%d);\n", tkeys, ta);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "sp_PtrArray_push(_t%d, _t%d);\n", tgrps, tcur);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "_t%d = _tkey_%d;\n", tpk, ta);
+  emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_IntArray_push(_t%d, lv_%s);\n", tcur, p0);
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  /* build inspect string */
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_String *_t%d = sp_String_new(\"[\"); SP_GC_ROOT(_t%d);\n", tstr, tstr);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", tj, tj, tkeys, tj);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "if (_t%d > 0) sp_String_append(_t%d, \", \");\n", tj, tstr);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append(_t%d, \"[\");\n", tstr);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append(_t%d, sp_int_to_s(sp_IntArray_get(_t%d, _t%d)));\n", tstr, tkeys, tj);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append(_t%d, \", \");\n", tstr);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append(_t%d, sp_IntArray_inspect((sp_IntArray*)_t%d->data[_t%d]));\n", tstr, tgrps, tj);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append(_t%d, \"]\");\n", tstr);
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_String_append(_t%d, \"]\");\n", tstr);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "const char *_t%d = _t%d->data;\n", tres, tstr);
+  buf_printf(b, "_t%d", tres);
+  return 1;
+}
+
 /* int_array.product(int_array)[.to_a].inspect -> the Cartesian product
    rendered as a nested-array string. The product result has no first-class
    type, so only this inline inspect chain is supported. Returns 1 if handled. */
@@ -2112,6 +2263,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (emit_sort_cmp_expr(c, id, b)) return;
   if (emit_minmax_cmp_expr(c, id, b)) return;
   if (emit_step_array_expr(c, id, b)) return;
+  if (emit_slice_when_chunk_inspect_expr(c, id, b)) return;
   if (emit_product_inspect_expr(c, id, b)) return;
   if (emit_bsearch_expr(c, id, b)) return;
   if (emit_sum_block_expr(c, id, b)) return;
