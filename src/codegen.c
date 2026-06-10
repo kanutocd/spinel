@@ -3928,8 +3928,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && rt == TY_POLY && argc == 0) {
     if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
-      buf_printf(b, "%s(", !strcmp(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect");
-      emit_expr(c, recv, b); buf_puts(b, ")"); return;
+      int has_user_method = 0;
+      for (int k = 0; k < c->nclasses; k++)
+        if (comp_method_in_chain(c, k, name, NULL) >= 0) { has_user_method = 1; break; }
+      if (!has_user_method) {
+        buf_printf(b, "%s(", !strcmp(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect");
+        emit_expr(c, recv, b); buf_puts(b, ")"); return;
+      }
     }
     if (!strcmp(name, "to_i")) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
     if (!strcmp(name, "to_f")) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
