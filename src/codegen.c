@@ -2891,6 +2891,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     buf_printf(b, "); _t%d; })", t);
     return;
   }
+  /* poly_val >> int / poly_val & int / | / ^ : unbox recv to int, apply op */
+  if (recv >= 0 && argc == 1 && comp_ntype(c, recv) == TY_POLY &&
+      (!strcmp(name, ">>") || !strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^"))) {
+    TyKind at = comp_ntype(c, argv[0]);
+    buf_puts(b, "(sp_poly_to_i("); emit_expr(c, recv, b); buf_printf(b, ") %s ", name);
+    if (at == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else emit_expr(c, argv[0], b);
+    buf_puts(b, ")");
+    return;
+  }
 
   /* `arr << x` / push / append in value position: mutate, then yield the array
      (statement position is handled earlier by emit_array_mutate_stmt). */
@@ -8713,10 +8723,11 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     if (es_argc != 1) return 0;
     const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
     if (!k) return 0;
+    int np_es = 0; while (block_param_name(c, block, np_es)) np_es++;
     Scope *csc = p0 ? comp_scope_of(c, block) : NULL;
     LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
     TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
-    int use_shadow_es = clv0 && clv0->type != rt && rt != TY_UNKNOWN;
+    int use_shadow_es = np_es == 1 && clv0 && clv0->type != rt && rt != TY_UNKNOWN;
     int ta = ++g_tmp, ts = ++g_tmp, ti = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(b, indent); emit_ctype(c, rt, b);
@@ -8727,7 +8738,17 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d += _t%d) {\n",
                ti, ti, k, ta, ti, ts);
     int bodyIndent = indent + 1;
-    if (use_shadow_es) {
+    if (np_es > 1) {
+      /* multi-param: destructure slice elements into individual params */
+      for (int pj = 0; pj < np_es; pj++) {
+        const char *pn = block_param_name(c, block, pj);
+        if (!pn) break;
+        emit_indent(b, bodyIndent);
+        buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n", rename_local(pn), k, ta, ti, pj);
+      }
+      emit_stmts(c, body, b, bodyIndent);
+    }
+    else if (use_shadow_es) {
       int esb_bn = 0; const int *esb_bb = body >= 0 ? nt_arr(nt, body, "body", &esb_bn) : NULL;
       clv0->type = rt;
       for (int j = 0; j < esb_bn; j++) infer_type(c, esb_bb[j]);

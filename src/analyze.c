@@ -1270,6 +1270,10 @@ static TyKind infer_call(Compiler *c, int id) {
       (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^") ||
        !strcmp(name, "<<") || !strcmp(name, ">>")))
     return TY_INT;
+  /* poly recv bitwise shift: result is int (sp_poly_to_i applied) */
+  if (recv >= 0 && argc == 1 && rt == TY_POLY &&
+      (!strcmp(name, ">>") || !strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^")))
+    return TY_INT;
   /* boolean &/|/^ */
   if (recv >= 0 && argc == 1 && rt == TY_BOOL &&
       (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^")))
@@ -3594,9 +3598,9 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "detect") || !strcmp(name, "any?") || !strcmp(name, "all?")))
       pt = TY_POLY;
 
-    /* array.each_cons(n) { |a, b, ...| } -- a single param binds the n-element
-       sub-array; multiple params destructure consecutive elements */
-    if (!strcmp(name, "each_cons") && ty_is_array(rt)) {
+    /* array.each_cons(n) / each_slice(n) { |a, b, ...| } -- a single param
+       binds the n-element sub-array; multiple params destructure elements */
+    if ((!strcmp(name, "each_cons") || !strcmp(name, "each_slice")) && ty_is_array(rt)) {
       Scope *es = comp_scope_of(c, block);
       int np = 0; while (block_param_name(c, block, np)) np++;
       for (int pj = 0; pj < np; pj++) {
