@@ -3177,7 +3177,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       (!strcmp(name, "escape") || !strcmp(name, "quote")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Regexp")) {
-    buf_puts(b, "sp_re_escape("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    TyKind _re_at = comp_ntype(c, argv[0]);
+    if (_re_at == TY_POLY) { buf_puts(b, "sp_re_escape(sp_poly_to_s("); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+    else { buf_puts(b, "sp_re_escape("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
     return;
   }
 
@@ -3891,7 +3893,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     int rre = re_lit_index(c, recv);
     if (rre >= 0 && (!strcmp(name, "match?") || !strcmp(name, "===")) && argc == 1) {
       /* /re/ === str and /re/.match?(str) both yield a match boolean */
-      buf_printf(b, "sp_re_match_p(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      if (a0 == TY_POLY) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, sp_poly_to_s(", rre); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+      else { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       return;
     }
     if (rre >= 0 && !strcmp(name, "match?") && argc == 2) {
@@ -4008,7 +4011,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         }
         if (rp_ok && rp.p) {
           if ((!strcmp(name, "match?") || !strcmp(name, "===")) && argc == 1) {
-            buf_printf(b, "sp_re_match_p(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ")");
+            if (a0 == TY_POLY) { buf_printf(b, "sp_re_match_p(%s, sp_poly_to_s(", rp.p); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+            else { buf_printf(b, "sp_re_match_p(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
             free(rp.p); return;
           }
           if (!strcmp(name, "=~") && argc == 1) {
