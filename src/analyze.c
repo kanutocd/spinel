@@ -2085,6 +2085,25 @@ static int infer_cvar_types(Compiler *c) {
         TyKind merged = ty_unify(c->classes[ci].cvar_types[idx], vt);
         if (merged != c->classes[ci].cvar_types[idx]) { c->classes[ci].cvar_types[idx] = merged; changed = 1; }
       }
+      else if (!strcmp(sty, "MultiWriteNode")) {
+        int mln = 0;
+        const int *mlefts = nt_arr(nt, s, "lefts", &mln);
+        int mval = nt_ref(nt, s, "value");
+        const char *mvty = nt_type(nt, mval);
+        int men = 0;
+        const int *mels = (mvty && !strcmp(mvty, "ArrayNode")) ? nt_arr(nt, mval, "elements", &men) : NULL;
+        for (int mi = 0; mi < mln; mi++) {
+          const char *mlty = nt_type(nt, mlefts[mi]);
+          if (!mlty || strcmp(mlty, "ClassVariableTargetNode")) continue;
+          const char *cnm = nt_str(nt, mlefts[mi], "name");
+          if (!cnm) continue;
+          int midx = comp_cvar_intern(&c->classes[ci], cnm);
+          TyKind mvt2 = (mels && mi < men) ? infer_type(c, mels[mi]) : TY_UNKNOWN;
+          if (mvt2 == TY_NIL || mvt2 == TY_UNKNOWN) continue;
+          TyKind mmerged = ty_unify(c->classes[ci].cvar_types[midx], mvt2);
+          if (mmerged != c->classes[ci].cvar_types[midx]) { c->classes[ci].cvar_types[midx] = mmerged; changed = 1; }
+        }
+      }
     }
   }
   /* Pass 2: method-level writes (comp_scope_of has class_id set). */

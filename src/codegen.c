@@ -9797,6 +9797,43 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     /* ||= on an always-truthy constant: no-op */
     return;
   }
+  if (!strcmp(ty, "ConstantOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+    if (!cv) return;
+    const char *op = nt_str(nt, id, "binary_operator");
+    int v = nt_ref(nt, id, "value");
+    emit_indent(b, indent);
+    if (cv->type == TY_STRING && op && !strcmp(op, "+")) {
+      buf_printf(b, "cst_%s = sp_str_concat(cst_%s, ", nm, nm); emit_expr(c, v, b); buf_puts(b, ");\n");
+    }
+    else {
+      buf_printf(b, "cst_%s %s= ", nm, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    return;
+  }
+  if (!strcmp(ty, "ConstantOrWriteNode") || !strcmp(ty, "ConstantAndWriteNode")) {
+    int is_or = !strcmp(ty, "ConstantOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+    if (!cv) return;
+    int v = nt_ref(nt, id, "value");
+    if (cv->type == TY_POLY) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%ssp_poly_truthy(cst_%s)) { cst_%s = ", is_or ? "!" : "", nm, nm);
+      emit_boxed(c, v, b); buf_puts(b, "; }\n");
+    }
+    else if (cv->type == TY_BOOL) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%scst_%s) { cst_%s = ", is_or ? "!" : "", nm, nm); emit_expr(c, v, b); buf_puts(b, "; }\n");
+    }
+    else if (!is_or) {  /* &&= on an always-truthy constant: always assign */
+      emit_indent(b, indent);
+      buf_printf(b, "cst_%s = ", nm); emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    /* ||= on an always-truthy constant: no-op */
+    return;
+  }
   if (!strcmp(ty, "GlobalVariableOperatorWriteNode")) {
     const char *nm = nt_str(nt, id, "name");
     const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
@@ -10083,6 +10120,16 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         if (!rn2 || !comp_gvar(c, rn2)) { unsupported(c, id, "multiple assignment global target"); continue; }
         emit_indent(b, indent);
         buf_printf(b, "gv_%s = _t%d;\n", rn2, tmps[i]);
+      }
+      else if (lty && !strcmp(lty, "ClassVariableTargetNode")) {
+        const char *cnm = nt_str(nt, lefts[i], "name");
+        if (!cnm || cnm[0] != '@' || cnm[1] != '@') { unsupported(c, id, "multiple assignment class variable target"); continue; }
+        Scope *cv_sc = comp_scope_of(c, id);
+        int cv_cid = (cv_sc && cv_sc->class_id >= 0) ? cv_sc->class_id : g_class_body_id;
+        if (cv_cid < 0) { unsupported(c, id, "multiple assignment class variable target no class"); continue; }
+        if (comp_cvar_index(&c->classes[cv_cid], cnm) < 0) { unsupported(c, id, "multiple assignment class variable target unregistered"); continue; }
+        emit_indent(b, indent);
+        buf_printf(b, "cvar_%s_%s = _t%d;\n", c->classes[cv_cid].name, cnm + 2, tmps[i]);
       }
       else unsupported(c, id, "multiple assignment target");
     }
