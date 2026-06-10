@@ -3833,6 +3833,21 @@ static int infer_block_params(Compiler *c) {
 
     if (pt == TY_UNKNOWN) continue;
     Scope *s = comp_scope_of(c, block);
+    /* When iterating a poly receiver (TY_POLY) with 2+ block params, all params
+       are poly (auto-splat from the poly element). Assign TY_POLY to all. */
+    if (pt == TY_POLY) {
+      int npp2 = 0; while (block_param_name(c, block, npp2)) npp2++;
+      if (npp2 >= 2) {
+        for (int pj2 = 0; pj2 < npp2; pj2++) {
+          const char *pnj2 = block_param_name(c, block, pj2);
+          if (!pnj2) continue;
+          LocalVar *lp2 = scope_local_intern(s, pnj2); lp2->is_block_param = 1;
+          TyKind m2 = ty_unify(lp2->type, TY_POLY);
+          if (m2 != lp2->type) { lp2->type = m2; changed = 1; }
+        }
+        continue;
+      }
+    }
     LocalVar *lv = scope_local_intern(s, p0); lv->is_block_param = 1;
     /* Don't widen an array-typed variable to a scalar via block-param
        inference.  When the variable already holds an array (set by a write

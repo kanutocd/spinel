@@ -8369,8 +8369,23 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = sp_poly_arr_len(_t%d);\n", tn, ta);
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
-    emit_indent(b, indent + 1);
-    buf_printf(b, "lv_%s = sp_poly_arr_get_hash(_t%d, _t%d);\n", p0, ta, ti);
+    /* multi-param: auto-splat each poly element into params */
+    int npp_poly = 0; while (block_param_name(c, block, npp_poly)) npp_poly++;
+    if (npp_poly >= 2) {
+      int telem = ++g_tmp;
+      emit_indent(b, indent + 1);
+      buf_printf(b, "sp_RbVal _t%d = sp_poly_arr_get_hash(_t%d, _t%d);\n", telem, ta, ti);
+      for (int pj = 0; pj < npp_poly; pj++) {
+        const char *pnj = block_param_name(c, block, pj);
+        if (!pnj) break;
+        emit_indent(b, indent + 1);
+        buf_printf(b, "lv_%s = sp_poly_arr_get_hash(_t%d, (mrb_int)%d);\n", rename_local(pnj), telem, pj);
+      }
+    }
+    else {
+      emit_indent(b, indent + 1);
+      buf_printf(b, "lv_%s = sp_poly_arr_get_hash(_t%d, _t%d);\n", p0, ta, ti);
+    }
     emit_stmts(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
