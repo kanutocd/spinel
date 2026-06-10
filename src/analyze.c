@@ -1113,6 +1113,18 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "LambdaNode"))              return TY_PROC;
   /* an assignment expression evaluates to the assigned value */
   if (!strcmp(ty, "LocalVariableWriteNode"))  return infer_type(c, nt_ref(nt, id, "value"));
+  if (!strcmp(ty, "InstanceVariableWriteNode") ||
+      !strcmp(ty, "InstanceVariableOrWriteNode") ||
+      !strcmp(ty, "InstanceVariableAndWriteNode") ||
+      !strcmp(ty, "InstanceVariableOperatorWriteNode")) {
+    /* expression evaluates to the ivar slot's type (same as a read) */
+    const char *nm = nt_str(nt, id, "name");
+    Scope *s = comp_scope_of(c, id);
+    if (s->class_id < 0) return infer_type(c, nt_ref(nt, id, "value"));
+    ClassInfo *ci = &c->classes[s->class_id];
+    int iv = nm ? comp_ivar_index(ci, nm) : -1;
+    return iv >= 0 ? ci->ivar_types[iv] : TY_UNKNOWN;
+  }
   if (!strcmp(ty, "LocalVariableOperatorWriteNode")) {
     const char *nm2 = nt_str(nt, id, "name");
     Scope *s2 = comp_scope_of(c, id);

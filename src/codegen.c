@@ -2690,7 +2690,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if (cn && !strcmp(cn, "Array") && argc == 2) {
         /* Array.new(n, v) -> n copies of v */
         TyKind at = comp_ntype(c, id);
-        const char *k = array_kind(at);
+        const char *k = (at == TY_POLY_ARRAY) ? "Poly" : array_kind(at);
         if (k) {
           int tn = ++g_tmp, tv = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
           Buf nb; memset(&nb, 0, sizeof nb); emit_expr(c, argv[0], &nb);
@@ -2698,8 +2698,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "mrb_int _t%d = ", tn); buf_puts(g_pre, nb.p ? nb.p : ""); buf_puts(g_pre, ";\n");
           emit_indent(g_pre, g_indent);
-          emit_ctype(c, ty_array_elem(at), g_pre);
-          buf_printf(g_pre, " _t%d = ", tv); buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ";\n");
+          if (at == TY_POLY_ARRAY) {
+            buf_printf(g_pre, "sp_RbVal _t%d = ", tv);
+            TyKind fvt = comp_ntype(c, argv[1]);
+            if (fvt != TY_POLY) emit_boxed_text(c, fvt, vb.p ? vb.p : "sp_box_nil()", g_pre);
+            else buf_puts(g_pre, vb.p ? vb.p : "sp_box_nil()");
+          }
+          else {
+            emit_ctype(c, ty_array_elem(at), g_pre);
+            buf_printf(g_pre, " _t%d = ", tv); buf_puts(g_pre, vb.p ? vb.p : "");
+          }
+          buf_puts(g_pre, ";\n");
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, tr, k);
           emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
@@ -6885,6 +6894,79 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     buf_printf(b, "lv_%s; })", en);
     return;
   }
+  if (!strcmp(ty, "InstanceVariableWriteNode")) {
+    /* @ivar = rhs used as expression: ({ self->iv_x = rhs; self->iv_x; }) */
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *cws = comp_scope_of(c, id);
+    int cid2 = cws ? cws->class_id : -1;
+    if (cid2 < 0 && g_class_body_id >= 0) cid2 = g_class_body_id;
+    if (!nm || v < 0) { buf_puts(b, "0"); return; }
+    TyKind ivt2 = TY_UNKNOWN;
+    if (cid2 >= 0) {
+      int iv2 = comp_ivar_index(&c->classes[cid2], nm);
+      if (iv2 >= 0) ivt2 = c->classes[cid2].ivar_types[iv2];
+    }
+    const char *vty2 = nt_type(nt, v);
+    int ven2 = 0;
+    int v_empty_array2 = vty2 && !strcmp(vty2, "ArrayNode") && (nt_arr(nt, v, "elements", &ven2), ven2 == 0);
+    int v_empty_hash2 = 0;
+    if (!v_empty_array2 && vty2) {
+      int hen2 = 0;
+      if (!strcmp(vty2, "HashNode") || !strcmp(vty2, "KeywordHashNode"))
+        v_empty_hash2 = (nt_arr(nt, v, "elements", &hen2), hen2 == 0);
+    }
+    char ref2e[300];
+    if (cws && cws->is_cmethod && cid2 >= 0)
+      snprintf(ref2e, sizeof ref2e, "civ_%s_%s", c->classes[cid2].name, nm + 1);
+    else
+      snprintf(ref2e, sizeof ref2e, "%s->iv_%s", g_self, nm + 1);
+    buf_puts(b, "({ ");
+    buf_printf(b, "%s = ", ref2e);
+    if (v_empty_array2 && ivt2 == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
+    else if (v_empty_array2 && array_kind(ivt2)) buf_printf(b, "sp_%sArray_new()", array_kind(ivt2));
+    else if (v_empty_hash2 && ty_is_hash(ivt2)) {
+      const char *hcn = ty_hash_cname(ivt2);
+      if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
+      else emit_expr(c, v, b);
+    }
+    else if (ivt2 == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else emit_expr(c, v, b);
+    buf_printf(b, "; %s; })", ref2e);
+    return;
+  }
+  if (!strcmp(ty, "InstanceVariableOrWriteNode") || !strcmp(ty, "InstanceVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "InstanceVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *cws3 = comp_scope_of(c, id);
+    int cid3 = cws3 ? cws3->class_id : -1;
+    if (cid3 < 0 && g_class_body_id >= 0) cid3 = g_class_body_id;
+    TyKind ivt3 = TY_UNKNOWN;
+    if (cid3 >= 0) { int iv3 = comp_ivar_index(&c->classes[cid3], nm); if (iv3 >= 0) ivt3 = c->classes[cid3].ivar_types[iv3]; }
+    char ref3[300];
+    if (cws3 && cws3->is_cmethod && cid3 >= 0)
+      snprintf(ref3, sizeof ref3, "civ_%s_%s", c->classes[cid3].name, nm + 1);
+    else
+      snprintf(ref3, sizeof ref3, "%s->iv_%s", g_self, nm + 1);
+    if (ivt3 == TY_POLY) {
+      buf_printf(b, "({ if (%ssp_poly_truthy(%s)) %s = ", is_or ? "!" : "", ref3, ref3);
+      emit_boxed(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else if (ivt3 == TY_BOOL) {
+      buf_printf(b, "({ if (%s%s) %s = ", is_or ? "!" : "", ref3, ref3);
+      emit_expr(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else if (!is_or) {
+      buf_printf(b, "({ %s = ", ref3);
+      emit_expr(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else buf_puts(b, ref3);
+    return;
+  }
   if (!strcmp(ty, "LocalVariableOrWriteNode") || !strcmp(ty, "LocalVariableAndWriteNode")) {
     int is_or = !strcmp(ty, "LocalVariableOrWriteNode");
     const char *nm = nt_str(nt, id, "name");
@@ -8490,6 +8572,35 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "lv_%s = ", en); emit_expr(c, v, b); buf_puts(b, ";\n");
     }
     /* a ||= v on an always-truthy var: no-op */
+    return;
+  }
+  if (!strcmp(ty, "InstanceVariableOrWriteNode") || !strcmp(ty, "InstanceVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "InstanceVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *cws2 = comp_scope_of(c, id);
+    int sc2 = cws2 ? cws2->class_id : -1;
+    TyKind ivt2 = TY_UNKNOWN;
+    if (sc2 >= 0) { int iv2 = comp_ivar_index(&c->classes[sc2], nm); if (iv2 >= 0) ivt2 = c->classes[sc2].ivar_types[iv2]; }
+    char ref2[300];
+    if (cws2 && cws2->is_cmethod && sc2 >= 0)
+      snprintf(ref2, sizeof ref2, "civ_%s_%s", c->classes[sc2].name, nm + 1);
+    else
+      snprintf(ref2, sizeof ref2, "%s->iv_%s", g_self, nm + 1);
+    if (ivt2 == TY_POLY) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%ssp_poly_truthy(%s)) %s = ", is_or ? "!" : "", ref2, ref2);
+      emit_boxed(c, v, b); buf_puts(b, ";\n");
+    }
+    else if (ivt2 == TY_BOOL) {
+      emit_indent(b, indent);
+      buf_printf(b, "if (%s%s) %s = ", is_or ? "!" : "", ref2, ref2);
+      emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    else if (!is_or) {
+      emit_indent(b, indent);
+      buf_printf(b, "%s = ", ref2); emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
     return;
   }
   if (!strcmp(ty, "InstanceVariableWriteNode")) {
