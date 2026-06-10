@@ -422,6 +422,17 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "sqrt"))
       return TY_INT;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Math") &&
+        (!strcmp(name, "sin") || !strcmp(name, "cos") || !strcmp(name, "tan") ||
+         !strcmp(name, "asin") || !strcmp(name, "acos") || !strcmp(name, "atan") ||
+         !strcmp(name, "atan2") || !strcmp(name, "sinh") || !strcmp(name, "cosh") ||
+         !strcmp(name, "tanh") || !strcmp(name, "asinh") || !strcmp(name, "acosh") ||
+         !strcmp(name, "atanh") || !strcmp(name, "exp") || !strcmp(name, "log") ||
+         !strcmp(name, "log2") || !strcmp(name, "log10") || !strcmp(name, "sqrt") ||
+         !strcmp(name, "cbrt") || !strcmp(name, "hypot") || !strcmp(name, "frexp") ||
+         !strcmp(name, "ldexp") || !strcmp(name, "erf") || !strcmp(name, "erfc")))
+      return TY_FLOAT;
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
         (!strcmp(name, "generate") || !strcmp(name, "dump")))
       return TY_STRING;

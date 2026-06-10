@@ -3058,6 +3058,96 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     return;
   }
 
+  /* Math module functions -> C math.h equivalents */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Math")) {
+    /* 1-arg functions */
+    const char *cfn = NULL;
+    if      (!strcmp(name, "sin"))   cfn = "sin";
+    else if (!strcmp(name, "cos"))   cfn = "cos";
+    else if (!strcmp(name, "tan"))   cfn = "tan";
+    else if (!strcmp(name, "asin"))  cfn = "asin";
+    else if (!strcmp(name, "acos"))  cfn = "acos";
+    else if (!strcmp(name, "atan"))  cfn = "atan";
+    else if (!strcmp(name, "sinh"))  cfn = "sinh";
+    else if (!strcmp(name, "cosh"))  cfn = "cosh";
+    else if (!strcmp(name, "tanh"))  cfn = "tanh";
+    else if (!strcmp(name, "asinh")) cfn = "asinh";
+    else if (!strcmp(name, "acosh")) cfn = "acosh";
+    else if (!strcmp(name, "atanh")) cfn = "atanh";
+    else if (!strcmp(name, "exp"))   cfn = "exp";
+    else if (!strcmp(name, "sqrt"))  cfn = "sqrt";
+    else if (!strcmp(name, "cbrt"))  cfn = "cbrt";
+    else if (!strcmp(name, "erf"))   cfn = "erf";
+    else if (!strcmp(name, "erfc"))  cfn = "erfc";
+    if (cfn && argc == 1) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      buf_printf(b, "%s(", cfn);
+      if (a0t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[0], b);
+      buf_puts(b, ")");
+      return;
+    }
+    /* Math.log(x) or Math.log(x, base) */
+    if (!strcmp(name, "log") && (argc == 1 || argc == 2)) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      if (argc == 1) {
+        buf_puts(b, "log(");
+        if (a0t == TY_INT) buf_puts(b, "(double)");
+        emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
+      }
+      else {
+        TyKind a1t = comp_ntype(c, argv[1]);
+        int t0 = ++g_tmp, t1 = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "double _t%d = ", t0);
+        if (a0t == TY_INT) buf_puts(g_pre, "(double)");
+        emit_expr(c, argv[0], g_pre); buf_puts(g_pre, ";\n");
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "double _t%d = ", t1);
+        if (a1t == TY_INT) buf_puts(g_pre, "(double)");
+        emit_expr(c, argv[1], g_pre); buf_puts(g_pre, ";\n");
+        buf_printf(b, "(log(_t%d) / log(_t%d))", t0, t1);
+      }
+      return;
+    }
+    /* Math.log2(x), Math.log10(x) */
+    if (!strcmp(name, "log2") && argc == 1) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      buf_puts(b, "log2(");
+      if (a0t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
+    if (!strcmp(name, "log10") && argc == 1) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      buf_puts(b, "log10(");
+      if (a0t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
+    /* Math.atan2(y, x), Math.hypot(x, y), Math.ldexp(x, e) */
+    if ((!strcmp(name, "atan2") || !strcmp(name, "hypot")) && argc == 2) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      TyKind a1t = comp_ntype(c, argv[1]);
+      buf_printf(b, "%s(", name);
+      if (a0t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[0], b); buf_puts(b, ", ");
+      if (a1t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[1], b); buf_puts(b, ")");
+      return;
+    }
+    if (!strcmp(name, "ldexp") && argc == 2) {
+      TyKind a0t = comp_ntype(c, argv[0]);
+      buf_puts(b, "ldexp(");
+      if (a0t == TY_INT) buf_puts(b, "(double)");
+      emit_expr(c, argv[0], b); buf_puts(b, ", (int)");
+      emit_expr(c, argv[1], b); buf_puts(b, ")");
+      return;
+    }
+  }
+
   /* JSON.generate(x) / JSON.dump(x) -> serialize a boxed value */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
