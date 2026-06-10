@@ -359,6 +359,7 @@ static TyKind infer_call(Compiler *c, int id) {
       if (cn && !strcmp(cn, "StringIO")) return TY_STRINGIO;
       if (cn && !strcmp(cn, "StringScanner")) return TY_STRINGSCANNER;
       if (cn && !strcmp(cn, "Hash")) return TY_SYM_POLY_HASH;
+      if (cn && !strcmp(cn, "Regexp")) return TY_REGEX;
     }
   }
 

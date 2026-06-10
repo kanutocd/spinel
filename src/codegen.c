@@ -3380,6 +3380,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_StringScanner_new("); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
+      if (cn && !strcmp(cn, "Regexp") && argc >= 1) {
+        int tp = ++g_tmp, ts = ++g_tmp;
+        int flags = (argc >= 2) ? 1 : 0; /* Regexp::IGNORECASE=1 if 2nd arg truthy */
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "const char *_t%d = ", ts); emit_expr(c, argv[0], g_pre); buf_puts(g_pre, ";\n");
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "mrb_regexp_pattern *_t%d = re_compile(_t%d, (int64_t)strlen(_t%d ? _t%d : \"\"), %d);\n",
+                   tp, ts, ts, ts, flags);
+        buf_printf(b, "_t%d", tp);
+        return;
+      }
       if (cn && !strcmp(cn, "Array") && argc == 0 && nt_ref(nt, id, "block") < 0) {
         buf_puts(b, "sp_PolyArray_new()"); return;
       }
@@ -3885,7 +3896,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       int is_regex_lv_recv = !is_interp_recv && recv >= 0 && comp_ntype(c, recv) == TY_REGEX;
       if (is_interp_recv || is_regex_lv_recv) {
         Buf rp; memset(&rp, 0, sizeof rp);
-        if (emit_regex_pat_to_buf(c, recv, &rp) && rp.p) {
+        int rp_ok = emit_regex_pat_to_buf(c, recv, &rp) && rp.p;
+        /* Fallback: TY_REGEX local from Regexp.new — variable IS the mrb_regexp_pattern* */
+        if (!rp_ok && is_regex_lv_recv) {
+          int tv = ++g_tmp;
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "mrb_regexp_pattern *_t%d = ", tv); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+          char tbuf[32]; snprintf(tbuf, sizeof tbuf, "_t%d", tv);
+          memset(&rp, 0, sizeof rp); buf_puts(&rp, tbuf);
+          rp_ok = 1;
+        }
+        if (rp_ok && rp.p) {
           if ((!strcmp(name, "match?") || !strcmp(name, "===")) && argc == 1) {
             buf_printf(b, "sp_re_match_p(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ")");
             free(rp.p); return;
@@ -4254,10 +4275,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv >= 0 && argc == 1 && rt == TY_INT &&
       (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "^") ||
        !strcmp(name, "<<") || !strcmp(name, ">>"))) {
+    TyKind at0 = comp_ntype(c, argv[0]);
     buf_puts(b, "(");
     emit_expr(c, recv, b);
     buf_printf(b, " %s ", name);
-    emit_expr(c, argv[0], b);
+    if (at0 == TY_POLY) {
+      buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else emit_expr(c, argv[0], b);
     buf_puts(b, ")");
     return;
   }
