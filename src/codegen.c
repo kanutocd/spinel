@@ -2979,7 +2979,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
      string frozen-ness cannot be determined statically. */
   if (recv >= 0 && argc == 0 && !strcmp(name, "frozen?")) {
     TyKind frt = comp_ntype(c, recv);
-    if (frt == TY_INT || frt == TY_FLOAT || frt == TY_SYMBOL || frt == TY_BOOL || frt == TY_NIL) {
+    if (frt == TY_INT || frt == TY_FLOAT || frt == TY_SYMBOL || frt == TY_BOOL || frt == TY_NIL
+        || frt == TY_STRING) {
       buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 1)");
       return;
     }
