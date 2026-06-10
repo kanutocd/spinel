@@ -422,7 +422,8 @@ static TyKind infer_call(Compiler *c, int id) {
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Time") &&
         (!strcmp(name, "now") || !strcmp(name, "at") || !strcmp(name, "local") ||
-         !strcmp(name, "mktime") || !strcmp(name, "utc") || !strcmp(name, "gm")))
+         !strcmp(name, "mktime") || !strcmp(name, "utc") || !strcmp(name, "gm") ||
+         !strcmp(name, "new")))
       return TY_TIME;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "GC") &&
@@ -698,6 +699,8 @@ static TyKind infer_call(Compiler *c, int id) {
       if (rt == TY_STR_ARRAY) return TY_STR_INT_HASH;
       if (rt == TY_POLY_ARRAY) return TY_SYM_POLY_HASH;
     }
+    if (!strcmp(name, "group_by") && block >= 0 && ty_is_array(rt))
+      return TY_POLY_POLY_HASH;
     if ((!strcmp(name, "first") || !strcmp(name, "last")) && argc == 1) return rt;  /* first(n)/last(n) -> subarray */
     if (!strcmp(name, "first") || !strcmp(name, "last") ||
         !strcmp(name, "min") || !strcmp(name, "max") ||
@@ -3287,6 +3290,21 @@ static int infer_block_params(Compiler *c) {
       pt = TY_STRING;  /* block receives the matched substring */
     else if (rt == TY_STRING && (!strcmp(name, "each_byte") || !strcmp(name, "bytes") || !strcmp(name, "codepoints")))
       pt = TY_INT;
+    else if (rt == TY_STRING && !strcmp(name, "scan")) {
+      /* scan { |m| } yields each match; m is string (no captures) or str_array (captures) */
+      int scan_args_id = nt_ref(nt, id, "arguments");
+      int scan_argc = 0;
+      const int *scan_argv = scan_args_id >= 0 ? nt_arr(nt, scan_args_id, "arguments", &scan_argc) : NULL;
+      int has_cap = 0;
+      if (scan_argc == 1 && scan_argv) {
+        const char *apty = nt_type(nt, scan_argv[0]);
+        if (apty && !strcmp(apty, "RegularExpressionNode")) {
+          const char *src = nt_str(nt, scan_argv[0], "unescaped");
+          if (src && re_has_captures(src)) has_cap = 1;
+        }
+      }
+      pt = has_cap ? TY_STR_ARRAY : TY_STRING;
+    }
     else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||
               !strcmp(name, "find") || !strcmp(name, "detect") || !strcmp(name, "each_with_index") ||
@@ -3307,7 +3325,9 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "select!") || !strcmp(name, "filter!") || !strcmp(name, "reject!") ||
               !strcmp(name, "keep_if") || !strcmp(name, "delete_if") || !strcmp(name, "each_index") ||
               !strcmp(name, "flat_map") || !strcmp(name, "each_with_object") ||
-              !strcmp(name, "chunk")) &&
+              !strcmp(name, "chunk") || !strcmp(name, "group_by") ||
+              !strcmp(name, "tally_by") || !strcmp(name, "min_by_all") ||
+              !strcmp(name, "filter_map") || !strcmp(name, "count_by")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
     /* TY_POLY receiver with iteration methods: element type is TY_POLY */

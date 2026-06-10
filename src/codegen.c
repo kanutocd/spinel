@@ -2398,6 +2398,109 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
   free(atmp);
 }
 
+/* array.group_by { |x| key_expr } -> sp_PolyPolyHash (pre-statements to g_pre) */
+static int emit_group_by_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "group_by")) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0) return 0;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+  if (!k) return 0;
+  TyKind et = ty_array_elem(rt);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn < 1) return 0;
+  const char *p0_orig = block_param_name(c, block, 0);
+  const char *p0 = p0_orig ? rename_local(p0_orig) : NULL;
+
+  int trecv = ++g_tmp, thash = ++g_tmp, tkey = ++g_tmp, tarr = ++g_tmp, ti = ++g_tmp;
+
+  /* emit receiver */
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+  /* result hash */
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);\n", thash, thash);
+  /* loop */
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
+             ti, ti, k, trecv, ti);
+  /* assign element to block param */
+  if (p0) {
+    Scope *cs = comp_scope_of(c, id);
+    LocalVar *outer_p0 = cs ? scope_local(cs, p0) : NULL;
+    TyKind p0_type = outer_p0 ? outer_p0->type : et;
+    emit_indent(g_pre, g_indent + 1);
+    if (p0_type == TY_POLY && et != TY_POLY) {
+      char elem_s[64];
+      snprintf(elem_s, sizeof elem_s, "sp_%sArray_get(_t%d, _t%d)", k, trecv, ti);
+      Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, et, elem_s, &bx);
+      buf_printf(g_pre, "lv_%s = %s;\n", p0, bx.p ? bx.p : elem_s); free(bx.p);
+    }
+    else {
+      buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+    }
+  }
+  /* evaluate block body side-effect stmts, then key expression */
+  int save_indent = g_indent; g_indent++;
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent);
+  g_indent = save_indent;
+  TyKind key_t = comp_ntype(c, bb[bn - 1]);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_RbVal _t%d = ", tkey);
+  if (key_t != TY_POLY) {
+    Buf kbuf; memset(&kbuf, 0, sizeof kbuf);
+    int save2 = g_indent; g_indent += 1;
+    emit_expr(c, bb[bn - 1], &kbuf);
+    g_indent = save2;
+    emit_boxed_text(c, key_t, kbuf.p ? kbuf.p : "0", g_pre);
+    free(kbuf.p);
+  }
+  else {
+    int save2 = g_indent; g_indent += 1;
+    emit_expr(c, bb[bn - 1], g_pre);
+    g_indent = save2;
+  }
+  buf_puts(g_pre, ";\n");
+  /* get-or-create the PolyArray for this key */
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_PolyArray *_t%d;\n", tarr);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "if (sp_PolyPolyHash_has_key(_t%d, _t%d)) {\n", thash, tkey);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "_t%d = (sp_PolyArray *)sp_PolyPolyHash_get(_t%d, _t%d).v.p;\n", tarr, thash, tkey);
+  emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
+  emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "else {\n");
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tarr, tarr);
+  emit_indent(g_pre, g_indent + 2);
+  buf_printf(g_pre, "sp_PolyPolyHash_set(_t%d, _t%d, sp_box_obj(_t%d, SP_BUILTIN_POLY_ARRAY));\n",
+             thash, tkey, tarr);
+  emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
+  /* push element (boxed) */
+  emit_indent(g_pre, g_indent + 1);
+  if (et != TY_POLY) {
+    char elem_s[64];
+    snprintf(elem_s, sizeof elem_s, "sp_%sArray_get(_t%d, _t%d)", k, trecv, ti);
+    Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, et, elem_s, &bx);
+    buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", tarr, bx.p ? bx.p : "sp_box_nil()");
+    free(bx.p);
+  }
+  else {
+    buf_printf(g_pre, "sp_PolyArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));\n", tarr, k, trecv, ti);
+  }
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  /* the expression evaluates to the hash */
+  buf_printf(b, "_t%d", thash);
+  return 1;
+}
+
 /* array.each_with_object(init) { |x, acc| ... } → acc (pre-statements to g_pre) */
 static int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -2538,6 +2641,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (emit_reduce_block_expr(c, id, b)) return;
   if (emit_sortby_expr(c, id, b)) return;
   if (emit_each_with_object_expr(c, id, b)) return;
+  if (emit_group_by_expr(c, id, b)) return;
   if (emit_inline_expr(c, id, b)) return;  /* value-returning yield method */
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
@@ -3533,7 +3637,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* Time class constructors */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Time")) {
-    if (!strcmp(name, "now") && argc == 0) { buf_puts(b, "sp_time_now()"); return; }
+    if ((!strcmp(name, "now") || !strcmp(name, "new")) && argc == 0) { buf_puts(b, "sp_time_now()"); return; }
     if (!strcmp(name, "at") && argc == 1) {
       TyKind at = comp_ntype(c, argv[0]);
       buf_printf(b, "sp_time_at_%s(", at == TY_FLOAT ? "float" : "int");
@@ -3541,7 +3645,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       return;
     }
     if ((!strcmp(name, "local") || !strcmp(name, "mktime") ||
-         !strcmp(name, "utc") || !strcmp(name, "gm")) && argc >= 1) {
+         !strcmp(name, "utc") || !strcmp(name, "gm") || !strcmp(name, "new")) && argc >= 1) {
       /* y[,mo,d,h,mi,s] -- missing trailing parts default (mo/d=1, rest 0) */
       int is_utc = (!strcmp(name, "utc") || !strcmp(name, "gm"));
       buf_printf(b, "sp_time_new%s(", is_utc ? "_utc" : "");
@@ -11588,6 +11692,11 @@ static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     if (strcmp(ty, "CallNode") != 0) emit_stmt(c, id, b, indent);
     return;
   }
+  /* iteration calls with a block are side-effect statements at tail position;
+     emit them without wrapping in a return (the method returns nil implicitly) */
+  if (!strcmp(ty, "CallNode") && nt_ref(nt, id, "block") >= 0 &&
+      emit_iteration_stmt(c, id, b, indent))
+    return;
 
   /* a value expression: return it (or assign to the begin/rescue result) */
   emit_indent(b, indent);
