@@ -1556,7 +1556,16 @@ static TyKind infer_uncached(Compiler *c, int id) {
       const char *aty = nt_type(nt, els[k]);
       if (!aty || strcmp(aty, "AssocNode")) return TY_UNKNOWN;
       kt = ty_unify(kt, infer_type(c, nt_ref(nt, els[k], "key")));
-      vt = ty_unify(vt, infer_type(c, nt_ref(nt, els[k], "value")));
+      int vnode = nt_ref(nt, els[k], "value");
+      TyKind vt_elem = infer_type(c, vnode);
+      /* A nested hash literal (even empty `{}`) is a non-scalar value; treat
+         it as poly so the outer hash promotes to a poly-valued variant. */
+      if (vt_elem == TY_UNKNOWN) {
+        const char *vnode_ty = nt_type(nt, vnode);
+        if (vnode_ty && (!strcmp(vnode_ty, "HashNode") || !strcmp(vnode_ty, "KeywordHashNode")))
+          vt_elem = TY_POLY;
+      }
+      vt = ty_unify(vt, vt_elem);
     }
     /* symbol keys -> SymPolyHash (boxed values), regardless of value type */
     if (kt == TY_SYMBOL) return TY_SYM_POLY_HASH;
