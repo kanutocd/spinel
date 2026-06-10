@@ -34949,6 +34949,42 @@ class Compiler
       rest_param_idx = -1
     end
 
+ # `bar(...)` forwards the enclosing method's captured `...` channels
+ # (issue #1288). Pack each callee param from the synthetic locals: a
+ # param whose name is present in **__sp_fwd_kw comes from there;
+ # otherwise it is positional, read from *__sp_fwd_args by index (kw
+ # args are always trailing, so a leading positional param's index is
+ # its slot index, and a keyword param always takes the kw branch). A
+ # callee rest/kwrest slot receives the whole array/hash; a trailing
+ # block (proc) slot receives &__sp_fwd_block.
+    if arg_ids.length == 1 && @nd_type[arg_ids[0]] == "ForwardingArgumentsNode"
+      @needs_sym_poly_hash = 1
+      @needs_int_array = 1
+      kwr_fwd = method_kwrest_index(mi)
+      sb_fwd = ""
+      j_fwd = 0
+      while j_fwd < pnames.length
+        if j_fwd > 0
+          sb_fwd = sb_fwd + ", "
+        end
+        pt_fwd = j_fwd < ptypes.length ? ptypes[j_fwd] : "int"
+        if pt_fwd == "proc"
+          sb_fwd = sb_fwd + "lv___sp_fwd_block"
+        elsif j_fwd == rest_param_idx
+          sb_fwd = sb_fwd + "lv___sp_fwd_args"
+        elsif j_fwd == kwr_fwd
+          sb_fwd = sb_fwd + "lv___sp_fwd_kw"
+        else
+          sym_fwd = compile_symbol_literal(pnames[j_fwd])
+          kw_unbox = unbox_poly_to(pt_fwd, "sp_SymPolyHash_get(lv___sp_fwd_kw, " + sym_fwd + ")")
+          pos_fwd = (pt_fwd == "int" || pt_fwd == "bool") ? "sp_IntArray_get(lv___sp_fwd_args, " + j_fwd.to_s + ")" : c_default_val(pt_fwd)
+          sb_fwd = sb_fwd + "(sp_SymPolyHash_has_key(lv___sp_fwd_kw, " + sym_fwd + ") ? " + kw_unbox + " : " + pos_fwd + ")"
+        end
+        j_fwd = j_fwd + 1
+      end
+      return sb_fwd
+    end
+
  # Splat-only call: `foo(**h)` with no other args. Emit
  # `splat[:p1], splat[:p2], ...` for each callee param. Only
  # sym-keyed splat hashes; issue #917.

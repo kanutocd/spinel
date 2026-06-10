@@ -12669,7 +12669,17 @@ class Compiler
  # carry a slot.
     kwrest = @nd_keyword_rest[params]
     if kwrest >= 0
-      if @nd_type[kwrest] == "KeywordRestParameterNode"
+      if @nd_type[kwrest] == "ForwardingParameterNode"
+ # `def foo(...)` lowers to three synthetic slots that capture each
+ # forwarded channel: *__sp_fwd_args, **__sp_fwd_kw, &__sp_fwd_block
+ # (issue #1288). Prism stores the forwarding param in keyword_rest.
+        forwarding_synthetic_names.each { |nm|
+          if result != ""
+            result = result + ","
+          end
+          result = result + nm
+        }
+      elsif @nd_type[kwrest] == "KeywordRestParameterNode"
         if result != ""
           result = result + ","
         end
@@ -12702,6 +12712,25 @@ class Compiler
     result
   end
 
+ # The synthetic parameter names a `...` forwarding parameter lowers to,
+ # in slot order: positional rest, keyword rest, block. Issue #1288.
+  def forwarding_synthetic_names
+    ["__sp_fwd_args", "__sp_fwd_kw", "__sp_fwd_block"]
+  end
+
+ # True when a method's ParametersNode carries a `...` forwarding param.
+  def params_have_forwarding(nid)
+    params = @nd_parameters[nid]
+    if params < 0
+      return 0
+    end
+    kwr = @nd_keyword_rest[params]
+    if kwr >= 0 && @nd_type[kwr] == "ForwardingParameterNode"
+      return 1
+    end
+    0
+  end
+
   def collect_rest_index(nid)
     params = @nd_parameters[nid]
     if params < 0
@@ -12709,6 +12738,13 @@ class Compiler
     end
     rest = @nd_rest[params]
     if rest < 0 || @nd_type[rest] != "RestParameterNode"
+ # A `...` forwarding param contributes a synthetic *__sp_fwd_args
+ # rest slot right after reqs/opts/kws. Issue #1288.
+      if params_have_forwarding(nid) == 1
+        return parse_id_list(@nd_requireds[params]).length +
+               parse_id_list(@nd_optionals[params]).length +
+               parse_id_list(@nd_keywords[params]).length
+      end
       return -1
     end
     idx = 0
@@ -12728,6 +12764,13 @@ class Compiler
     end
     kwrest = @nd_keyword_rest[params]
     if kwrest < 0 || @nd_type[kwrest] != "KeywordRestParameterNode"
+ # `...` forwarding: **__sp_fwd_kw sits one slot after the synthetic
+ # *__sp_fwd_args rest. Issue #1288.
+      if params_have_forwarding(nid) == 1
+        return parse_id_list(@nd_requireds[params]).length +
+               parse_id_list(@nd_optionals[params]).length +
+               parse_id_list(@nd_keywords[params]).length + 1
+      end
       return -1
     end
     idx = 0
@@ -12813,7 +12856,16 @@ class Compiler
  # `f(a: 1)` keyword hash construction), so the slot is sym_poly_hash.
     kwrest = @nd_keyword_rest[params]
     if kwrest >= 0
-      if @nd_type[kwrest] == "KeywordRestParameterNode"
+      if @nd_type[kwrest] == "ForwardingParameterNode"
+ # `...` slots: positional rest (int_array), keyword rest
+ # (sym_poly_hash), block (proc). Issue #1288.
+        ["int_array", "sym_poly_hash", "proc"].each { |tp|
+          if result != ""
+            result = result + ","
+          end
+          result = result + tp
+        }
+      elsif @nd_type[kwrest] == "KeywordRestParameterNode"
         if result != ""
           result = result + ","
         end
@@ -29981,6 +30033,29 @@ class Compiler
         end
         if mn == "proc" || mn == "lambda"
           collect_proc_param_sym_names(local, @nd_block[i], mn == "lambda" ? 1 : 0)
+        end
+ # `inner(...)` forwarding: the codegen lowering looks each callee
+ # param up by name in **__sp_fwd_kw, so register those param names
+ # as symbols (static SPS_ ids, not a dynamic intern). Issue #1288.
+        a_fwd_sn = @nd_arguments[i]
+        if a_fwd_sn >= 0
+          a_fwd_list = get_args(a_fwd_sn)
+          has_fwd_sn = 0
+          a_fwd_list.each { |aid|
+            if @nd_type[aid] == "ForwardingArgumentsNode"
+              has_fwd_sn = 1
+            end
+          }
+          if has_fwd_sn == 1
+            fmi_sn = find_method_idx(mn)
+            if fmi_sn >= 0 && fmi_sn < @meth_param_names.length
+              @meth_param_names[fmi_sn].split(",", -1).each { |pn_sn|
+                if pn_sn != ""
+                  collect_sym_name_into(local, pn_sn)
+                end
+              }
+            end
+          end
         end
         if mn == "new"
           r_proc_sym = @nd_receiver[i]

@@ -1139,6 +1139,16 @@ static int flatten(pm_node_t *node) {
   case PM_IMPLICIT_REST_NODE:
     N("ImplicitRestNode");
     break;
+  /* `def foo(...)` forwarding parameter and `bar(...)` forwarding
+     arguments. No payload: `...` has no explicit names. analyze/codegen
+     lower these into synthetic `*args, **kw, &block` slots (issue
+     #1288). */
+  case PM_FORWARDING_PARAMETER_NODE:
+    N("ForwardingParameterNode");
+    break;
+  case PM_FORWARDING_ARGUMENTS_NODE:
+    N("ForwardingArgumentsNode");
+    break;
   case PM_LAMBDA_NODE: {
     pm_lambda_node_t *n = (pm_lambda_node_t *)node;
     N("LambdaNode");
