@@ -3120,6 +3120,32 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     buf_printf(b, "SPL(\"%s\")", nt_str(nt, recv, "name"));
     return;
   }
+  /* self.name / self.to_s / self.inspect inside a class method -> class name */
+  if (recv >= 0 && argc == 0 &&
+      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "SelfNode")) {
+    Scope *encl = comp_scope_of(c, id);
+    if (encl && encl->is_cmethod && encl->class_id >= 0) {
+      buf_printf(b, "SPL(\"%s\")", c->classes[encl->class_id].name);
+      return;
+    }
+  }
+  /* bare `name` inside a class method body -> the class name */
+  if (recv < 0 && !strcmp(name, "name") && argc == 0) {
+    Scope *encl = comp_scope_of(c, id);
+    if (encl && encl->is_cmethod && encl->class_id >= 0) {
+      buf_printf(b, "SPL(\"%s\")", c->classes[encl->class_id].name);
+      return;
+    }
+  }
+  /* Regexp.escape / Regexp.quote -> escape special regex characters */
+  if (recv >= 0 && argc == 1 &&
+      (!strcmp(name, "escape") || !strcmp(name, "quote")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Regexp")) {
+    buf_puts(b, "sp_re_escape("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    return;
+  }
 
   /* SomeClass.superclass -> the parent class name (Object when implicit) */
   if (recv >= 0 && argc == 0 && !strcmp(name, "superclass") &&

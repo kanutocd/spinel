@@ -275,6 +275,19 @@ static TyKind infer_call(Compiler *c, int id) {
   /* __dir__ -> the source directory (a string) */
   if (recv < 0 && !strcmp(name, "__dir__") && argc == 0) return TY_STRING;
 
+  /* bare `name` inside a class method body -> the class name string */
+  if (recv < 0 && !strcmp(name, "name") && argc == 0) {
+    Scope *self = comp_scope_of(c, id);
+    if (self && self->is_cmethod && self->class_id >= 0) return TY_STRING;
+  }
+  /* `self.name` / `self.to_s` inside a class method -> the class name string */
+  if (recv >= 0 && argc == 0 &&
+      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "SelfNode")) {
+    Scope *self = comp_scope_of(c, id);
+    if (self && self->is_cmethod && self->class_id >= 0) return TY_STRING;
+  }
+
   /* proc {} / lambda {} / Proc.new {} -> a first-class Proc value */
   if (is_proc_literal(c, id)) return TY_PROC;
 
@@ -372,6 +385,14 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "matched?") || !strcmp(name, "eos?") || !strcmp(name, "rest?")) return TY_BOOL;
     if (!strcmp(name, "pos") || !strcmp(name, "charpos") || !strcmp(name, "rest_size")) return TY_INT;
     if (!strcmp(name, "reset") || !strcmp(name, "terminate") || !strcmp(name, "unscan")) return TY_STRINGSCANNER;
+  }
+
+  /* Regexp class methods */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Regexp")) {
+    if ((!strcmp(name, "escape") || !strcmp(name, "quote")) && argc >= 1) return TY_STRING;
+    if (!strcmp(name, "union") && argc >= 1) return TY_REGEX;
+    if (!strcmp(name, "last_match") && argc == 0) return TY_POLY;
   }
 
   /* Regexp instance methods */
