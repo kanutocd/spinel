@@ -1621,6 +1621,12 @@ static void register_globals_consts(Compiler *c) {
       const char *nm = nt_str(nt, id, "name");
       if (nm && nm[0] == '$' && is_c_ident(nm + 1)) comp_gvar_intern(c, nm + 1);
     }
+    else if (!strcmp(ty, "ConstantTargetNode")) {
+      /* target in a multi-write: A, B = expr */
+      const char *nm = nt_str(nt, id, "name");
+      if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0)
+        comp_const_intern(c, nm);
+    }
     else if (!strcmp(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       /* a constant bound to a regex literal is resolved at compile time to a
@@ -1684,6 +1690,48 @@ static int infer_global_const_types(Compiler *c) {
     if (!lv) continue;
     TyKind merged = ty_unify(lv->type, vt);
     if (merged != lv->type) { lv->type = merged; changed = 1; }
+  }
+  return changed;
+}
+
+/* Re-infer constants assigned via multi-write with a call/variable RHS.
+   The existing infer_write_types pass widened them to TY_POLY early (before
+   block params converged); this pass overrides with the now-stable element
+   type once it is known and not poly. */
+static int infer_multiwrite_const_types(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "MultiWriteNode")) continue;
+    int value = nt_ref(nt, id, "value");
+    if (value < 0) continue;
+    const char *vty = nt_type(nt, value);
+    if (vty && !strcmp(vty, "ArrayNode")) continue; /* literal handled in infer_write_types */
+    TyKind st = infer_type(c, value);
+    if (!ty_is_array(st)) continue;
+    TyKind elem = ty_array_elem(st);
+    if (elem == TY_POLY || elem == TY_UNKNOWN) continue; /* not yet settled */
+    int ln = 0;
+    const int *lefts = nt_arr(nt, id, "lefts", &ln);
+    for (int i = 0; i < ln; i++) {
+      const char *lty = nt_type(nt, lefts[i]) ? nt_type(nt, lefts[i]) : "";
+      if (strcmp(lty, "ConstantTargetNode")) continue;
+      const char *nm = nt_str(nt, lefts[i], "name");
+      LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+      if (!cv || cv->type == elem) continue;
+      cv->type = elem; changed = 1;
+    }
+    int rn = 0;
+    const int *rights = nt_arr(nt, id, "rights", &rn);
+    for (int j = 0; j < rn; j++) {
+      const char *rty2 = nt_type(nt, rights[j]) ? nt_type(nt, rights[j]) : "";
+      if (strcmp(rty2, "ConstantTargetNode")) continue;
+      const char *nm = nt_str(nt, rights[j], "name");
+      LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+      if (!cv || cv->type == elem) continue;
+      cv->type = elem; changed = 1;
+    }
   }
   return changed;
 }
@@ -1959,8 +2007,8 @@ static int infer_write_types(Compiler *c) {
           }
         }
       }
-      /* call/super/yield returning a typed array: assign element types to targets */
-      if (multi_src && value >= 0) {
+      /* any expression returning a typed array: assign element types to targets */
+      if (value >= 0) {
         TyKind st = infer_type(c, value);
         if (ty_is_array(st)) {
           TyKind elem = ty_array_elem(st);
@@ -1985,6 +2033,13 @@ static int infer_write_types(Compiler *c) {
                 c->classes[ms_arr->class_id].ivar_types[iv_ms] = mg; changed = 1;
               }
             }
+            else if (!strcmp(lty_ms, "ConstantTargetNode")) {
+              const char *cnm_ms = nt_str(nt, lefts[i], "name");
+              LocalVar *cv_ms = cnm_ms ? comp_const(c, cnm_ms) : NULL;
+              if (!cv_ms) continue;
+              TyKind mg_ms = ty_unify(cv_ms->type, elem);
+              if (mg_ms != cv_ms->type) { cv_ms->type = mg_ms; changed = 1; }
+            }
           }
           for (int j = 0; j < rn2; j++) {
             const char *lty_ms = nt_type(nt, rights2[j]) ? nt_type(nt, rights2[j]) : "";
@@ -2003,6 +2058,13 @@ static int infer_write_types(Compiler *c) {
               if (mg2 != c->classes[ms_arr->class_id].ivar_types[iv_ms2]) {
                 c->classes[ms_arr->class_id].ivar_types[iv_ms2] = mg2; changed = 1;
               }
+            }
+            else if (!strcmp(lty_ms, "ConstantTargetNode")) {
+              const char *cnm_ms2 = nt_str(nt, rights2[j], "name");
+              LocalVar *cv_ms2 = cnm_ms2 ? comp_const(c, cnm_ms2) : NULL;
+              if (!cv_ms2) continue;
+              TyKind mg_ms2 = ty_unify(cv_ms2->type, elem);
+              if (mg_ms2 != cv_ms2->type) { cv_ms2->type = mg_ms2; changed = 1; }
             }
           }
           int rest_nid2 = nt_ref(nt, id, "rest");
@@ -2036,6 +2098,15 @@ static int infer_write_types(Compiler *c) {
         if (!lv || lv->is_param || lv->is_block_param) continue;
         lv->type = ty_unify(lv->type, et);
       }
+      else if (!strcmp(lty, "ConstantTargetNode")) {
+        const char *cnm = nt_str(nt, lefts[i], "name");
+        LocalVar *cv = cnm ? comp_const(c, cnm) : NULL;
+        if (!cv) continue;
+        TyKind et = infer_type(c, els[i]);
+        if (et == TY_NIL) continue;
+        TyKind mg = ty_unify(cv->type, et);
+        if (mg != cv->type) { cv->type = mg; changed = 1; }
+      }
       else if (!strcmp(lty, "MultiTargetNode")) {
         /* (b, c) nested target: inner RHS must be an ArrayNode literal */
         const char *ety = nt_type(nt, els[i]);
@@ -2063,13 +2134,22 @@ static int infer_write_types(Compiler *c) {
       int ridx = en - rn + j;
       if (ridx < 0 || ridx >= en) continue;
       const char *rty3 = nt_type(nt, rights[j]);
-      if (!rty3 || strcmp(rty3, "LocalVariableTargetNode")) continue;
-      const char *rnm2 = nt_str(nt, rights[j], "name");
+      if (!rty3) continue;
       TyKind et = infer_type(c, els[ridx]);
       if (et == TY_NIL) continue;
-      LocalVar *lv = rnm2 ? scope_local(comp_scope_of(c, id), rnm2) : NULL;
-      if (!lv || lv->is_param || lv->is_block_param) continue;
-      lv->type = ty_unify(lv->type, et);
+      if (!strcmp(rty3, "LocalVariableTargetNode")) {
+        const char *rnm2 = nt_str(nt, rights[j], "name");
+        LocalVar *lv = rnm2 ? scope_local(comp_scope_of(c, id), rnm2) : NULL;
+        if (!lv || lv->is_param || lv->is_block_param) continue;
+        lv->type = ty_unify(lv->type, et);
+      }
+      else if (!strcmp(rty3, "ConstantTargetNode")) {
+        const char *cnm2 = nt_str(nt, rights[j], "name");
+        LocalVar *cv2 = cnm2 ? comp_const(c, cnm2) : NULL;
+        if (!cv2) continue;
+        TyKind mg3 = ty_unify(cv2->type, et);
+        if (mg3 != cv2->type) { cv2->type = mg3; changed = 1; }
+      }
     }
     /* rest (splat) target: elements [ln, en-rn) become a typed array */
     int rest_nid = nt_ref(nt, id, "rest");
@@ -3234,6 +3314,7 @@ void analyze_program(Compiler *c) {
     ch |= infer_cvar_types(c);
     ch |= infer_inherited_ivars(c);
     ch |= infer_global_const_types(c);
+    ch |= infer_multiwrite_const_types(c);
     ch |= infer_return_types(c);
     if (!ch) break;
   }

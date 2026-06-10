@@ -8750,8 +8750,8 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         }
         return;
       }
-      /* call/super/yield returning a typed array: runtime destructure */
-      if (multi_src && ty_is_array(st)) {
+      /* any expression returning a typed array: runtime destructure */
+      if (ty_is_array(st) && st != TY_UNKNOWN) {
         const char *k = (st == TY_POLY_ARRAY) ? "Poly" : array_kind(st);
         if (!k) k = "Int";
         TyKind elem = ty_array_elem(st);
@@ -8790,6 +8790,12 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
             }
             else buf_puts(b, get_expr);
             buf_puts(b, ";\n");
+          }
+          else if ((!strcmp(lty, "ConstantTargetNode") || !strcmp(lty, "ConstantPathTargetNode"))) {
+            const char *cnm_rt = nt_str(nt, lefts[i], "name");
+            if (!cnm_rt || !comp_const(c, cnm_rt)) continue;
+            emit_indent(b, indent);
+            buf_printf(b, "cst_%s = sp_%sArray_get(_t%d, %dLL);\n", cnm_rt, k, tarr, i);
           }
         }
         if (rest_var) {
@@ -8871,7 +8877,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         emit_indent(b, indent);
         buf_printf(b, "lv_%s = _t%d;\n", nt_str(nt, lefts[i], "name"), tmps[i]);
       }
-      else if (lty && !strcmp(lty, "ConstantPathTargetNode") &&
+      else if (lty && (!strcmp(lty, "ConstantPathTargetNode") || !strcmp(lty, "ConstantTargetNode")) &&
                nt_str(nt, lefts[i], "name") && comp_const(c, nt_str(nt, lefts[i], "name"))) {
         emit_indent(b, indent);
         buf_printf(b, "cst_%s = _t%d;\n", nt_str(nt, lefts[i], "name"), tmps[i]);
@@ -8930,14 +8936,23 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     for (int j = 0; j < rn; j++) {
       int ridx = en - rn + j;
       const char *lty = nt_type(nt, rights[j]);
-      if (!lty || strcmp(lty, "LocalVariableTargetNode")) continue;
-      emit_indent(b, indent);
-      if (ridx >= 0 && ridx < en) {
-        buf_printf(b, "lv_%s = _t%d;\n", nt_str(nt, rights[j], "name"), tmps[ridx]);
+      if (!lty) continue;
+      const char *rnm_j = nt_str(nt, rights[j], "name");
+      if (!strcmp(lty, "LocalVariableTargetNode")) {
+        emit_indent(b, indent);
+        if (ridx >= 0 && ridx < en) {
+          buf_printf(b, "lv_%s = _t%d;\n", rnm_j, tmps[ridx]);
+        }
+        else {
+          buf_printf(b, "lv_%s = %s;\n", rnm_j, default_value(comp_ntype(c, rights[j])));
+        }
       }
-      else {
-        buf_printf(b, "lv_%s = %s;\n", nt_str(nt, rights[j], "name"),
-                   default_value(comp_ntype(c, rights[j])));
+      else if ((!strcmp(lty, "ConstantPathTargetNode") || !strcmp(lty, "ConstantTargetNode")) &&
+               rnm_j && comp_const(c, rnm_j)) {
+        emit_indent(b, indent);
+        if (ridx >= 0 && ridx < en) {
+          buf_printf(b, "cst_%s = _t%d;\n", rnm_j, tmps[ridx]);
+        }
       }
     }
     return;
@@ -9959,7 +9974,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "static ");
     emit_ctype(c, lv->type, &b);
     buf_printf(&b, " gv_%s = %s;\n", lv->name,
-               lv->type == TY_RANGE ? "{0}" : default_value(lv->type));
+               (lv->type == TY_RANGE || lv->type == TY_POLY) ? "{0}" : default_value(lv->type));
   }
   for (int i = 0; i < c->nconsts; i++) {
     LocalVar *lv = &c->consts[i];
@@ -9967,7 +9982,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "static ");
     emit_ctype(c, lv->type, &b);
     buf_printf(&b, " cst_%s = %s;\n", lv->name,
-               lv->type == TY_RANGE ? "{0}" : default_value(lv->type));
+               (lv->type == TY_RANGE || lv->type == TY_POLY) ? "{0}" : default_value(lv->type));
     if (lv->init_guarded) buf_printf(&b, "static int sp_init_in_progress_%s;\n", lv->name);
   }
   if (c->ngvars || c->nconsts) buf_puts(&b, "\n");
