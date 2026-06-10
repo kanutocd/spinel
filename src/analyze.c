@@ -1015,7 +1015,7 @@ static TyKind infer_call(Compiler *c, int id) {
   }
   if (recv >= 0 && ty_is_hash(rt)) {
     if (!strcmp(name, "[]"))     return ty_hash_val(rt);
-    if (!strcmp(name, "[]="))    return argc >= 2 ? infer_type(c, argv[1]) : ty_hash_val(rt);
+    if (!strcmp(name, "[]="))    return argc >= 2 ? ty_unify(infer_type(c, argv[1]), ty_hash_val(rt)) : ty_hash_val(rt);
     if (!strcmp(name, "fetch")) {
       TyKind vt = ty_hash_val(rt);
       int blk = nt_ref(nt, id, "block");

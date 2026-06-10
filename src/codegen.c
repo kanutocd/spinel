@@ -7569,13 +7569,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sHash_set(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
         if (rt == TY_POLY_POLY_HASH) emit_boxed(c, argv[0], b); else emit_expr(c, argv[0], b);
         buf_puts(b, ", ");
+        char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
         if (is_poly_hash && vt != TY_POLY) {
-          char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
           emit_boxed_text(c, decl_type, tvn, b);
-        } else {
+        }
+        else {
           buf_printf(b, "_t%d", tv);
         }
-        buf_printf(b, "); _t%d; })", tv);
+        /* For poly-hash receivers the expression returns the boxed value
+           (sp_RbVal); for typed-hash receivers return the raw typed value. */
+        if (is_poly_hash) {
+          buf_puts(b, "); ");
+          if (decl_type == TY_POLY) buf_printf(b, "_t%d; })", tv);
+          else { Buf _bx; memset(&_bx, 0, sizeof _bx); emit_boxed_text(c, decl_type, tvn, &_bx); buf_printf(b, "%s; })", _bx.p ? _bx.p : tvn); free(_bx.p); }
+        }
+        else {
+          buf_printf(b, "); _t%d; })", tv);
+        }
         return;
       }
     }
