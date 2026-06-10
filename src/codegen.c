@@ -9105,6 +9105,8 @@ static int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *
     buf_printf(b, "(%s.tag == SP_TAG_BOOL && !%s.v.b)", tmp, tmp);
   else if (!strcmp(cn, "Numeric"))
     buf_printf(b, "(%s.tag == SP_TAG_INT || %s.tag == SP_TAG_FLT)", tmp, tmp);
+  else if (!strcmp(cn, "Range"))
+    buf_printf(b, "(%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_RANGE)", tmp, tmp);
   else if (!strcmp(cn, "Array"))
     buf_printf(b, "(%s.tag == SP_TAG_OBJ && %s.cls_id <= -1 && %s.cls_id >= -12)", tmp, tmp, tmp);
   else if (!strcmp(cn, "Hash"))
@@ -9203,6 +9205,19 @@ static void emit_case(Compiler *c, int id, Buf *b, int indent) {
             else buf_puts(b, "0");
           }
           else {
+          /* when ClassName: Module#=== resolves via is_a? semantics */
+          const char *cty2 = nt_type(nt, conds[j]);
+          const char *cn2 = cty2 && !strcmp(cty2, "ConstantReadNode") ? nt_str(nt, conds[j], "name") : NULL;
+          if (cn2 && pt == TY_POLY) {
+            char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
+            if (!emit_poly_class_when(c, conds[j], tmp, b))
+              buf_puts(b, "0");
+          }
+          else if (cn2) {
+            int yes = ty_matches_class(pt, cn2, 0);
+            buf_printf(b, "%d", yes > 0 ? 1 : 0);
+          }
+          else {
           int reidx = re_lit_index(c, conds[j]);
           if (reidx >= 0 && pt == TY_STRING) {
             buf_printf(b, "sp_re_match_p(sp_re_pat_%d, _t%d)", reidx, t);
@@ -9221,13 +9236,12 @@ static void emit_case(Compiler *c, int id, Buf *b, int indent) {
             buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
           }
           else if (pt == TY_POLY) {
-            char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
-            if (!emit_poly_class_when(c, conds[j], tmp, b))
-              { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
+            buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")");
           }
           else {
             buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")");
           }
+          } /* close non-ConstantReadNode else */
           } /* close else { int reidx... } */
         }
       }
@@ -9291,6 +9305,15 @@ static void emit_case_expr(Compiler *c, int id, Buf *b) {
     for (int j = 0; j < wc; j++) {
       if (j) buf_puts(b, " || ");
       if (pred >= 0) {
+        /* when ClassName: Module#=== resolves via is_a? semantics */
+        const char *cty2 = nt_type(nt, conds[j]);
+        const char *cn2 = cty2 && !strcmp(cty2, "ConstantReadNode") ? nt_str(nt, conds[j], "name") : NULL;
+        if (cn2 && pt == TY_POLY) {
+          char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
+          if (!emit_poly_class_when(c, conds[j], tmp, b)) buf_puts(b, "0");
+        }
+        else if (cn2) { int yes = ty_matches_class(pt, cn2, 0); buf_printf(b, "%d", yes > 0 ? 1 : 0); }
+        else {
         int reidx = re_lit_index(c, conds[j]);
         if (reidx >= 0 && pt == TY_STRING) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, _t%d)", reidx, t); }
         else if (comp_ntype(c, conds[j]) == TY_RANGE && pt != TY_STRING) {
@@ -9303,12 +9326,9 @@ static void emit_case_expr(Compiler *c, int id, Buf *b) {
           buf_puts(b, "0");
         }
         else if (pt == TY_STRING) { buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
-        else if (pt == TY_POLY) {
-          char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
-          if (!emit_poly_class_when(c, conds[j], tmp, b))
-            { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
-        }
+        else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
         else { buf_printf(b, "(_t%d == ", t); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
+        } /* close non-ConstantReadNode else */
       }
       else { buf_puts(b, "("); emit_expr(c, conds[j], b); buf_puts(b, ")"); }
     }
