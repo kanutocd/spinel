@@ -3181,7 +3181,9 @@ static int infer_array_params(Compiler *c) {
     if (!rty || strcmp(rty, "LocalVariableReadNode")) continue;
     Scope *s = comp_scope_of(c, id);
     LocalVar *lv = scope_local(s, nt_str(nt, recv, "name"));
-    if (lv && lv->is_param && lv->type == TY_UNKNOWN) { lv->type = TY_POLY_ARRAY; changed = 1; }
+    /* If caller-side [] read already widened this param to a hash type,
+       push wins: a param that receives push() is an array, not a hash. */
+    if (lv && lv->is_param && (lv->type == TY_UNKNOWN || ty_is_hash(lv->type))) { lv->type = TY_POLY_ARRAY; changed = 1; }
   }
   return changed;
 }
@@ -4415,7 +4417,10 @@ void analyze_program(Compiler *c) {
     const char *nm = nt_str(c->nt, id, "name");
     Scope *s = comp_scope_of(c, id);
     LocalVar *lv = nm ? scope_local(s, nm) : NULL;
-    if (lv && lv->type == TY_UNKNOWN) lv->type = TY_POLY_ARRAY;
+    /* Also reset any hash type that crept in via premature [] read
+       promotion: a variable whose only write is an empty array literal
+       is definitively an array, not a hash. */
+    if (lv && (lv->type == TY_UNKNOWN || ty_is_hash(lv->type))) lv->type = TY_POLY_ARRAY;
   }
   /* A read-only ivar (referenced but never assigned a typed value) stays
      TY_UNKNOWN -> it has no C type. Such a slot always reads nil at runtime;
@@ -4441,6 +4446,10 @@ void analyze_program(Compiler *c) {
       int ch = 0;
       ch |= infer_param_types(c);
       ch |= infer_return_types(c);
+      /* Re-run write-type inference so locals whose types derive from
+         function return types (e.g. `x = f([])` after `f`'s param was
+         promoted from UNKNOWN to POLY_ARRAY) get updated. */
+      ch |= infer_write_types(c);
       if (!ch) break;
     }
   }
