@@ -3650,23 +3650,28 @@ static int infer_block_params(Compiler *c) {
     }
 
     /* array.each_slice(n).map/collect { |x, y, ...| } chain: each block param
-       gets the element type of the original array (slice elements) */
+       gets the element type of the original array (slice elements).
+       array.each_cons(n).map { |pair| } chain: block param gets the array type. */
     if ((!strcmp(name, "map") || !strcmp(name, "collect")) && rt == TY_UNKNOWN &&
         nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
-        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_slice") &&
+        nt_str(nt, recv, "name") && (!strcmp(nt_str(nt, recv, "name"), "each_slice") ||
+                                     !strcmp(nt_str(nt, recv, "name"), "each_cons")) &&
         nt_ref(nt, recv, "block") < 0) {
       int es_recv2 = nt_ref(nt, recv, "receiver");
       TyKind arr_t2 = es_recv2 >= 0 ? infer_type(c, es_recv2) : TY_UNKNOWN;
+      int is_cons2 = !strcmp(nt_str(nt, recv, "name"), "each_cons");
       if (ty_is_array(arr_t2)) {
-        TyKind elem_t2 = ty_array_elem(arr_t2);
-        if (elem_t2 != TY_UNKNOWN) {
+        /* each_slice: block params get element type; each_cons: single param
+           gets the array type (a sub-array slice of the original). */
+        TyKind bp_t2 = is_cons2 ? arr_t2 : ty_array_elem(arr_t2);
+        if (bp_t2 != TY_UNKNOWN) {
           Scope *es2 = comp_scope_of(c, block);
           int np2 = 0; while (block_param_name(c, block, np2)) np2++;
           for (int pj2 = 0; pj2 < np2; pj2++) {
             const char *pn2 = block_param_name(c, block, pj2);
             if (!pn2) break;
             LocalVar *lp2 = scope_local_intern(es2, pn2); lp2->is_block_param = 1;
-            TyKind m2 = ty_unify(lp2->type, elem_t2);
+            TyKind m2 = ty_unify(lp2->type, bp_t2);
             if (m2 != lp2->type) { lp2->type = m2; changed = 1; }
           }
           continue;
