@@ -3052,6 +3052,45 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  if (recv >= 0 && !strcmp(name, "instance_eval")) {
+    int blk = nt_ref(nt, id, "block");
+    TyKind rtype = comp_ntype(c, recv);
+    if (blk >= 0 && ty_is_object(rtype) &&
+        comp_method_in_chain(c, ty_object_class(rtype), "instance_eval", NULL) < 0) {
+      int blk_body = nt_ref(nt, blk, "body");
+      int ie_bn = 0; const int *ie_bb = blk_body >= 0 ? nt_arr(nt, blk_body, "body", &ie_bn) : NULL;
+      int cls_id = ty_object_class(rtype);
+      TyKind body_ty = ie_bn > 0 ? comp_ntype(c, ie_bb[ie_bn - 1]) : TY_NIL;
+      int tr = ++g_tmp, tres = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_%s *_t%d = %s;\n", c->classes[cls_id].name, tr, rb.p ? rb.p : "NULL");
+      free(rb.p);
+      emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
+      buf_printf(g_pre, " _t%d;\n", tres);
+      char selfbuf[64]; snprintf(selfbuf, sizeof selfbuf, "_t%d", tr);
+      const char *saved_self2 = g_self; g_self = selfbuf;
+      if (ie_bn > 0) {
+        for (int j = 0; j < ie_bn - 1; j++) emit_stmt(c, ie_bb[j], g_pre, g_indent);
+        Buf vb; memset(&vb, 0, sizeof vb);
+        int si2 = g_indent; g_indent = si2;
+        emit_expr(c, ie_bb[ie_bn - 1], &vb);
+        g_indent = si2;
+        emit_indent(g_pre, g_indent);
+        if (body_ty == TY_VOID || body_ty == TY_NIL || body_ty == TY_UNKNOWN) {
+          if (vb.p) buf_printf(g_pre, "%s;\n", vb.p);
+        }
+        else {
+          buf_printf(g_pre, "_t%d = %s;\n", tres, vb.p ? vb.p : "0");
+        }
+        free(vb.p);
+      }
+      g_self = saved_self2;
+      buf_printf(b, "_t%d", tres);
+      return;
+    }
+  }
+
   /* implicit-self call inside an instance method */
   if (recv < 0) {
     Scope *self = comp_scope_of(c, id);
@@ -9380,6 +9419,17 @@ static void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_BOOL) {
     buf_puts(b, "fputs(("); emit_expr(c, arg, b); buf_puts(b, ") ? \"true\" : \"false\", stdout);\n");
+  }
+  else if (t == TY_SYMBOL) {
+    buf_puts(b, "fputs(sp_sym_to_s("); emit_expr(c, arg, b); buf_puts(b, "), stdout);\n");
+  }
+  else if (t == TY_NIL) {
+    (void)arg;
+  }
+  else if (t == TY_POLY || ty_is_object(t)) {
+    int tv = ++g_tmp;
+    buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, arg, b);
+    buf_printf(b, "; const char *_ps%d = sp_poly_to_s(_t%d); if (_ps%d) fputs(_ps%d, stdout); }\n", tv, tv, tv, tv);
   }
   else {
     unsupported(c, arg, "print argument");

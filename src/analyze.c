@@ -93,6 +93,11 @@ static int is_blk_param_call(Compiler *c, int node, int mi) {
 static int g_yvt_mi[MAX_YVT_DEPTH];
 static int g_yvt_depth = 0;
 
+/* Temporary class override for instance_eval block body inference.
+   -1 = no override; set to the receiver's class_id while inferring
+   the block body so that InstanceVariableReadNode uses the right class. */
+static int g_ie_class_id = -1;
+
 /* The value type of `yield` / a `<&block-param>.call` inside method mi: the
    block-body value type at a (any) call site of mi. Polymorphic, resolved from
    the first matching caller -- matches how the rewrite inlines per call site. */
@@ -1197,6 +1202,21 @@ static TyKind infer_call(Compiler *c, int id) {
       return result;
     }
   }
+  if (!strcmp(name, "instance_eval")) {
+    int blk_id = nt_ref(nt, id, "block");
+    if (blk_id >= 0 && ty_is_object(rt) &&
+        comp_method_in_chain(c, ty_object_class(rt), "instance_eval", NULL) < 0) {
+      int bdy = nt_ref(nt, blk_id, "body");
+      int bbn = 0; const int *bbb = bdy >= 0 ? nt_arr(nt, bdy, "body", &bbn) : NULL;
+      if (bbn <= 0) return TY_NIL;
+      int saved_ie = g_ie_class_id;
+      g_ie_class_id = ty_object_class(rt);
+      TyKind result = infer_type(c, bbb[bbn - 1]);
+      g_ie_class_id = saved_ie;
+      return result;
+    }
+    return TY_POLY;
+  }
 
   /* safe navigation &. with unresolved type: return poly (receiver may be nil at runtime) */
   {
@@ -1331,8 +1351,9 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) return TY_UNKNOWN;
-    ClassInfo *ci = &c->classes[s->class_id];
+    int cls_id = (s->class_id >= 0) ? s->class_id : g_ie_class_id;
+    if (cls_id < 0) return TY_UNKNOWN;
+    ClassInfo *ci = &c->classes[cls_id];
     int iv = nm ? comp_ivar_index(ci, nm) : -1;
     return iv >= 0 ? ci->ivar_types[iv] : TY_UNKNOWN;
   }
@@ -4059,4 +4080,29 @@ void analyze_program(Compiler *c) {
 
   for (int id = 0; id < c->nt->count; id++)
     infer_type(c, id);
+
+  /* Re-infer nodes inside instance_eval block bodies with the receiver's class
+     context, so ivar reads get correct types in the final c->ntype cache.
+     Call infer_type on each body statement: it recursively re-infers all
+     sub-expressions (including ivar reads) and updates c->ntype. */
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty2 = nt_type(c->nt, id);
+    if (!ty2 || strcmp(ty2, "CallNode")) continue;
+    const char *nm2 = nt_str(c->nt, id, "name");
+    if (!nm2 || strcmp(nm2, "instance_eval")) continue;
+    int blk2 = nt_ref(c->nt, id, "block");
+    int recv2 = nt_ref(c->nt, id, "receiver");
+    if (blk2 < 0 || recv2 < 0) continue;
+    TyKind rt2 = c->ntype[recv2];
+    if (!ty_is_object(rt2)) continue;
+    if (comp_method_in_chain(c, ty_object_class(rt2), "instance_eval", NULL) >= 0) continue;
+    int bdy2 = nt_ref(c->nt, blk2, "body");
+    if (bdy2 < 0) continue;
+    int bn2 = 0; const int *bb2 = nt_arr(c->nt, bdy2, "body", &bn2);
+    if (bn2 <= 0 || !bb2) continue;
+    int saved2 = g_ie_class_id;
+    g_ie_class_id = ty_object_class(rt2);
+    for (int k2 = 0; k2 < bn2; k2++) infer_type(c, bb2[k2]);
+    g_ie_class_id = saved2;
+  }
 }
