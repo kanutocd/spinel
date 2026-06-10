@@ -3607,7 +3607,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if ((!strcmp(name, "basename") || !strcmp(name, "dirname") || !strcmp(name, "extname")) && argc == 1) {
       buf_printf(b, "sp_file_%s(", name); emit_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
-    if (!strcmp(name, "read") && argc == 1) {
+    if ((!strcmp(name, "read") || !strcmp(name, "binread")) && argc == 1) {
       buf_puts(b, "sp_file_read("); emit_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
     if (!strcmp(name, "write") && argc == 2) {

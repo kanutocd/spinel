@@ -466,7 +466,7 @@ static TyKind infer_call(Compiler *c, int id) {
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "File")) {
       if (!strcmp(name, "basename") || !strcmp(name, "dirname") || !strcmp(name, "extname") ||
-          !strcmp(name, "read") || !strcmp(name, "expand_path"))
+          !strcmp(name, "read") || !strcmp(name, "binread") || !strcmp(name, "expand_path"))
         return TY_STRING;
       if (!strcmp(name, "exist?") || !strcmp(name, "exists?"))
         return TY_BOOL;
