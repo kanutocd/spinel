@@ -4253,6 +4253,49 @@ void analyze_program(Compiler *c) {
   /* recompute returns: a method returning such a param is now poly */
   for (int iter = 0; iter < 8; iter++) if (!infer_return_types(c)) break;
 
+  /* Post-fixpoint: unify param types across method override families.
+     When an override widens a param to TY_POLY but the parent (or
+     sibling) keeps it scalar, the generated C signatures disagree and
+     virtual dispatch can't call both with the same arg temps. Walk all
+     scope pairs that are overrides of the same instance method in a
+     parent-child class pair and widen any differing slot to TY_POLY. */
+  for (int s1 = 0; s1 < c->nscopes; s1++) {
+    Scope *sc1 = &c->scopes[s1];
+    if (sc1->class_id < 0 || !sc1->name || sc1->is_cmethod || sc1->nparams == 0) continue;
+    /* initialize is never virtually dispatched (always via ClassName.new), so
+       each override may have fully independent param types. */
+    if (!strcmp(sc1->name, "initialize")) continue;
+    for (int s2 = s1 + 1; s2 < c->nscopes; s2++) {
+      Scope *sc2 = &c->scopes[s2];
+      if (sc2->class_id < 0 || !sc2->name || sc2->is_cmethod || sc2->nparams == 0) continue;
+      if (strcmp(sc1->name, sc2->name) != 0) continue;
+      /* check ancestor relationship: one class must be an ancestor of the other */
+      int c1 = sc1->class_id, c2 = sc2->class_id;
+      int related = 0;
+      for (int k = c1; k >= 0; k = c->classes[k].parent) if (k == c2) { related = 1; break; }
+      if (!related)
+        for (int k = c2; k >= 0; k = c->classes[k].parent) if (k == c1) { related = 1; break; }
+      if (!related) continue;
+      int np = sc1->nparams < sc2->nparams ? sc1->nparams : sc2->nparams;
+      for (int k = 0; k < np; k++) {
+        LocalVar *p1 = scope_local(sc1, sc1->pnames[k]);
+        LocalVar *p2 = scope_local(sc2, sc2->pnames[k]);
+        if (!p1 || !p2) continue;
+        if (p1->type != p2->type && (p1->type == TY_POLY || p2->type == TY_POLY)) {
+          p1->type = TY_POLY;
+          p2->type = TY_POLY;
+        }
+      }
+      /* Also unify return types: if one member returns poly and another void/nil,
+         make both return poly so the dispatch statement-expression can capture
+         a scalar result from any arm. */
+      if (sc1->ret != sc2->ret && (sc1->ret == TY_POLY || sc2->ret == TY_POLY)) {
+        sc1->ret = TY_POLY;
+        sc2->ret = TY_POLY;
+      }
+    }
+  }
+
   /* Promote loop-multiplication variables to bigint */
   detect_bigint_loop_vars(c);
   propagate_bigint_cascade(c);
