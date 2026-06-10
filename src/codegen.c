@@ -4156,6 +4156,58 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* object == / != : try direct method, then fall back to <=> == 0 */
+    if (recv >= 0 && ty_is_object(rt)) {
+      int ecid = ty_object_class(rt);
+      int emi = comp_method_in_chain(c, ecid, name, NULL);
+      if (emi >= 0) {
+        char selfptr[64];
+        const char *rty2 = nt_type(nt, recv);
+        if (rty2 && (!strcmp(rty2, "LocalVariableReadNode") ||
+                     !strcmp(rty2, "InstanceVariableReadNode") ||
+                     !strcmp(rty2, "SelfNode"))) {
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
+          free(rb.p);
+        }
+        else {
+          int t2 = ++g_tmp;
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          emit_indent(g_pre, g_indent);
+          emit_ctype(c, rt, g_pre);
+          buf_printf(g_pre, " _t%d = %s;\n", t2, rb.p ? rb.p : "");
+          free(rb.p);
+          snprintf(selfptr, sizeof selfptr, "_t%d", t2);
+        }
+        emit_dispatch(c, ecid, name, selfptr, nt_ref(nt, id, "arguments"), b);
+        return;
+      }
+      /* no direct == : use <=> == 0 when the class supports Comparable */
+      if (comp_method_in_chain(c, ecid, "<=>", NULL) >= 0) {
+        char selfptr[64];
+        const char *rty2 = nt_type(nt, recv);
+        if (rty2 && (!strcmp(rty2, "LocalVariableReadNode") ||
+                     !strcmp(rty2, "InstanceVariableReadNode") ||
+                     !strcmp(rty2, "SelfNode"))) {
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          snprintf(selfptr, sizeof selfptr, "%s", rb.p ? rb.p : "");
+          free(rb.p);
+        }
+        else {
+          int t3 = ++g_tmp;
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          emit_indent(g_pre, g_indent);
+          emit_ctype(c, rt, g_pre);
+          buf_printf(g_pre, " _t%d = %s;\n", t3, rb.p ? rb.p : "");
+          free(rb.p);
+          snprintf(selfptr, sizeof selfptr, "_t%d", t3);
+        }
+        buf_puts(b, "(");
+        emit_dispatch(c, ecid, "<=>", selfptr, nt_ref(nt, id, "arguments"), b);
+        buf_printf(b, " %s 0)", eq ? "==" : "!=");
+        return;
+      }
+    }
     unsupported(c, id, "equality");
   }
 
@@ -8865,6 +8917,25 @@ static void emit_op_assign(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "lv_%s %s= ", en, op); emit_expr(c, v, b); buf_puts(b, ";\n");
     return;
   }
+  if (ty_is_object(t)) {
+    int defcls2 = -1;
+    int cid2 = ty_object_class(t);
+    int mi2 = comp_method_in_chain(c, cid2, op, &defcls2);
+    if (mi2 >= 0) {
+      Scope *ms2 = &c->scopes[mi2];
+      LocalVar *p2 = ms2->nparams >= 1 ? scope_local(ms2, ms2->pnames[0]) : NULL;
+      int atmp2 = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      emit_ctype(c, p2 ? p2->type : comp_ntype(c, v), g_pre);
+      buf_printf(g_pre, " _t%d = ", atmp2);
+      emit_expr(c, v, g_pre);
+      buf_puts(g_pre, ";\n");
+      buf_printf(b, "lv_%s = sp_%s_%s((sp_%s *)lv_%s, _t%d);\n",
+                 en, c->classes[defcls2].name, mc(ms2->name),
+                 c->classes[defcls2].name, en, atmp2);
+      return;
+    }
+  }
   unsupported(c, id, "operator assignment");
 }
 
@@ -9862,6 +9933,29 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     if (vt == TY_STRING && op && !strcmp(op, "+")) {
       buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ");\n");
+    }
+    else if (op && ty_is_object(vt)) {
+      int idefcls = -1;
+      int icid = ty_object_class(vt);
+      int imi = comp_method_in_chain(c, icid, op, &idefcls);
+      if (imi >= 0) {
+        Scope *ims = &c->scopes[imi];
+        LocalVar *ip = ims->nparams >= 1 ? scope_local(ims, ims->pnames[0]) : NULL;
+        int iatmp = ++g_tmp;
+        int ival = nt_ref(nt, id, "value");
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, ip ? ip->type : comp_ntype(c, ival), g_pre);
+        buf_printf(g_pre, " _t%d = ", iatmp);
+        emit_expr(c, ival, g_pre);
+        buf_puts(g_pre, ";\n");
+        buf_printf(b, "%s = sp_%s_%s((sp_%s *)%s, _t%d);\n",
+                   ref, c->classes[idefcls].name, mc(ims->name),
+                   c->classes[idefcls].name, ref, iatmp);
+      }
+      else {
+        buf_printf(b, "%s %s= ", ref, op);
+        emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ";\n");
+      }
     }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
