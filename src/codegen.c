@@ -4139,6 +4139,34 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ")");
       return;
     }
+    /* Time + int/float, Time - int/float, Time - Time */
+    if (rt == TY_TIME && (!strcmp(name, "+") || !strcmp(name, "-"))) {
+      TyKind at = argc > 0 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
+      int tt = ++g_tmp, tu = ++g_tmp;
+      if (!strcmp(name, "-") && at == TY_TIME) {
+        /* Time - Time -> Float */
+        buf_printf(b, "({ sp_Time _t%d = ", tt); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_Time _t%d = ", tu); emit_expr(c, argv[0], b);
+        buf_printf(b, "; sp_time_sub_t(_t%d, _t%d); })", tt, tu);
+      }
+      else if (at == TY_FLOAT) {
+        buf_printf(b, "({ sp_Time _t%d = ", tt); emit_expr(c, recv, b);
+        buf_printf(b, "; double _t%d = ", tu); emit_expr(c, argv[0], b);
+        if (!strcmp(name, "+"))
+          buf_printf(b, "; sp_time_add_f(_t%d, _t%d); })", tt, tu);
+        else
+          buf_printf(b, "; sp_time_add_f(_t%d, -_t%d); })", tt, tu);
+      }
+      else {
+        buf_printf(b, "({ sp_Time _t%d = ", tt); emit_expr(c, recv, b);
+        buf_printf(b, "; mrb_int _t%d = ", tu); emit_expr(c, argv[0], b);
+        if (!strcmp(name, "+"))
+          buf_printf(b, "; sp_time_add_i(_t%d, _t%d); })", tt, tu);
+        else
+          buf_printf(b, "; sp_time_sub_i(_t%d, _t%d); })", tt, tu);
+      }
+      return;
+    }
     unsupported(c, id, "arithmetic");
   }
 
@@ -4180,6 +4208,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
                     " (_t%d > 0) - (_t%d < 0); })", tc, ta, tb, tc, tc);
       return;
     }
+    if (lrt == TY_TIME) {
+      int ta = ++g_tmp, tb = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = ", ta); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_Time _t%d = ", tb); emit_expr(c, argv[0], b);
+      buf_printf(b, "; (mrb_int)sp_time_cmp(_t%d, _t%d); })", ta, tb);
+      return;
+    }
   }
 
   if (recv >= 0 && argc == 1 &&
@@ -4208,6 +4243,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, "(strcmp(");
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
       buf_printf(b, ") %s 0)", name);
+      return;
+    }
+    /* Time comparison via sp_time_cmp */
+    if (rt == TY_TIME) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = ", tt); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_Time _t%d = ", tu); emit_expr(c, argv[0], b);
+      buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
       return;
     }
     /* Comparable: object with a user `<=>` method but no direct `<` etc. */
@@ -4662,6 +4705,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* Time == / != via sp_time_cmp */
+    if (rt == TY_TIME) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = ", tt); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_Time _t%d = ", tu); emit_expr(c, argv[0], b);
+      buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, eq ? "==" : "!=");
+      return;
+    }
     unsupported(c, id, "equality");
   }
 
@@ -4859,6 +4910,19 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     else if ((!strcmp(name, "+") || !strcmp(name, "-")) && argc == 1) {
       buf_printf(b, "sp_time_add(%s, %s(mrb_float)(", r, name[0] == '-' ? "-" : "");
       emit_expr(c, argv[0], b); buf_puts(b, "))");
+    }
+    else if ((!strcmp(name, "<") || !strcmp(name, ">") || !strcmp(name, "<=") ||
+              !strcmp(name, ">=") || !strcmp(name, "==") || !strcmp(name, "!=")) && argc == 1) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
+    }
+    else if (!strcmp(name, "<=>") && argc == 1) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "; (mrb_int)sp_time_cmp(_t%d, _t%d); })", tt, tu);
     }
     else done = 0;
     free(rs.p);
@@ -9525,6 +9589,11 @@ static void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   else if (t == TY_EXCEPTION) {
     buf_puts(b, "{ const char *_ps = sp_exc_message("); emit_expr(c, arg, b);
     buf_puts(b, "); if (_ps) fputs(_ps, stdout); if (!_ps || !*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); }\n");
+  }
+  else if (t == TY_TIME) {
+    int tv = ++g_tmp;
+    buf_printf(b, "{ sp_Time _t%d = ", tv); emit_expr(c, arg, b);
+    buf_printf(b, "; const char *_ts = sp_time_inspect_v(_t%d); fputs(_ts, stdout); putchar('\\n'); }\n", tv);
   }
   else if (t == TY_POLY) {
     buf_puts(b, "sp_poly_puts("); emit_expr(c, arg, b); buf_puts(b, ");\n");

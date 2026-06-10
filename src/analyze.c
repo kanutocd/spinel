@@ -482,6 +482,10 @@ static TyKind infer_call(Compiler *c, int id) {
 
   /* Time instance methods */
   if (recv >= 0 && rt == TY_TIME) {
+    if (!strcmp(name, "-") && argc > 0) {
+      TyKind at = infer_type(c, argv[0]);
+      if (at == TY_TIME) return TY_FLOAT;
+    }
     if (!strcmp(name, "utc") || !strcmp(name, "gmtime") || !strcmp(name, "getutc") ||
         !strcmp(name, "localtime") || !strcmp(name, "getlocal") || !strcmp(name, "+") ||
         !strcmp(name, "-")) return TY_TIME;
@@ -490,7 +494,11 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "ctime")) return TY_STRING;
     if (!strcmp(name, "to_f") || !strcmp(name, "subsec")) return TY_FLOAT;
     if (!strcmp(name, "utc?") || !strcmp(name, "gmt?") || !strcmp(name, "dst?") ||
-        !strcmp(name, "sunday?") || !strcmp(name, "monday?")) return TY_BOOL;
+        !strcmp(name, "isdst") ||
+        !strcmp(name, "sunday?") || !strcmp(name, "monday?") ||
+        !strcmp(name, "<") || !strcmp(name, ">") || !strcmp(name, "<=") ||
+        !strcmp(name, ">=") || !strcmp(name, "==") || !strcmp(name, "!=")) return TY_BOOL;
+    if (!strcmp(name, "<=>")) return TY_INT;
     if (!strcmp(name, "class")) return TY_STRING;
     /* year/mon/day/hour/min/sec/wday/yday/to_i/tv_sec/tv_usec/usec/tv_nsec/nsec/... */
     return TY_INT;
@@ -1449,8 +1457,8 @@ static TyKind infer_uncached(Compiler *c, int id) {
     /* symbol keys -> SymPolyHash (boxed values), regardless of value type */
     if (kt == TY_SYMBOL) return TY_SYM_POLY_HASH;
     TyKind hv = ty_hash_of(kt, vt);
-    /* string keys with a mixed/unsupported value type -> StrPolyHash */
-    if (hv == TY_UNKNOWN && kt == TY_STRING && vt != TY_UNKNOWN) return TY_STR_POLY_HASH;
+    /* unsupported combination -> fall back to poly storage */
+    if (hv == TY_UNKNOWN && vt != TY_UNKNOWN) return TY_POLY_POLY_HASH;
     return hv;
   }
   if (!strcmp(ty, "YieldNode"))
