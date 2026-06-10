@@ -5302,15 +5302,35 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
       if (!strcmp(name, "default") && argc == 0) {
-        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH) {
-          int t = ++g_tmp;
-          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
+        int t = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
+        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
           buf_printf(b, "; _t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
-        } else {
-          buf_puts(b, "sp_box_nil()");
-          (void)recv;
+        }
+        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
+          buf_printf(b, "; (_t%d && _t%d->default_v != SP_INT_NIL) ? sp_box_int(_t%d->default_v) : sp_box_nil(); })", t, t, t);
+        }
+        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
+          buf_printf(b, "; (_t%d && _t%d->default_v) ? sp_box_str(_t%d->default_v) : sp_box_nil(); })", t, t, t);
+        }
+        else {
+          buf_printf(b, "; (void)_t%d; sp_box_nil(); })", t);
         }
         return;
+      }
+      if (!strcmp(name, "default=") && argc == 1) {
+        int t = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
+        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_boxed(c, argv[0], b); buf_puts(b, "; ");
+        }
+        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+        }
+        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+        }
+        emit_expr(c, argv[0], b); buf_puts(b, "; })"); return;
       }
       if (!strcmp(name, "keys") && argc == 0 && rt == TY_SYM_POLY_HASH) {
         /* runtime returns sym ids as an IntArray; box into a poly (sym) array */
@@ -5480,17 +5500,44 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       return;
     }
   }
-  /* take_while/drop_while/each_index on empty array literal [] (TY_UNKNOWN receiver): no-op */
+  /* take_while/drop_while/each_index/set-ops on empty array literal [] (TY_UNKNOWN receiver) */
   if (recv >= 0 && rt == TY_UNKNOWN &&
-      (!strcmp(name, "take_while") || !strcmp(name, "drop_while") || !strcmp(name, "each_index")) &&
+      (!strcmp(name, "take_while") || !strcmp(name, "drop_while") || !strcmp(name, "each_index") ||
+       !strcmp(name, "difference") || !strcmp(name, "-") || !strcmp(name, "&") || !strcmp(name, "|") ||
+       !strcmp(name, "intersection") || !strcmp(name, "union") || !strcmp(name, "+") ||
+       !strcmp(name, "zip") || !strcmp(name, "flatten") || !strcmp(name, "compact") ||
+       !strcmp(name, "uniq") || !strcmp(name, "sort") || !strcmp(name, "reverse") ||
+       !strcmp(name, "shuffle")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ArrayNode")) {
     int en = 0; nt_arr(nt, recv, "elements", &en);
     if (en == 0) {
-      if (!strcmp(name, "take_while") || !strcmp(name, "drop_while")) {
+      if (!strcmp(name, "each_index")) {
+        /* each_index on [] is a no-op; evaluate receiver for side-effects */
+        emit_expr(c, recv, b);
+      }
+      else if (!strcmp(name, "take_while") || !strcmp(name, "drop_while")) {
         buf_puts(b, "sp_PolyArray_new()");
       }
       else {
-        emit_expr(c, recv, b);
+        /* set/transform ops on [] receiver: call the runtime with NULL first arg */
+        TyKind akt = argc > 0 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
+        const char *ek = ty_is_array(akt) ? ((akt == TY_POLY_ARRAY) ? "Poly" : array_kind(akt)) : NULL;
+        if (!ek) ek = "Poly";
+        if (argc > 0 && akt != TY_UNKNOWN &&
+            (!strcmp(name, "union") || !strcmp(name, "|") ||
+             !strcmp(name, "difference") || !strcmp(name, "-") ||
+             !strcmp(name, "intersection") || !strcmp(name, "&") ||
+             !strcmp(name, "+") || !strcmp(name, "zip"))) {
+          /* call the real function with NULL receiver (handles empty-self case) */
+          const char *fn = (!strcmp(name, "&") || !strcmp(name, "intersection")) ? "intersect"
+                         : (!strcmp(name, "|") || !strcmp(name, "union")) ? "union"
+                         : (!strcmp(name, "+")) ? "concat"
+                         : "difference";
+          buf_printf(b, "sp_%sArray_%s(NULL, ", ek, fn); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        }
+        else {
+          buf_printf(b, "sp_%sArray_new()", ek);
+        }
       }
       return;
     }
@@ -6087,10 +6134,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_%sArray_get(_t%d, sp_%sArray_length(_t%d) - 1)", k, t, k, t);
         return;
       }
-      if ((!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "-") || !strcmp(name, "difference")) && argc == 1 && a0 == rt) {
-        const char *fn = !strcmp(name, "&") ? "intersect" : ((!strcmp(name, "|")) ? "union" : "difference");
-        buf_printf(b, "sp_%sArray_%s(", k, fn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      if ((!strcmp(name, "&") || !strcmp(name, "intersection") ||
+           !strcmp(name, "|") || !strcmp(name, "union") ||
+           !strcmp(name, "-") || !strcmp(name, "difference")) && argc == 1 && (a0 == rt || a0 == TY_UNKNOWN)) {
+        const char *fn = (!strcmp(name, "&") || !strcmp(name, "intersection")) ? "intersect" : ((!strcmp(name, "|") || !strcmp(name, "union")) ? "union" : "difference");
+        /* empty literal [] arg: use a null pointer (safe for all sp_*Array_* set ops) */
+        if (a0 == TY_UNKNOWN) { buf_printf(b, "sp_%sArray_%s(", k, fn); emit_expr(c, recv, b); buf_puts(b, ", NULL)"); }
+        else { buf_printf(b, "sp_%sArray_%s(", k, fn); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
         return;
       }
       if (!strcmp(name, "union") && argc == 0) {
@@ -6118,11 +6168,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "sp_PolyArray_concat("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return;
       }
-      if ((!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "-")) && argc == 1 && a0 == TY_POLY_ARRAY) {
-        const char *fn = !strcmp(name, "&") ? "intersect" : (!strcmp(name, "|") ? "union" : "difference");
+      if ((!strcmp(name, "&") || !strcmp(name, "intersection") ||
+           !strcmp(name, "|") || !strcmp(name, "union") ||
+           !strcmp(name, "-") || !strcmp(name, "difference")) && argc == 1 && (a0 == TY_POLY_ARRAY || a0 == TY_UNKNOWN)) {
+        const char *fn = (!strcmp(name, "&") || !strcmp(name, "intersection")) ? "intersect" : (!strcmp(name, "|") || !strcmp(name, "union") ? "union" : "difference");
         buf_printf(b, "sp_PolyArray_%s(", fn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
+        emit_expr(c, recv, b); buf_puts(b, ", ");
+        if (a0 == TY_UNKNOWN) buf_puts(b, "NULL"); else emit_expr(c, argv[0], b);
+        buf_puts(b, ")"); return;
       }
       if (!strcmp(name, "union") && argc == 0) {
         buf_puts(b, "sp_PolyArray_union("); emit_expr(c, recv, b); buf_puts(b, ", NULL)");

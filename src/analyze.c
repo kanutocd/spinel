@@ -1103,12 +1103,16 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "options")) return TY_INT;
   }
 
-  /* array set operations: &, |, - (not arith ops but share same arity/recv pattern) */
+  /* array set operations: &, intersection, |, union(1-arg), -, difference */
   if (recv >= 0 && argc == 1 &&
-      (!strcmp(name, "&") || !strcmp(name, "|") || !strcmp(name, "-") || !strcmp(name, "difference"))) {
+      (!strcmp(name, "&") || !strcmp(name, "intersection") ||
+       !strcmp(name, "|") || !strcmp(name, "union") ||
+       !strcmp(name, "-") || !strcmp(name, "difference"))) {
     if (ty_is_array(rt) && a0 == rt) return rt;
     if (ty_is_array(rt) && a0 == TY_POLY_ARRAY) return rt;
     if (ty_is_array(a0) && rt == TY_POLY_ARRAY) return a0;
+    /* empty array [] arg (TY_UNKNOWN): result is same kind as receiver */
+    if (ty_is_array(rt) && a0 == TY_UNKNOWN) return rt;
   }
   if (recv >= 0 && argc == 1 && is_arith_op(name)) {
     if (rt == TY_STRING) {
