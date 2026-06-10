@@ -4006,6 +4006,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "); (_t%d > 0) - (_t%d < 0); })", tc, tc);
       return;
     }
+    if (lrt == TY_SYMBOL && lat == TY_SYMBOL) {
+      int tc = ++g_tmp, ta = ++g_tmp, tb = ++g_tmp;
+      buf_printf(b, "({ sp_sym _t%d = ", ta); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_sym _t%d = ", tb); emit_expr(c, argv[0], b);
+      buf_printf(b, "; int _t%d = strcmp(sp_sym_to_s(_t%d), sp_sym_to_s(_t%d));"
+                    " (_t%d > 0) - (_t%d < 0); })", tc, ta, tb, tc, tc);
+      return;
+    }
   }
 
   if (recv >= 0 && argc == 1 &&
@@ -5269,8 +5277,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       if ((!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
            !strcmp(name, "include?") || !strcmp(name, "member?")) && argc == 1) {
+        TyKind arg_kt = comp_ntype(c, argv[0]);
+        TyKind hash_kt = ty_hash_key(rt);
+        if (hash_kt != TY_POLY && arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt) {
+          /* type mismatch (e.g. string arg on sym-keyed hash): always false */
+          buf_puts(b, "0"); return;
+        }
         buf_printf(b, "sp_%sHash_has_key(", hn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], hash_kt, b); buf_puts(b, ")");
         return;
       }
       if ((!strcmp(name, "value?") || !strcmp(name, "has_value?")) && argc == 1) {
@@ -7482,7 +7496,7 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
 
   /* array.each_with_index { |x, i| ... } */
   if (!strcmp(name, "each_with_index") && ty_is_array(rt)) {
-    const char *k = array_kind(rt);
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
     if (!k) return 0;
     const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
     int t = ++g_tmp;
@@ -8112,6 +8126,9 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   if (!strcmp(ty, "SourceLineNode")) {
     buf_printf(b, "%lld", (long long)nt_int(nt, id, "start_line", 0));
     return;
+  }
+  if (!strcmp(ty, "SourceEncodingNode")) {
+    buf_puts(b, "SPL(\"UTF-8\")"); return;
   }
   if (!strcmp(ty, "RegularExpressionNode")) {
     int ri = re_lit_index(c, id);
@@ -12032,6 +12049,7 @@ static void emit_regex_section(Buf *b) {
     buf_printf(b, "static mrb_regexp_pattern *sp_re_pat_%d;\n", i);
   }
   buf_puts(b, "static void sp_re_init(void) {\n");
+  buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
   if (g_re_count > 0) {
     buf_puts(b, "  sp_re_set_error_handler(sp_re_startup_error_handler);\n");
     for (int i = 0; i < g_re_count; i++) {

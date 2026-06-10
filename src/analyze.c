@@ -1196,6 +1196,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "StringNode"))              return TY_STRING;
   if (!strcmp(ty, "SourceFileNode"))          return TY_STRING;
   if (!strcmp(ty, "SourceLineNode"))          return TY_INT;
+  if (!strcmp(ty, "SourceEncodingNode"))      return TY_STRING;
   if (!strcmp(ty, "RegularExpressionNode") ||
       !strcmp(ty, "InterpolatedRegularExpressionNode")) return TY_REGEX;
   if (!strcmp(ty, "InterpolatedStringNode"))  return TY_STRING;
