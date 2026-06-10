@@ -654,6 +654,35 @@ static int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* Recursively patch c->ntype[id]=ty for every LocalVariableReadNode named nm
+   within the subtree at id. Saved old values in ids_out/ty_out (max cap).
+   Returns count of patched nodes. */
+static int patch_lv_reads(Compiler *c, int id, const char *nm, TyKind ty,
+                           int *ids_out, TyKind *ty_out, int cap) {
+  if (id < 0 || id >= c->nt->count || cap <= 0) return 0;
+  int n = 0;
+  const char *node_ty = nt_type(c->nt, id);
+  if (node_ty && !strcmp(node_ty, "LocalVariableReadNode")) {
+    const char *vname = nt_str(c->nt, id, "name");
+    if (vname && !strcmp(vname, nm)) {
+      ids_out[0] = id; ty_out[0] = c->ntype[id]; c->ntype[id] = ty;
+      return 1;
+    }
+  }
+  int nr = nt_num_refs(c->nt, id);
+  for (int i = 0; i < nr && n < cap; i++) {
+    int r = nt_ref_at(c->nt, id, i);
+    n += patch_lv_reads(c, r, nm, ty, ids_out + n, ty_out + n, cap - n);
+  }
+  int na = nt_num_arrs(c->nt, id);
+  for (int i = 0; i < na && n < cap; i++) {
+    int cn = 0; const int *ids = nt_arr_at(c->nt, id, i, &cn);
+    for (int j = 0; j < cn && n < cap; j++)
+      n += patch_lv_reads(c, ids[j], nm, ty, ids_out + n, ty_out + n, cap - n);
+  }
+  return n;
+}
+
 /* hash.transform_keys { |k| nk } / transform_values { |v| nv }: rebuild the
    hash applying the block to every key (or value), keeping the other half.
    Returns 1 if handled. */
@@ -672,12 +701,43 @@ static int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   TyKind dt = comp_ntype(c, id);
   const char *dhn = ty_hash_cname(dt);
   if (!dhn) return 0;
-  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  const char *p0_orig = block_param_name(c, block, 0);
+  const char *p0 = p0_orig ? rename_local(p0_orig) : NULL;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-  if (bn < 1) return 0;
+  /* Empty block: transform_values { } → all values become nil (keep key set) */
+  if (bn < 1) {
+    if (keys) return 0;
+    int ts2 = ++g_tmp, td2 = ++g_tmp, ti2 = ++g_tmp, tk2 = ++g_tmp;
+    Buf rb2; memset(&rb2, 0, sizeof rb2); emit_expr(c, recv, &rb2);
+    emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+    buf_printf(g_pre, " _t%d = ", ts2); buf_puts(g_pre, rb2.p ? rb2.p : ""); buf_puts(g_pre, ";\n"); free(rb2.p);
+    emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+    buf_printf(g_pre, " _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);\n", td2, shn, td2);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti2, ti2, ts2, ti2);
+    emit_indent(g_pre, g_indent + 1); emit_ctype(c, ty_hash_key(rt), g_pre);
+    buf_printf(g_pre, " _t%d = _t%d->order[_t%d];\n", tk2, ts2, ti2);
+    emit_indent(g_pre, g_indent + 1);
+    { TyKind vt2 = ty_hash_val(rt);
+      const char *nil_v = (vt2 == TY_INT) ? "SP_INT_NIL" :
+                          (vt2 == TY_POLY) ? "sp_box_nil()" : "NULL";
+      buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d, %s);\n", shn, td2, tk2, nil_v); }
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    buf_printf(b, "_t%d", td2);
+    return 1;
+  }
   TyKind skt = ty_hash_key(rt), svt = ty_hash_val(rt);
   TyKind dvt = ty_hash_val(dt);
+  /* Detect type mismatch: block param unified with other blocks in same scope */
+  TyKind param_ty = keys ? skt : svt;
+  Scope *pscope = comp_scope_of(c, block);
+  LocalVar *param_lv = p0_orig ? scope_local(pscope, p0_orig) : NULL;
+  TyKind declared_ty = param_lv ? param_lv->type : TY_UNKNOWN;
+  int need_shadow = p0_orig && param_ty != TY_UNKNOWN &&
+                    declared_ty != TY_UNKNOWN && declared_ty != param_ty;
+  int shadow_tmp = -1, shadow_ren_idx = -1, shadow_ren_new = 0;
+  char shadow_ren_old[112]; shadow_ren_old[0] = '\0';
   int ts = ++g_tmp, td = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);  /* recv preludes flush to g_pre first */
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", ts); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
@@ -686,13 +746,49 @@ static int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent + 1); emit_ctype(c, skt, g_pre); buf_printf(g_pre, " _t%d = _t%d->order[_t%d];\n", tk, ts, ti);
   if (p0) {
     emit_indent(g_pre, g_indent + 1);
-    if (keys) buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tk);
-    else buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d);\n", p0, shn, ts, tk);
+    if (need_shadow) {
+      shadow_tmp = ++g_tmp;
+      emit_ctype(c, param_ty, g_pre);
+      if (keys) buf_printf(g_pre, " lv__bp%d = _t%d;\n", shadow_tmp, tk);
+      else buf_printf(g_pre, " lv__bp%d = sp_%sHash_get(_t%d, _t%d);\n", shadow_tmp, shn, ts, tk);
+      for (int ri = 0; ri < g_nren; ri++) {
+        if (strcmp(g_ren_from[ri], p0_orig) == 0) {
+          shadow_ren_idx = ri;
+          strncpy(shadow_ren_old, g_ren_to[ri], sizeof shadow_ren_old - 1);
+          snprintf(g_ren_to[ri], sizeof g_ren_to[0], "_bp%d", shadow_tmp);
+          break;
+        }
+      }
+      if (shadow_ren_idx < 0) {
+        shadow_ren_idx = g_nren; shadow_ren_new = 1;
+        snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", p0_orig);
+        snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_bp%d", shadow_tmp);
+        g_nren++;
+      }
+    }
+    else {
+      if (keys) buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tk);
+      else buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d);\n", p0, shn, ts, tk);
+    }
+  }
+  /* Patch ntype for block param reads so emit_call sees the correct type */
+  int patched_ids[64]; TyKind patched_old[64]; int npatched = 0;
+  if (need_shadow) {
+    for (int j = 0; j < bn && npatched < 64; j++)
+      npatched += patch_lv_reads(c, bb[j], p0_orig, param_ty,
+                                  patched_ids + npatched, patched_old + npatched, 64 - npatched);
   }
   for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
   int save = g_indent; g_indent++;
   Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, bb[bn - 1], &vb); g_indent = save;
+  /* Restore patched ntypes and rename */
+  for (int j = 0; j < npatched; j++) c->ntype[patched_ids[j]] = patched_old[j];
+  if (shadow_ren_idx >= 0) {
+    if (shadow_ren_new) g_nren = shadow_ren_idx;
+    else strncpy(g_ren_to[shadow_ren_idx], shadow_ren_old, sizeof g_ren_to[0] - 1);
+  }
   TyKind bret = comp_ntype(c, bb[bn - 1]);
+  if (need_shadow && bret == TY_UNKNOWN) bret = param_ty;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_%sHash_set(_t%d, ", dhn, td);
   if (keys) {
     /* new key = block result; value carried over (box if dst value is poly) */
