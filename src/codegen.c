@@ -5690,6 +5690,20 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
       if (!strcmp(name, "[]") && argc == 1) {
+        TyKind arg_kt = comp_ntype(c, argv[0]);
+        TyKind hash_kt = ty_hash_key(rt);
+        /* key type mismatch: sym key on str-keyed hash (or vice versa) -- the key
+           can never exist in the hash, so always return the hash's default value */
+        if (hash_kt != TY_POLY && hash_kt != TY_UNKNOWN &&
+            arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt) {
+          TyKind vt = ty_hash_val(rt);
+          int t = ++g_tmp;
+          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b); buf_puts(b, "; ");
+          if (vt == TY_INT) buf_printf(b, "_t%d ? _t%d->default_v : SP_INT_NIL; })", t, t);
+          else if (vt == TY_STRING) buf_printf(b, "_t%d && _t%d->default_v ? _t%d->default_v : (&(\"\\xff\")[1]); })", t, t, t);
+          else buf_printf(b, "_t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
+          return;
+        }
         if (rt == TY_POLY_POLY_HASH) {
           buf_printf(b, "sp_%sHash_get(", hn);
           emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");

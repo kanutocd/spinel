@@ -372,7 +372,7 @@ static TyKind infer_call(Compiler *c, int id) {
       if (cn && !strcmp(cn, "String")) return TY_STRING;
       if (cn && !strcmp(cn, "StringIO")) return TY_STRINGIO;
       if (cn && !strcmp(cn, "StringScanner")) return TY_STRINGSCANNER;
-      if (cn && !strcmp(cn, "Hash")) return TY_SYM_POLY_HASH;
+      if (cn && !strcmp(cn, "Hash")) return TY_UNKNOWN; /* hash type determined by key usage */
       if (cn && !strcmp(cn, "Regexp")) return TY_REGEX;
     }
   }
@@ -2436,6 +2436,23 @@ static int infer_write_types(Compiler *c) {
           Scope *s2 = comp_scope_of(c, id);
           LocalVar *lv2 = scope_local(s2, nm);
           if (lv2 && (TyKind)lv2->gc_root != TY_UNKNOWN) newt = (TyKind)lv2->gc_root;
+        }
+        /* `d = h.dup/clone`: inherit receiver's hash type from prior iteration */
+        if (newt == TY_UNKNOWN) {
+          const char *rvty2 = nt_type(nt, val_id);
+          if (rvty2 && !strcmp(rvty2, "CallNode")) {
+            const char *rvnm2 = nt_str(nt, val_id, "name");
+            int rvrecv2 = nt_ref(nt, val_id, "receiver");
+            if (rvrecv2 >= 0 && rvnm2 &&
+                (!strcmp(rvnm2, "dup") || !strcmp(rvnm2, "clone"))) {
+              const char *rrt2 = nt_type(nt, rvrecv2);
+              if (rrt2 && !strcmp(rrt2, "LocalVariableReadNode")) {
+                const char *rrn2 = nt_str(nt, rvrecv2, "name");
+                LocalVar *rlv2 = rrn2 ? scope_local(comp_scope_of(c, rvrecv2), rrn2) : NULL;
+                if (rlv2 && ty_is_hash((TyKind)rlv2->gc_root)) newt = (TyKind)rlv2->gc_root;
+              }
+            }
+          }
         }
       }
     }
