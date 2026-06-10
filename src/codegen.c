@@ -9815,6 +9815,19 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     }
     return;
   }
+  if (!strcmp(ty, "GlobalVariableOrWriteNode") || !strcmp(ty, "GlobalVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "GlobalVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
+    LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;
+    if (!lv) return;
+    int v = nt_ref(nt, id, "value");
+    emit_indent(b, indent);
+    buf_printf(b, "if (%sgv_%s) { gv_%s = ", is_or ? "!" : "", rn, rn);
+    emit_expr(c, v, b);
+    buf_puts(b, "; }\n");
+    return;
+  }
   if (!strcmp(ty, "MultiWriteNode")) {
     int ln = 0;
     const int *lefts = nt_arr(nt, id, "lefts", &ln);
@@ -10057,6 +10070,13 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
           buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %d);\n",
                      nt_str(nt, inner_lefts[j], "name"), k, tmps[i], j);
         }
+      }
+      else if (lty && !strcmp(lty, "GlobalVariableTargetNode")) {
+        const char *gnm = nt_str(nt, lefts[i], "name");
+        const char *rn2 = gnm ? comp_resolve_gvar(c, gnm + 1) : NULL;
+        if (!rn2 || !comp_gvar(c, rn2)) { unsupported(c, id, "multiple assignment global target"); continue; }
+        emit_indent(b, indent);
+        buf_printf(b, "gv_%s = _t%d;\n", rn2, tmps[i]);
       }
       else unsupported(c, id, "multiple assignment target");
     }

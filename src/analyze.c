@@ -1756,7 +1756,8 @@ static void register_globals_consts(Compiler *c) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
     if (!strcmp(ty, "GlobalVariableWriteNode") || !strcmp(ty, "GlobalVariableReadNode") ||
-        !strcmp(ty, "GlobalVariableOperatorWriteNode") || !strcmp(ty, "GlobalVariableTargetNode")) {
+        !strcmp(ty, "GlobalVariableOperatorWriteNode") || !strcmp(ty, "GlobalVariableTargetNode") ||
+        !strcmp(ty, "GlobalVariableOrWriteNode") || !strcmp(ty, "GlobalVariableAndWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       /* skip alias names - they resolve to the original and need no separate slot */
       if (nm && nm[0] == '$' && is_c_ident(nm + 1) &&
@@ -1831,10 +1832,38 @@ static int infer_global_const_types(Compiler *c) {
       else if (ty_is_numeric(cur) && ty_is_numeric(v)) vt = (cur == TY_FLOAT || v == TY_FLOAT) ? TY_FLOAT : TY_INT;
       else vt = cur;
     }
+    else if (!strcmp(ty, "GlobalVariableOrWriteNode") || !strcmp(ty, "GlobalVariableAndWriteNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
+      if (rn) lv = comp_gvar(c, rn);
+      vt = infer_type(c, nt_ref(nt, id, "value"));
+      if (vt == TY_NIL) continue;
+    }
     else if (!strcmp(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       if (nm) lv = comp_const(c, nm);
       vt = infer_type(c, nt_ref(nt, id, "value"));
+    }
+    else if (!strcmp(ty, "MultiWriteNode")) {
+      int ln = 0;
+      const int *lefts = nt_arr(nt, id, "lefts", &ln);
+      int value = nt_ref(nt, id, "value");
+      const char *vty = nt_type(nt, value);
+      int en = 0;
+      const int *els = (vty && !strcmp(vty, "ArrayNode")) ? nt_arr(nt, value, "elements", &en) : NULL;
+      for (int i = 0; i < ln; i++) {
+        const char *lty2 = nt_type(nt, lefts[i]);
+        if (!lty2 || strcmp(lty2, "GlobalVariableTargetNode")) continue;
+        const char *gnm = nt_str(nt, lefts[i], "name");
+        const char *rn2 = gnm ? comp_resolve_gvar(c, gnm + 1) : NULL;
+        LocalVar *glv = rn2 ? comp_gvar(c, rn2) : NULL;
+        if (!glv) continue;
+        TyKind vt2 = (els && i < en) ? infer_type(c, els[i]) : TY_UNKNOWN;
+        if (vt2 == TY_NIL || vt2 == TY_UNKNOWN) continue;
+        TyKind merged2 = ty_unify(glv->type, vt2);
+        if (merged2 != glv->type) { glv->type = merged2; changed = 1; }
+      }
+      continue;
     }
     else {
       continue;
