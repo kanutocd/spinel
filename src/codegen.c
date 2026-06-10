@@ -10194,8 +10194,28 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         const char *lnm = nt_str(nt, ptgt, "name");
         if (!lnm || !hn) continue;
         emit_indent(b, indent);
-        buf_printf(b, "lv_%s = sp_%sHash_get(_t%d, ", lnm, hn, thash);
-        emit_expr(c, pkey, b); buf_puts(b, ");\n");
+        /* unbox TY_POLY hash value to the local's concrete type */
+        TyKind hvt = ty_hash_val(vt);
+        Scope *hpsc = comp_scope_of(c, id);
+        LocalVar *hplv = hpsc ? scope_local(hpsc, lnm) : NULL;
+        TyKind hpltype = hplv ? hplv->type : TY_UNKNOWN;
+        if (hvt == TY_POLY && hpltype != TY_UNKNOWN && hpltype != TY_POLY) {
+          int htmp = ++g_tmp;
+          buf_printf(b, "{ sp_RbVal _t%d = sp_%sHash_get(_t%d, ", htmp, hn, thash);
+          emit_expr(c, pkey, b); buf_puts(b, "); ");
+          if (hpltype == TY_STRING) buf_printf(b, "lv_%s = _t%d.v.s; }\n", lnm, htmp);
+          else if (hpltype == TY_INT) buf_printf(b, "lv_%s = _t%d.v.i; }\n", lnm, htmp);
+          else if (hpltype == TY_FLOAT) buf_printf(b, "lv_%s = _t%d.v.f; }\n", lnm, htmp);
+          else if (hpltype == TY_BOOL) buf_printf(b, "lv_%s = _t%d.v.b; }\n", lnm, htmp);
+          else if (hpltype == TY_SYMBOL) buf_printf(b, "lv_%s = (sp_sym)_t%d.v.i; }\n", lnm, htmp);
+          else { buf_puts(b, "}\n"); emit_indent(b, indent);
+                 buf_printf(b, "lv_%s = sp_%sHash_get(_t%d, ", lnm, hn, thash);
+                 emit_expr(c, pkey, b); buf_puts(b, ");\n"); }
+        }
+        else {
+          buf_printf(b, "lv_%s = sp_%sHash_get(_t%d, ", lnm, hn, thash);
+          emit_expr(c, pkey, b); buf_puts(b, ");\n");
+        }
       }
     }
     return;
