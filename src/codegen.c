@@ -5245,6 +5245,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     int known = 0;
     for (int i = 0; rmeths[i]; i++) if (!strcmp(name, rmeths[i])) known = 1;
     if (known) {
+      /* size/count on a string-literal range: no integer size -> nil, skip creating sp_Range */
+      if ((!strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) {
+        int rn = unwrap_parens(c, recv);
+        if (rn >= 0 && nt_type(nt, rn) && !strcmp(nt_type(nt, rn), "RangeNode")) {
+          int lo = nt_ref(nt, rn, "left");
+          if (lo >= 0 && comp_ntype(c, lo) == TY_STRING) {
+            buf_puts(b, "SP_INT_NIL"); return;
+          }
+        }
+      }
       int t = ++g_tmp;
       Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
       emit_indent(g_pre, g_indent);
@@ -5262,21 +5272,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "(_t%d.last - _t%d.excl)", t, t);
       else if (!strcmp(name, "last") || !strcmp(name, "end"))  /* the end value itself */
         buf_printf(b, "(_t%d.last)", t);
-      else if (!strcmp(name, "size") || !strcmp(name, "count")) {
-        /* a string-literal range ("a".."z") has no integer size: nil */
-        int is_str_range = 0;
-        {
-          int rn = unwrap_parens(c, recv);
-          if (rn >= 0 && nt_type(nt, rn) && !strcmp(nt_type(nt, rn), "RangeNode")) {
-            int lo = nt_ref(nt, rn, "left"), hi = nt_ref(nt, rn, "right");
-            if (lo >= 0 && hi >= 0 && comp_ntype(c, lo) == TY_STRING) is_str_range = 1;
-          }
-        }
-        if (is_str_range)
-          buf_printf(b, "((void)_t%d, SP_INT_NIL)", t);
-        else
-          buf_printf(b, "(_t%d.last - _t%d.excl - _t%d.first + 1)", t, t, t);
-      }
+      else if (!strcmp(name, "size") || !strcmp(name, "count"))
+        buf_printf(b, "(_t%d.last - _t%d.excl - _t%d.first + 1)", t, t, t);
       else if (!strcmp(name, "sum"))
         buf_printf(b, "sp_IntArray_sum(sp_IntArray_from_range(_t%d.first, _t%d.last - _t%d.excl), 0)", t, t, t);
       else if (!strcmp(name, "exclude_end?"))
@@ -6867,6 +6864,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
                    tc, tlo, tlo, tc, thi, thi, tc);
       }
       else if (!strcmp(name, "oct") && argc == 0) buf_printf(b, "sp_str_oct(%s)", r);
+      else if (!strcmp(name, "hex") && argc == 0) buf_printf(b, "sp_str_to_i_base(%s, 16)", r);
       else if (!strcmp(name, "ord") && argc == 0) buf_printf(b, "sp_str_ord(%s)", r);
       else if ((!strcmp(name, "force_encoding") || !strcmp(name, "b") || !strcmp(name, "encode")) && argc <= 1) buf_printf(b, "(%s)", r);
       else if (!strcmp(name, "encoding") && argc == 0) buf_printf(b, "((void)(%s), sp_box_encoding(sp_encoding_utf8()))", r);

@@ -994,7 +994,8 @@ static TyKind infer_call(Compiler *c, int id) {
       if (aty && !strcmp(aty, "RegularExpressionNode")) return TY_POLY;  /* nil on no match */
     }
     if (!strcmp(name, "index") || !strcmp(name, "to_i") || !strcmp(name, "count") ||
-        !strcmp(name, "oct") || !strcmp(name, "ord") || !strcmp(name, "casecmp") ||
+        !strcmp(name, "oct") || !strcmp(name, "hex") || !strcmp(name, "ord") ||
+        !strcmp(name, "casecmp") ||
         !strcmp(name, "bytesize") || !strcmp(name, "setbyte") || !strcmp(name, "getbyte")) return TY_INT;
     if (!strcmp(name, "scrub") || !strcmp(name, "crypt")) return TY_STRING;
     if (!strcmp(name, "rindex")) return TY_INT;
