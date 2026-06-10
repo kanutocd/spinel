@@ -7624,6 +7624,8 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     Scope *cs_ewi = comp_scope_of(c, id);
     LocalVar *clv_ewi_p1 = (p1 && cs_ewi) ? scope_local(cs_ewi, p1) : NULL;
     LocalVar *clv_ewi_p0 = (p0 && cs_ewi) ? scope_local(cs_ewi, p0) : NULL;
+    TyKind ewi_et = ty_array_elem(rt);
+    int p0_box_poly = clv_ewi_p0 && clv_ewi_p0->type == TY_POLY && ewi_et != TY_POLY;
     int p1_box_poly = clv_ewi_p1 && clv_ewi_p1->type == TY_POLY;
     /* Save outer variables before loop */
     int ts_p0 = 0, ts_p1 = 0;
@@ -7640,8 +7642,14 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     buf_puts(b, rb.p); buf_printf(b, "); _t%d++) {\n", t);
     if (p0) {
       emit_indent(b, indent + 1);
-      buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
-      buf_puts(b, rb.p); buf_printf(b, ", _t%d);\n", t);
+      if (p0_box_poly) {
+        char src[512]; snprintf(src, sizeof src, "sp_%sArray_get(%s, _t%d)", k, rb.p ? rb.p : "NULL", t);
+        buf_printf(b, "lv_%s = ", p0); emit_boxed_text(c, ewi_et, src, b); buf_puts(b, ";\n");
+      }
+      else {
+        buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
+        buf_puts(b, rb.p); buf_printf(b, ", _t%d);\n", t);
+      }
     }
     if (p1) {
       emit_indent(b, indent + 1);
@@ -7655,6 +7663,61 @@ static int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     if (p1 && ts_p1 > 0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p1, ts_p1); }
     free(rb.p);
     return 1;
+  }
+
+  /* array.zip(other) { |a, b| ... } — block form, returns nil */
+  if (!strcmp(name, "zip") && ty_is_array(rt) && block >= 0) {
+    int zargs_n = nt_ref(nt, id, "arguments");
+    int zargc = 0; const int *zargv = zargs_n >= 0 ? nt_arr(nt, zargs_n, "arguments", &zargc) : NULL;
+    const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+    if (k && zargc == 1 && zargv) {
+      TyKind a0t = comp_ntype(c, zargv[0]);
+      const char *k2 = ty_is_array(a0t) ? ((a0t == TY_POLY_ARRAY) ? "Poly" : array_kind(a0t)) : NULL;
+      if (!k2) k2 = k;
+      TyKind et = ty_array_elem(rt);
+      TyKind et2 = ty_is_array(a0t) ? ty_array_elem(a0t) : et;
+      const char *p1n = block_param_name(c, block, 1); if (p1n) p1n = rename_local(p1n);
+      int t = ++g_tmp;
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      Buf ob; memset(&ob, 0, sizeof ob); emit_expr(c, zargv[0], &ob);
+      Scope *zs = comp_scope_of(c, id);
+      LocalVar *zlv0 = (p0 && zs) ? scope_local(zs, p0) : NULL;
+      LocalVar *zlv1 = (p1n && zs) ? scope_local(zs, p1n) : NULL;
+      int zs0 = 0, zs1 = 0;
+      if (p0 && zlv0) {
+        zs0 = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_ctype(c, zlv0->type, &ot);
+        emit_indent(b, indent); buf_printf(b, "%s _t%d = lv_%s;\n", ot.p ? ot.p : "sp_RbVal", zs0, p0); free(ot.p);
+      }
+      if (p1n && zlv1) {
+        zs1 = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_ctype(c, zlv1->type, &ot);
+        emit_indent(b, indent); buf_printf(b, "%s _t%d = lv_%s;\n", ot.p ? ot.p : "sp_RbVal", zs1, p1n); free(ot.p);
+      }
+      emit_indent(b, indent);
+      buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(%s); _t%d++) {\n",
+                 t, t, k, rb.p ? rb.p : "NULL", t);
+      if (p0 && zlv0) {
+        char src[512]; snprintf(src, sizeof src, "sp_%sArray_get(%s, _t%d)", k, rb.p ? rb.p : "NULL", t);
+        int box0 = zlv0->type == TY_POLY && et != TY_POLY;
+        emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p0);
+        if (box0) emit_boxed_text(c, et, src, b);
+        else buf_puts(b, src);
+        buf_puts(b, ";\n");
+      }
+      if (p1n && zlv1 && ob.p) {
+        char src2[512]; snprintf(src2, sizeof src2, "sp_%sArray_get(%s, _t%d)", k2, ob.p, t);
+        int box1 = zlv1->type == TY_POLY && et2 != TY_POLY;
+        emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p1n);
+        if (box1) emit_boxed_text(c, et2, src2, b);
+        else buf_puts(b, src2);
+        buf_puts(b, ";\n");
+      }
+      emit_stmts(c, body, b, indent + 1);
+      emit_indent(b, indent); buf_puts(b, "}\n");
+      if (p0 && zs0 > 0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p0, zs0); }
+      if (p1n && zs1 > 0) { emit_indent(b, indent); buf_printf(b, "lv_%s = _t%d;\n", p1n, zs1); }
+      free(rb.p); free(ob.p);
+      return 1;
+    }
   }
 
   /* poly_val.each { |v| ... }: runtime-dispatch over a boxed array */

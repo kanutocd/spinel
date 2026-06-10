@@ -3339,6 +3339,25 @@ static int infer_block_params(Compiler *c) {
       continue;
     }
 
+    /* array.zip(other) { |a, b| } binds element of recv + element of other */
+    if (!strcmp(name, "zip") && ty_is_array(rt)) {
+      Scope *zs = comp_scope_of(c, block);
+      LocalVar *ep0 = scope_local_intern(zs, p0); ep0->is_block_param = 1;
+      TyKind em0 = ty_unify(ep0->type, ty_array_elem(rt));
+      if (em0 != ep0->type) { ep0->type = em0; changed = 1; }
+      const char *zp1 = block_param_name(c, block, 1);
+      if (zp1) {
+        int zargs = nt_ref(nt, id, "arguments");
+        int zargc = 0; const int *zargv = zargs >= 0 ? nt_arr(nt, zargs, "arguments", &zargc) : NULL;
+        TyKind et2 = (zargc > 0 && zargv && ty_is_array(infer_type(c, zargv[0])))
+                     ? ty_array_elem(infer_type(c, zargv[0])) : ty_array_elem(rt);
+        LocalVar *ep1 = scope_local_intern(zs, zp1); ep1->is_block_param = 1;
+        TyKind em1 = ty_unify(ep1->type, et2);
+        if (em1 != ep1->type) { ep1->type = em1; changed = 1; }
+      }
+      continue;
+    }
+
     /* array.each_with_object(init) { |x, acc| } binds element + accumulator */
     if (!strcmp(name, "each_with_object") && ty_is_array(rt)) {
       Scope *es = comp_scope_of(c, block);
