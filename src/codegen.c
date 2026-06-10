@@ -8614,6 +8614,14 @@ static void emit_assign(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "sp_%sHash_new()", hcn);
     }
   }
+  else if (lv && lv->type == TY_POLY_ARRAY && ty_is_array(comp_ntype(c, v)) && comp_ntype(c, v) != TY_POLY_ARRAY) {
+    /* widen typed array literal to PolyArray for this slot */
+    TyKind vt = comp_ntype(c, v);
+    if (vt == TY_INT_ARRAY) { buf_puts(b, "sp_PolyArray_from_int_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else if (vt == TY_STR_ARRAY) { buf_puts(b, "sp_PolyArray_from_str_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else if (vt == TY_FLOAT_ARRAY) { buf_puts(b, "sp_PolyArray_from_float_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else emit_expr(c, v, b);
+  }
   else if (lv && lv->type == TY_POLY) {
     emit_boxed(c, v, b);   /* poly slot: box the (non-poly) RHS */
   }

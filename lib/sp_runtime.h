@@ -3432,6 +3432,9 @@ static sp_PolyArray *sp_poly_array_transpose(sp_PolyArray *rows) {
    (e.g. the result of `arr.map { _1[:int_key] }`). Non-int tags
    contribute zero. */
 static mrb_int sp_PolyArray_sum_int(sp_PolyArray *a) { if (!a) return 0; mrb_int s = 0; for (mrb_int i = 0; i < a->len; i++) { if (a->data[i].tag == SP_TAG_INT) s += a->data[i].v.i; } return s; }
+static sp_PolyArray *sp_PolyArray_from_int_array(sp_IntArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (mrb_int i = 0; i < a->len; i++) { mrb_int v = a->data[a->start+i]; sp_PolyArray_push(p, v == SP_INT_NIL ? sp_box_nil() : sp_box_int(v)); } return p; }
+static sp_PolyArray *sp_PolyArray_from_str_array(sp_StrArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_str(a->data[i])); return p; }
+static sp_PolyArray *sp_PolyArray_from_float_array(sp_FloatArray *a) { sp_PolyArray *p = sp_PolyArray_new(); if (!a) return p; for (mrb_int i = 0; i < a->len; i++) sp_PolyArray_push(p, sp_box_float(a->data[i])); return p; }
 static void sp_PolyArray_reverse_bang(sp_PolyArray *a) { if (!a || a->frozen) { if (a && a->frozen) sp_raise_frozen_array(); return; } for (mrb_int i = 0, j = a->len - 1; i < j; i++, j--) { sp_RbVal t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t; } }
 static void sp_PolyArray_shuffle_bang(sp_PolyArray *a) { if (!a || a->frozen) { if (a && a->frozen) sp_raise_frozen_array(); return; } for (mrb_int i = a->len - 1; i > 0; i--) { mrb_int j = (mrb_int)(rand() % (i + 1)); sp_RbVal t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t; } }
 static void sp_PolyArray_rotate_bang(sp_PolyArray*a,mrb_int n){if(!a)return;if(a->frozen){sp_raise_frozen_array();return;}if(a->len<=0)return;n=((n%a->len)+a->len)%a->len;if(n==0)return;sp_RbVal*d=a->data;mrb_int lo=0,hi=n-1;while(lo<hi){sp_RbVal t=d[lo];d[lo]=d[hi];d[hi]=t;lo++;hi--;}lo=n;hi=a->len-1;while(lo<hi){sp_RbVal t=d[lo];d[lo]=d[hi];d[hi]=t;lo++;hi--;}lo=0;hi=a->len-1;while(lo<hi){sp_RbVal t=d[lo];d[lo]=d[hi];d[hi]=t;lo++;hi--;}}
@@ -3679,6 +3682,11 @@ static mrb_int sp_rbval_hash_key(sp_RbVal v) {
       return v.v.s ? (mrb_int)sp_str_hash(v.v.s) : 0;
     case SP_TAG_FLT: { uint64_t b; memcpy(&b, &v.v.f, sizeof(b)); return (mrb_int)b; }
     case SP_TAG_OBJ:
+      if (v.cls_id == SP_BUILTIN_INT_ARRAY) {
+        sp_IntArray *ia = (sp_IntArray *)v.v.p;
+        mrb_int h = 0; if (ia) for (mrb_int i = 0; i < ia->len; i++) h = h * 31 + ia->data[ia->start+i];
+        return h;
+      }
       if (sp_obj_hash_hook) return sp_obj_hash_hook(v.cls_id, v.v.p);
       return (mrb_int)((uintptr_t)v.v.p);
   }
@@ -3702,6 +3710,13 @@ static mrb_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
     case SP_TAG_OBJ:
       if (a.cls_id != b.cls_id) return FALSE;
       if (a.v.p == b.v.p) return TRUE;
+      if (a.cls_id == SP_BUILTIN_INT_ARRAY) {
+        sp_IntArray *ia = (sp_IntArray *)a.v.p, *ib = (sp_IntArray *)b.v.p;
+        if (!ia || !ib) return ia == ib;
+        if (ia->len != ib->len) return FALSE;
+        for (mrb_int i = 0; i < ia->len; i++) if (ia->data[ia->start+i] != ib->data[ib->start+i]) return FALSE;
+        return TRUE;
+      }
       if (sp_obj_eql_hook) return sp_obj_eql_hook(a.cls_id, a.v.p, b.v.p);
       return FALSE;
   }
