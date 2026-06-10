@@ -2084,7 +2084,19 @@ static void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Bu
         if (pt == TY_POLY_ARRAY) buf_puts(out, "sp_PolyArray_new()");
         else { const char *k = array_kind(pt); if (k) buf_printf(out, "sp_%sArray_new()", k); else emit_expr(c, provided, out); }
       }
-      else emit_expr(c, provided, out);
+      /* empty hash literal `{}` with unknown type: use the parameter's type */
+      else {
+        int phn = 0;
+        int is_empty_hash = pty_node && (!strcmp(pty_node, "HashNode") || !strcmp(pty_node, "KeywordHashNode")) &&
+                             (nt_arr(c->nt, provided, "elements", &phn), phn == 0);
+        TyKind at2 = comp_ntype(c, provided);
+        if (is_empty_hash && at2 == TY_UNKNOWN && ty_is_hash(pt)) {
+          const char *hn = ty_hash_cname(pt);
+          if (hn) buf_printf(out, "sp_%sHash_new()", hn);
+          else emit_expr(c, provided, out);
+        }
+        else emit_expr(c, provided, out);
+      }
     }
     return;
   }
@@ -2110,7 +2122,19 @@ static void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Bu
       if (pt == TY_POLY_ARRAY) buf_puts(out, "sp_PolyArray_new()");
       else { const char *k = array_kind(pt); if (k) buf_printf(out, "sp_%sArray_new()", k); else emit_expr(c, dv, out); }
     }
-    else emit_expr(c, dv, out);
+    /* Default empty `{}` literal: emit the correct hash constructor for the
+       parameter type, avoiding the "unsupported hash literal" fallback. */
+    else {
+      int dhn = 0;
+      int is_empty_hash_dv = dty && (!strcmp(dty, "HashNode") || !strcmp(dty, "KeywordHashNode")) &&
+                              (nt_arr(c->nt, dv, "elements", &dhn), dhn == 0);
+      if (is_empty_hash_dv && ty_is_hash(pt)) {
+        const char *hn = ty_hash_cname(pt);
+        if (hn) buf_printf(out, "sp_%sHash_new()", hn);
+        else emit_expr(c, dv, out);
+      }
+      else emit_expr(c, dv, out);
+    }
   }
 }
 
@@ -9535,7 +9559,12 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   if (!strcmp(ty, "HashNode") || !strcmp(ty, "KeywordHashNode")) {
     TyKind ht = comp_ntype(c, id);
     const char *hn = ty_hash_cname(ht);
-    if (!hn) unsupported(c, id, "hash literal (key/value type)");
+    if (!hn) {
+      /* Empty `{}` with unknown type: fall back to StrPolyHash */
+      int ne2 = 0; nt_arr(nt, id, "elements", &ne2);
+      if (ne2 == 0) hn = "StrPoly";
+      else unsupported(c, id, "hash literal (key/value type)");
+    }
     int n = 0;
     const int *els = nt_arr(nt, id, "elements", &n);
     int t = ++g_tmp;
