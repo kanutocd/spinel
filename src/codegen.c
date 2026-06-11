@@ -80,6 +80,8 @@ static const char *g_rescue_cls = NULL, *g_rescue_msg = NULL;
 /* When inside a rescue handler that can `retry`, holds the goto label for the
    retry target (just before `sp_exc_top++`). NULL otherwise. */
 static const char *g_retry_label = NULL;
+/* When set inside a loop-as-expression, BreakNode assigns its value here. */
+static const char *g_loop_break_var = NULL;
 /* When set, tail positions assign to this var instead of `return`ing
    (used to give a begin/rescue a value). */
 static const char *g_result_var = NULL;
@@ -3215,6 +3217,91 @@ static int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   if (argc < 1 || !argv) return 0;
   TyKind rt = comp_ntype(c, recv);
+
+  /* Hash receiver: hash.each_with_object(memo) { |(k,v), acc| } or { |k,v,acc| } */
+  if (ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    if (!hn) return 0;
+    int body = nt_ref(nt, block, "body");
+    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    if (bn < 1) return 0;
+    /* Detect block param form: |(k,v), memo| (multi at idx 0) or |k, v, memo| (flat 3) */
+    int is_multi = block_param_is_multi(c, block, 0);
+    const char *kname_orig = NULL, *vname_orig = NULL, *mname_orig = NULL;
+    if (is_multi) {
+      kname_orig = block_param_multi_leaf(c, block, 0, 0);
+      vname_orig = block_param_multi_leaf(c, block, 0, 1);
+      mname_orig = block_param_name(c, block, 1);
+    }
+    else {
+      kname_orig = block_param_name(c, block, 0);
+      vname_orig = block_param_name(c, block, 1);
+      mname_orig = block_param_name(c, block, 2);
+    }
+    const char *kname = kname_orig ? rename_local(kname_orig) : NULL;
+    const char *vname = vname_orig ? rename_local(vname_orig) : NULL;
+    const char *mname = mname_orig ? rename_local(mname_orig) : NULL;
+    TyKind accT = infer_type(c, argv[0]);
+    if (accT == TY_UNKNOWN) {
+      const char *a0ty = nt_type(nt, argv[0]);
+      int an0 = 0;
+      if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
+      if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) accT = TY_INT_ARRAY;
+      else return 0;
+    }
+    /* Receiver */
+    int trecv = ++g_tmp;
+    { Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+      emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+      buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p); }
+    /* Accumulator: use memo's declared type (may differ from accT if widened) */
+    Scope *cs = comp_scope_of(c, id);
+    LocalVar *memo_lv = mname_orig && cs ? scope_local(cs, mname_orig) : NULL;
+    TyKind memo_decl = (memo_lv && memo_lv->type != TY_UNKNOWN) ? memo_lv->type : accT;
+    int tacc = ++g_tmp;
+    { Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, argv[0], &ab);
+      emit_indent(g_pre, g_indent); emit_ctype(c, memo_decl, g_pre);
+      if (memo_decl != accT)
+        buf_printf(g_pre, " _t%d = %s_new();\n", tacc,
+                   memo_decl == TY_POLY_ARRAY ? "sp_PolyArray" : "sp_IntArray");
+      else
+        buf_printf(g_pre, " _t%d = %s;\n", tacc, ab.p ? ab.p : default_value(memo_decl));
+      free(ab.p); }
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tacc);
+    /* Bind accumulator to memo param before loop */
+    if (mname) {
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "lv_%s = _t%d;\n", mname, tacc);
+    }
+    /* Loop */
+    int ti = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
+    /* Assign key */
+    if (kname) {
+      emit_indent(g_pre, g_indent + 1);
+      if (rt == TY_POLY_POLY_HASH)
+        buf_printf(g_pre, "lv_%s = _t%d->keys[_t%d->order[_t%d]];\n", kname, trecv, trecv, ti);
+      else
+        buf_printf(g_pre, "lv_%s = _t%d->order[_t%d];\n", kname, trecv, ti);
+    }
+    /* Assign value */
+    if (vname) {
+      emit_indent(g_pre, g_indent + 1);
+      if (rt == TY_POLY_POLY_HASH)
+        buf_printf(g_pre, "lv_%s = _t%d->vals[_t%d->order[_t%d]];\n", vname, trecv, trecv, ti);
+      else
+        buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", vname, hn, trecv, trecv, ti);
+    }
+    /* Body */
+    int save_indent = g_indent; g_indent++;
+    for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, g_indent);
+    g_indent = save_indent;
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+    buf_printf(b, "_t%d", tacc);
+    return 1;
+  }
+
   if (!ty_is_array(rt)) return 0;
   const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
   if (!k) return 0;
@@ -3349,6 +3436,29 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   const int *argv = NULL;
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
   if (!name) unsupported(c, id, "call (no name)");
+
+  /* loop { break val } as expression: emit pre-statement for-loop, result via break var */
+  if (recv < 0 && !strcmp(name, "loop") && argc == 0) {
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0) {
+      TyKind bt = infer_type(c, id);
+      if (bt != TY_UNKNOWN && bt != TY_NIL) {
+        int t = ++g_tmp;
+        emit_indent(g_pre, g_indent); emit_ctype(c, bt, g_pre);
+        buf_printf(g_pre, " _t%d = %s;\n", t, (bt == TY_INT) ? "0" : "NULL");
+        emit_indent(g_pre, g_indent); buf_puts(g_pre, "for (;;) {\n");
+        const char *sv_lb = g_loop_break_var;
+        char lb_buf[32]; snprintf(lb_buf, sizeof lb_buf, "_t%d", t);
+        g_loop_break_var = lb_buf;
+        int lbody = nt_ref(nt, blk, "body");
+        emit_stmts(c, lbody, g_pre, g_indent + 1);
+        g_loop_break_var = sv_lb;
+        emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+        buf_printf(b, "_t%d", t);
+        return;
+      }
+    }
+  }
 
   /* system(cmd, ...) expr: run and return bool */
   if (recv < 0 && !strcmp(name, "system") && argc >= 1) {
@@ -7172,6 +7282,150 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         }
         else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "invert") && argc == 0) {
+        if (rt == TY_STR_STR_HASH) {
+          buf_printf(b, "sp_StrStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_STR_INT_HASH) {
+          buf_printf(b, "sp_StrIntHash_invert_poly("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_INT_STR_HASH) {
+          buf_printf(b, "sp_IntStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else {
+          /* generic: build PolyPolyHash by swapping key/value of each entry */
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          /* key and value access depend on the hash variant */
+          TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+          /* emit key as sp_RbVal */
+          if (kt == TY_SYMBOL)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_sym(_t%d->order[_t%d]);", ti, th, ti);
+          else if (kt == TY_STRING)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_str(_t%d->order[_t%d]);", ti, th, ti);
+          else if (kt == TY_INT)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_int(_t%d->order[_t%d]);", ti, th, ti);
+          else
+            buf_printf(b, " sp_RbVal _k%d = _t%d->keys[_t%d->order[_t%d]];", ti, th, th, ti);
+          /* emit value as sp_RbVal */
+          if (vt == TY_POLY)
+            buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
+          else if (vt == TY_INT) {
+            buf_printf(b, " sp_RbVal _v%d = sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
+          }
+          else {
+            buf_printf(b, " sp_RbVal _v%d = sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
+          }
+          buf_printf(b, " sp_PolyPolyHash_set(_t%d, _v%d, _k%d); }", tr, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
+        return;
+      }
+      if (!strcmp(name, "flatten") && argc <= 1) {
+        /* interleave keys and values into a flat PolyArray */
+        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+        if (kt == TY_SYMBOL)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_STRING)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
+        if (vt == TY_POLY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
+        else if (vt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        buf_printf(b, " } _t%d; })", tr);
+        return;
+      }
+      if ((!strcmp(name, "assoc") || !strcmp(name, "rassoc")) && argc == 1) {
+        /* find first pair where key==arg (assoc) or value==arg (rassoc); returns [k,v] or nil */
+        int is_rassoc = !strcmp(name, "rassoc");
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, ta = ++g_tmp;
+        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
+        /* store argument */
+        if (!is_rassoc) {
+          buf_printf(b, " %s _t%d = ", c_type_name(kt), ta); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ";");
+        }
+        else {
+          /* rassoc: arg has value type */
+          buf_printf(b, " sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b); buf_puts(b, ";");
+        }
+        buf_printf(b, " sp_PolyArray *_t%d = NULL;", tr);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+        if (!is_rassoc) {
+          /* assoc: compare key */
+          if (rt == TY_POLY_POLY_HASH)
+            buf_printf(b, " if (sp_rbval_eql_key(_t%d->keys[_t%d->order[_t%d]], _t%d)) {", th, th, ti, ta);
+          else if (kt == TY_STRING)
+            buf_printf(b, " if (!strcmp(_t%d->order[_t%d], _t%d)) {", th, ti, ta);
+          else
+            buf_printf(b, " if (_t%d->order[_t%d] == _t%d) {", th, ti, ta);
+        }
+        else {
+          /* rassoc: compare value (boxed) */
+          buf_printf(b, " sp_RbVal _rv%d = ", ti);
+          if (vt == TY_POLY) buf_printf(b, "sp_%sHash_get(_t%d, _t%d->order[_t%d]);", hn, th, th, ti);
+          else if (vt == TY_INT) buf_printf(b, "sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
+          else buf_printf(b, "sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
+          buf_printf(b, " if (sp_poly_eq(_rv%d, _t%d)) {", ti, ta);
+        }
+        /* build pair */
+        buf_printf(b, " _t%d = sp_PolyArray_new();", tr);
+        if (kt == TY_SYMBOL)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_STRING)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
+        if (vt == TY_POLY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
+        else if (vt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        buf_printf(b, " break; } } _t%d; })", tr);  /* NULL = nil in poly context */
+        return;
+      }
+      if (!strcmp(name, "compact") && argc == 0) {
+        TyKind vt = ty_hash_val(rt);
+        if (vt != TY_POLY) {
+          /* Non-poly values can't be nil; compact is equivalent to dup */
+          buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_POLY_POLY_HASH) {
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          buf_printf(b, " sp_RbVal _v%d = _t%d->vals[_t%d->order[_t%d]];", ti, th, th, ti);
+          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_PolyPolyHash_set(_t%d, _t%d->keys[_t%d->order[_t%d]], _v%d); }", ti, tr, th, th, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
+        else {
+          /* SYM_POLY_HASH or other poly-valued hash */
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", hn, tr, hn, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
+          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_%sHash_set(_t%d, _t%d->order[_t%d], _v%d); }", ti, hn, tr, th, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
         return;
       }
       if (!strcmp(name, "delete") && argc == 1 &&
@@ -13893,7 +14147,16 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "WhileNode"))  { emit_while(c, id, b, indent, 0); return; }
   if (!strcmp(ty, "UntilNode"))  { emit_while(c, id, b, indent, 1); return; }
   if (!strcmp(ty, "ForNode"))    { emit_for(c, id, b, indent); return; }
-  if (!strcmp(ty, "BreakNode"))  { emit_indent(b, indent); buf_puts(b, "break;\n"); return; }
+  if (!strcmp(ty, "BreakNode")) {
+    if (g_loop_break_var) {
+      int bargs = nt_ref(nt, id, "arguments");
+      int bvargc = 0; const int *bvargs = bargs >= 0 ? nt_arr(nt, bargs, "arguments", &bvargc) : NULL;
+      if (bvargc > 0) {
+        emit_indent(b, indent); buf_printf(b, "%s = ", g_loop_break_var); emit_expr(c, bvargs[0], b); buf_puts(b, ";\n");
+      }
+    }
+    emit_indent(b, indent); buf_puts(b, "break;\n"); return;
+  }
   if (!strcmp(ty, "NextNode"))   { emit_indent(b, indent); buf_puts(b, "continue;\n"); return; }
   if (!strcmp(ty, "RedoNode"))   { emit_indent(b, indent); buf_puts(b, "continue;\n"); return; }
   if (!strcmp(ty, "RetryNode")) {

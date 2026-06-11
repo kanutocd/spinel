@@ -462,13 +462,26 @@ static TyKind infer_call(Compiler *c, int id) {
     }
   }
 
-  /* SomeClass.name / .to_s / .inspect -> the class-name string */
+  /* SomeClass.name / .to_s / .inspect / .superclass -> the class-name string */
   if (recv >= 0 && argc == 0 &&
       (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect") ||
        !strcmp(name, "superclass")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
     return TY_STRING;
+
+  /* SomeClass.ancestors -> PolyArray of class objects */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "ancestors") &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
+    return TY_POLY_ARRAY;
+
+  /* SomeClass.instance_methods / .public_instance_methods -> PolyArray of symbols */
+  if (recv >= 0 && argc <= 1 &&
+      (!strcmp(name, "instance_methods") || !strcmp(name, "public_instance_methods") ||
+       !strcmp(name, "private_instance_methods") || !strcmp(name, "protected_instance_methods")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode"))
+    return TY_POLY_ARRAY;
 
   /* self.class.new(...) -> an instance of the enclosing class */
   if (recv >= 0 && !strcmp(name, "new") && nt_type(nt, recv) &&
@@ -1472,6 +1485,28 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "include?") || !strcmp(name, "member?") ||
         !strcmp(name, "has_value?") || !strcmp(name, "value?") ||
         !strcmp(name, "empty?")) return TY_BOOL;
+    if (!strcmp(name, "each_with_object") && argc > 0 && argv) {
+      TyKind at = infer_type(c, argv[0]);
+      if (at == TY_UNKNOWN) {
+        const char *a0ty = nt_type(nt, argv[0]);
+        int an0 = 0;
+        if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
+        if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) {
+          /* When hash values are poly the block pushes poly values, so the
+             accumulator widens to poly_array */
+          return ty_hash_val(rt) == TY_POLY ? TY_POLY_ARRAY : TY_INT_ARRAY;
+        }
+      }
+      return at;
+    }
+    if (!strcmp(name, "flatten") && argc <= 1) return TY_POLY_ARRAY;
+    if (!strcmp(name, "invert") && argc == 0) {
+      /* swap key/value types where we have a typed variant */
+      if (rt == TY_STR_STR_HASH) return TY_STR_STR_HASH;
+      return TY_POLY_POLY_HASH;
+    }
+    if ((!strcmp(name, "assoc") || !strcmp(name, "rassoc")) && argc == 1) return TY_POLY_ARRAY;
+    if (!strcmp(name, "compact") && argc == 0) return rt;
   }
 
   /* <str>.encoding.name -> the encoding name string */
