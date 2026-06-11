@@ -644,14 +644,13 @@ static int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   int block = nt_ref(nt, id, "block");
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
-  if (strcmp(name, "map") && strcmp(name, "collect")) return 0;  /* map only for now */
+  int is_sel = !strcmp(name, "select") || !strcmp(name, "filter");
+  int is_rej = !strcmp(name, "reject");
+  int is_map = !strcmp(name, "map") || !strcmp(name, "collect");
+  if (!is_map && !is_sel && !is_rej) return 0;
   TyKind rt = comp_ntype(c, recv);
   const char *hn = ty_hash_cname(rt);
   if (!hn) return 0;
-  TyKind restype = comp_ntype(c, id);
-  int res_poly = (restype == TY_POLY_ARRAY);
-  const char *rk = res_poly ? "Poly" : array_kind(restype);
-  if (!rk) return 0;
   const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
   const char *p1 = block_param_name(c, block, 1); if (p1) p1 = rename_local(p1);
   int body = nt_ref(nt, block, "body");
@@ -659,20 +658,54 @@ static int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   if (bn < 1) return 0;
   int trecv = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp;
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trecv); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", rk, tres, rk);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
-  if (p0) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d->order[_t%d];\n", p0, trecv, ti); }
-  if (p1) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", p1, hn, trecv, trecv, ti); }
-  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
-  int save = g_indent; g_indent++;
-  Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, bb[bn - 1], &vb); g_indent = save;
-  emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk, tres);
-  if (res_poly && comp_ntype(c, bb[bn - 1]) != TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, comp_ntype(c, bb[bn - 1]), vb.p ? vb.p : "", &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
-  else buf_puts(g_pre, vb.p ? vb.p : "");
-  buf_puts(g_pre, ");\n"); free(vb.p);
-  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  if (is_sel || is_rej) {
+    /* select/reject: produce a same-type hash with matching pairs */
+    emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = sp_%sHash_new();\n", tres, hn);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
+    if (p0) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d->order[_t%d];\n", p0, trecv, ti); }
+    if (p1) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", p1, hn, trecv, trecv, ti); }
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+    int save = g_indent; g_indent++;
+    Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, bb[bn - 1], &vb); g_indent = save;
+    emit_indent(g_pre, g_indent + 1);
+    /* emit: if (cond) sp_XXHash_set(out, key, val); */
+    TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+    buf_printf(g_pre, "if (%s(%s)) { ", is_rej ? "!" : "", vb.p ? vb.p : "0"); free(vb.p);
+    if (rt == TY_POLY_POLY_HASH) {
+      buf_printf(g_pre, "sp_%sHash_set(_t%d, ", hn, tres);
+      if (p0) buf_printf(g_pre, "lv_%s", p0); else buf_printf(g_pre, "_t%d->order[_t%d]", trecv, ti);
+      buf_printf(g_pre, ", sp_%sHash_get(_t%d, _t%d->order[_t%d])); }", hn, trecv, trecv, ti);
+    }
+    else {
+      buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_%s(_t%d, _t%d->order[_t%d])); }",
+                 hn, tres, trecv, ti, hn, vt == TY_INT ? "get_opt" : "get", trecv, trecv, ti);
+      (void)kt;
+    }
+    buf_puts(g_pre, "\n");
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  }
+  else {
+    /* map: produce a result array */
+    TyKind restype = comp_ntype(c, id);
+    int res_poly = (restype == TY_POLY_ARRAY);
+    const char *rk = res_poly ? "Poly" : array_kind(restype);
+    if (!rk) return 0;
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", rk, tres, rk);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres);
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
+    if (p0) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d->order[_t%d];\n", p0, trecv, ti); }
+    if (p1) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", p1, hn, trecv, trecv, ti); }
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+    int save = g_indent; g_indent++;
+    Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, bb[bn - 1], &vb); g_indent = save;
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk, tres);
+    if (res_poly && comp_ntype(c, bb[bn - 1]) != TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, comp_ntype(c, bb[bn - 1]), vb.p ? vb.p : "", &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
+    else buf_puts(g_pre, vb.p ? vb.p : "");
+    buf_puts(g_pre, ");\n"); free(vb.p);
+    emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  }
   buf_printf(b, "_t%d", tres);
   return 1;
 }
@@ -4265,7 +4298,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "GC")) {
     if (!strcmp(name, "start") && argc == 0) { buf_puts(b, "0LL"); return; }
     if (!strcmp(name, "compact") && argc == 0) { buf_puts(b, "0LL"); return; }
-    if (!strcmp(name, "stat") && argc == 0) { buf_puts(b, "sp_box_nil()"); return; }
+    if (!strcmp(name, "stat") && argc == 0) { buf_puts(b, "sp_gc_stat()"); return; }
   }
 
   /* Process module methods */
@@ -5183,6 +5216,24 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* poly receiver: nil? / conversions / a few type-agnostic queries */
   if (recv >= 0 && rt == TY_POLY && argc == 0) {
     if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
+    if (!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "empty?")) {
+      int has_user_len = 0;
+      const char *lcheck = (!strcmp(name, "empty?")) ? "length" : name;
+      for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
+        if (comp_method_in_chain(c, kk, lcheck, NULL) >= 0) has_user_len = 1;
+      if (!strcmp(name, "empty?") && !has_user_len)
+        for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
+          if (comp_method_in_chain(c, kk, "empty?", NULL) >= 0) has_user_len = 1;
+      if (!has_user_len) {
+        if (!strcmp(name, "empty?")) {
+          buf_puts(b, "(sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        }
+        else {
+          buf_puts(b, "sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        return;
+      }
+    }
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
       int has_user_method = 0;
       for (int k = 0; k < c->nclasses; k++)
@@ -6935,6 +6986,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if (rt == TY_POLY_ARRAY && !strcmp(name, "tally") && argc == 0) {
       buf_puts(b, "sp_PolyArray_tally("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
     }
+    if (rt == TY_POLY_ARRAY && !strcmp(name, "delete_at") && argc == 1) {
+      buf_puts(b, "sp_PolyArray_delete_at("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
     if (k) {
       if ((!strcmp(name, "to_a") || !strcmp(name, "to_ary") || !strcmp(name, "entries") ||
            !strcmp(name, "flatten") || !strcmp(name, "compact")) && argc == 0) {
@@ -7977,12 +8032,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if ((!strcmp(name, "tr") || !strcmp(name, "tr_s")) && argc == 2) {
         buf_printf(b, "sp_str_%s(%s, ", name, r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
       }
+      else if (!strcmp(name, "delete") && argc == 0) { buf_printf(b, "(%s)", r); return; }
       else if (!strcmp(name, "delete") && argc == 1) { buf_printf(b, "sp_str_delete(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "delete") && argc >= 2) {
         buf_printf(b, "sp_str_delete_n(%s, (const char *[]){", r);
         for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
         buf_printf(b, "}, %d)", argc);
       }
+      else if (!strcmp(name, "count") && argc == 0) { buf_printf(b, "(sp_raise_cls(\"TypeError\", \"wrong number of arguments (given 0, expected 1+)\"), 0LL)"); return; }
       else if (!strcmp(name, "count") && argc == 1) { buf_printf(b, "sp_str_count(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "count") && argc >= 2) {
         buf_printf(b, "sp_str_count_n(%s, (const char *[]){", r);

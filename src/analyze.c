@@ -450,8 +450,12 @@ static TyKind infer_call(Compiler *c, int id) {
       return TY_TIME;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "GC") &&
-        (!strcmp(name, "start") || !strcmp(name, "compact") || !strcmp(name, "stat")))
+        (!strcmp(name, "start") || !strcmp(name, "compact")))
       return TY_NIL;
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "GC") &&
+        !strcmp(name, "stat"))
+      return TY_STR_INT_HASH;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Process") &&
         (!strcmp(name, "pid") || !strcmp(name, "ppid")))
