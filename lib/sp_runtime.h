@@ -3821,6 +3821,10 @@ static mrb_int sp_PolyPolyHash_length(sp_PolyPolyHash*h){return h->len;}
 static sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, mrb_int i) {
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_POLY_POLY_HASH)
     return sp_PolyPolyHash_get((sp_PolyPolyHash*)a.v.p, sp_box_int(i));
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_SYM_POLY_HASH)
+    return sp_SymPolyHash_get((sp_SymPolyHash*)a.v.p, (sp_sym)i);
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_STR_POLY_HASH)
+    return sp_StrPolyHash_get((sp_StrPolyHash*)a.v.p, sp_sym_name_fn ? sp_sym_name_fn((sp_sym)i) : "");
   return sp_poly_arr_get(a, i);
 }
 static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, mrb_int idx, sp_RbVal val) {
