@@ -2553,6 +2553,69 @@ static void register_includes(Compiler *c) {
   }
 }
 
+/* For each class, find `extend M` declarations and transplant M's instance
+   methods as class methods (is_cmethod=1) so they are callable as C.m. */
+static void register_extends(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    int body = nt_ref(nt, c->classes[ci].def_node, "body");
+    int n = 0;
+    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    for (int k = 0; k < n; k++) {
+      int s = stmts[k];
+      const char *sty = nt_type(nt, s);
+      if (!sty || strcmp(sty, "CallNode")) continue;
+      const char *nm = nt_str(nt, s, "name");
+      if (!nm || strcmp(nm, "extend")) continue;
+      if (nt_ref(nt, s, "receiver") >= 0) continue;
+      int anode = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      for (int j = 0; j < an; j++) {
+        const char *aty = nt_type(nt, args[j]);
+        const char *mname = NULL;
+        if (aty && !strcmp(aty, "ConstantReadNode")) mname = nt_str(nt, args[j], "name");
+        else if (aty && !strcmp(aty, "ConstantPathNode")) mname = nt_str(nt, args[j], "name");
+        int mod_id = mname ? comp_class_index(c, mname) : -1;
+        if (mod_id < 0) continue;
+        int snap = c->nscopes;
+        for (int ms = 0; ms < snap; ms++) {
+          Scope *src = &c->scopes[ms];
+          /* Only transplant instance methods; self.* on the module stay on it. */
+          if (src->class_id != mod_id || src->is_cmethod || !src->name) continue;
+          if (comp_cmethod_in_class(c, ci, src->name) >= 0) continue;
+          Scope *dst = comp_scope_new(c, src->name, src->def_node);
+          src = &c->scopes[ms];
+          dst->body = src->body;
+          dst->class_id = ci;
+          dst->is_cmethod = 1;  /* transplanted as a class method */
+          dst->reachable = src->reachable;
+          dst->yields = src->yields;
+          dst->nrequired = src->nrequired;
+          dst->rest_idx = src->rest_idx;
+          if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+          dst->nparams = src->nparams;
+          if (src->nparams > 0) {
+            dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
+            dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
+            for (int p = 0; p < src->nparams; p++) {
+              dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
+              dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
+            }
+            for (int p = 0; p < src->nparams; p++) {
+              if (dst->pnames[p]) {
+                LocalVar *lv = scope_local_intern(dst, dst->pnames[p]);
+                lv->is_param = 1;
+              }
+            }
+          }
+          src->is_transplanted_source = 1;
+        }
+      }
+    }
+  }
+}
+
 /* For each class, find `prepend M` declarations and transplant M's instance
    methods into the class with shadow-chain renaming so `super` can route
    from M's body to the original (now renamed) class body. */
@@ -4821,6 +4884,7 @@ void analyze_program(Compiler *c) {
   resolve_parents(c);
   inherit_members(c);
   register_includes(c);
+  register_extends(c);
   register_prepends(c);
 
   /* collect top-level `include <Mod>` calls so bare method calls can
