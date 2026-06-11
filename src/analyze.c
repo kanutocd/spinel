@@ -133,6 +133,39 @@ static int g_ie_class_id = -1;
    ClassNode/ModuleNode body traversal). -1 outside any class body. */
 static int g_cbody_class_id = -1;
 
+/* Scan a subtree for BreakNode values and return their unified type.
+   Stops at DefNode/BlockNode boundaries (inner blocks have their own break scope). */
+static TyKind scan_break_type(Compiler *c, int id, int depth) {
+  if (id < 0 || depth > 32) return TY_UNKNOWN;
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return TY_UNKNOWN;
+  if (!strcmp(ty, "DefNode")) return TY_UNKNOWN;
+  if (!strcmp(ty, "BlockNode") && depth > 0) return TY_UNKNOWN; /* inner block's breaks don't escape */
+  if (!strcmp(ty, "BreakNode")) {
+    int v = nt_ref(nt, id, "arguments");
+    if (v < 0) return TY_NIL;
+    int vargc = 0; const int *vargs = nt_arr(nt, v, "arguments", &vargc);
+    if (vargc > 0) return infer_type(c, vargs[0]);
+    return TY_NIL;
+  }
+  TyKind result = TY_UNKNOWN;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) {
+    TyKind t = scan_break_type(c, nt_ref_at(nt, id, i), depth + 1);
+    if (t != TY_UNKNOWN) result = ty_unify(result, t);
+  }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++) {
+      TyKind t = scan_break_type(c, ids[k], depth + 1);
+      if (t != TY_UNKNOWN) result = ty_unify(result, t);
+    }
+  }
+  return result;
+}
+
 /* The value type of `yield` / a `<&block-param>.call` inside method mi: the
    block-body value type at a (any) call site of mi. Polymorphic, resolved from
    the first matching caller -- matches how the rewrite inlines per call site. */
@@ -325,6 +358,19 @@ static TyKind infer_call(Compiler *c, int id) {
     if (self && self->is_cmethod && self->class_id >= 0) return TY_STRING;
   }
 
+  /* loop { break val } -> the type of the break value */
+  if (recv < 0 && !strcmp(name, "loop")) {
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0) {
+      int body = nt_ref(nt, blk, "body");
+      if (body >= 0) {
+        TyKind bt = scan_break_type(c, body, 0);
+        if (bt != TY_UNKNOWN) return bt;
+      }
+    }
+    return TY_NIL;
+  }
+
   /* proc {} / lambda {} / Proc.new {} -> a first-class Proc value */
   if (is_proc_literal(c, id)) return TY_PROC;
 
@@ -475,6 +521,10 @@ static TyKind infer_call(Compiler *c, int id) {
       if (cn && !strcmp(cn, "StringScanner")) return TY_STRINGSCANNER;
       if (cn && !strcmp(cn, "Hash")) return TY_UNKNOWN; /* hash type determined by key usage */
       if (cn && !strcmp(cn, "Regexp")) return TY_REGEX;
+      /* Builtin object types: return TY_POLY (they're boxed sp_RbVal at runtime) */
+      if (cn && (!strcmp(cn, "Fiber") || !strcmp(cn, "Thread") || !strcmp(cn, "Mutex") ||
+                 !strcmp(cn, "Random") || !strcmp(cn, "IO") || !strcmp(cn, "File") ||
+                 !strcmp(cn, "GzipReader") || !strcmp(cn, "GzipWriter"))) return TY_POLY;
     }
   }
 
@@ -605,6 +655,21 @@ static TyKind infer_call(Compiler *c, int id) {
         return TY_BOOL;
       if (!strcmp(name, "mtime"))
         return TY_TIME;
+      /* File.open / File.new without a block -> a File object (TY_POLY) */
+      if (!strcmp(name, "open") || !strcmp(name, "new")) return TY_POLY;
+    }
+    if (rty && !strcmp(rty, "ConstantReadNode") &&
+        nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "IO")) {
+      /* IO.pipe -> [r, w] pair; each is TY_POLY; the pair is a str_array */
+      if (!strcmp(name, "pipe")) return TY_STR_ARRAY;
+    }
+    /* Fiber.new { } / Thread.new { } -> TY_POLY (builtin object) */
+    if (rty && !strcmp(rty, "ConstantReadNode")) {
+      const char *cn2 = nt_str(nt, recv, "name");
+      if (cn2 && !strcmp(name, "new") &&
+          (!strcmp(cn2, "Fiber") || !strcmp(cn2, "Thread") || !strcmp(cn2, "Mutex") ||
+           !strcmp(cn2, "Random")))
+        return TY_POLY;
     }
   }
 
@@ -1256,6 +1321,15 @@ static TyKind infer_call(Compiler *c, int id) {
         }
       }
       if (found) return r;
+      /* Fiber/Thread/IO/File instance methods: fallback when no user class defines `name`. */
+      if (!strcmp(name, "resume") || !strcmp(name, "value") || !strcmp(name, "join"))
+        return TY_POLY;
+      if (!strcmp(name, "alive?") || !strcmp(name, "dead?") || !strcmp(name, "closed?") ||
+          !strcmp(name, "eof?")) return TY_BOOL;
+      if (!strcmp(name, "write") || !strcmp(name, "read") || !strcmp(name, "gets") ||
+          !strcmp(name, "readline")) return TY_STRING;
+      if (!strcmp(name, "close") || !strcmp(name, "flush")) return TY_NIL;
+      if (!strcmp(name, "fileno")) return TY_INT;
     }
   }
 
@@ -1726,6 +1800,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "RegularExpressionNode") ||
       !strcmp(ty, "InterpolatedRegularExpressionNode")) return TY_REGEX;
   if (!strcmp(ty, "InterpolatedStringNode"))  return TY_STRING;
+  if (!strcmp(ty, "XStringNode") || !strcmp(ty, "InterpolatedXStringNode")) return TY_STRING;
   if (!strcmp(ty, "InterpolatedSymbolNode"))  return TY_SYMBOL;
   if (!strcmp(ty, "SymbolNode"))              return TY_SYMBOL;
   if (!strcmp(ty, "TrueNode"))                return TY_BOOL;
@@ -1860,9 +1935,11 @@ static TyKind infer_uncached(Compiler *c, int id) {
   if (!strcmp(ty, "ClassVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) return TY_UNKNOWN;
-    int idx = nm ? comp_cvar_index(&c->classes[s->class_id], nm) : -1;
-    return idx >= 0 ? c->classes[s->class_id].cvar_types[idx] : TY_UNKNOWN;
+    int cid = s->class_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) return TY_UNKNOWN;
+    int idx = nm ? comp_cvar_index(&c->classes[cid], nm) : -1;
+    return idx >= 0 ? c->classes[cid].cvar_types[idx] : TY_UNKNOWN;
   }
   if (!strcmp(ty, "ClassVariableWriteNode") ||
       !strcmp(ty, "ClassVariableOperatorWriteNode") ||
@@ -3015,6 +3092,22 @@ static int infer_cvar_types(Compiler *c) {
     Scope *s = comp_scope_of(c, id);
     if (!nm || s->class_id < 0) continue;
     ClassInfo *ci = &c->classes[s->class_id];
+    int idx = comp_cvar_intern(ci, nm);
+    TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
+    if (vt == TY_NIL) continue;
+    TyKind merged = ty_unify(ci->cvar_types[idx], vt);
+    if (merged != ci->cvar_types[idx]) { ci->cvar_types[idx] = merged; changed = 1; }
+  }
+  /* Pass 3: top-level writes (class_id == -1 in scope 0) -- use Toplevel pseudo-class. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "ClassVariableWriteNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    Scope *s = comp_scope_of(c, id);
+    if (!nm || s->class_id >= 0) continue;
+    int tl_idx = comp_class_index(c, "Toplevel");
+    if (tl_idx < 0) { comp_class_new(c, "Toplevel", -1); tl_idx = c->nclasses - 1; }
+    ClassInfo *ci = &c->classes[tl_idx];
     int idx = comp_cvar_intern(ci, nm);
     TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
     if (vt == TY_NIL) continue;
@@ -4448,7 +4541,7 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "tally_by") || !strcmp(name, "min_by_all") ||
               !strcmp(name, "filter_map") || !strcmp(name, "count_by") ||
               !strcmp(name, "partition") || !strcmp(name, "each_slice") ||
-              !strcmp(name, "each_cons")) &&
+              !strcmp(name, "each_cons") || !strcmp(name, "cycle")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
     /* TY_POLY receiver with iteration methods: element type is TY_POLY */

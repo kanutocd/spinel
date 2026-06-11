@@ -3742,6 +3742,24 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* exit / abort as expressions (noreturn, emit as C statement-expression) */
+  if (recv < 0 && (!strcmp(name, "exit") || !strcmp(name, "exit!"))) {
+    if (argc == 0) { buf_puts(b, "({ exit(0); (mrb_int)0; })"); return; }
+    buf_puts(b, "({ exit((int)("); emit_expr(c, argv[0], b); buf_puts(b, ")); (mrb_int)0; })");
+    return;
+  }
+  if (recv < 0 && !strcmp(name, "abort")) {
+    if (argc >= 1) {
+      TyKind at2 = comp_ntype(c, argv[0]);
+      buf_puts(b, "({ fputs(");
+      if (at2 == TY_STRING) emit_expr(c, argv[0], b);
+      else { buf_puts(b, "sp_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      buf_puts(b, ", stderr); fputc('\\n', stderr); exit(1); (mrb_int)0; })");
+    }
+    else buf_puts(b, "({ exit(1); (mrb_int)0; })");
+    return;
+  }
+
   /* raise */
   if (recv < 0 && !strcmp(name, "raise")) {
     int args = nt_ref(nt, id, "arguments");
@@ -10454,6 +10472,19 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
   if (!strcmp(ty, "InterpolatedStringNode")) { emit_interp(c, id, b); return; }
+  if (!strcmp(ty, "XStringNode")) {
+    const char *sc = nt_str(nt, id, "content");
+    buf_puts(b, "sp_backtick(");
+    emit_str_literal_n(b, sc ? sc : "", sc ? nt_str_len(nt, id, "content") : 0);
+    buf_puts(b, ")");
+    return;
+  }
+  if (!strcmp(ty, "InterpolatedXStringNode")) {
+    buf_puts(b, "sp_backtick(");
+    emit_interp(c, id, b);
+    buf_puts(b, ")");
+    return;
+  }
   if (!strcmp(ty, "InterpolatedSymbolNode")) {
     buf_puts(b, "sp_sym_intern("); emit_interp(c, id, b); buf_puts(b, ")");
     return;
@@ -10731,18 +10762,22 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
   if (!strcmp(ty, "ClassVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@@x" */
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id >= 0) { buf_printf(b, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2); return; }
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid >= 0) { buf_printf(b, "cvar_%s_%s", c->classes[cid].name, nm + 2); return; }
     unsupported(c, id, "class variable read (no class scope)");
   }
   if (!strcmp(ty, "ClassVariableWriteNode")) {  /* in value position: yields the assigned value */
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) unsupported(c, id, "class variable write (no class scope)");
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable write (no class scope)"); return; }
     TyKind ct = TY_INT;
-    int idx = comp_cvar_index(&c->classes[s->class_id], nm);
-    if (idx >= 0) ct = c->classes[s->class_id].cvar_types[idx];
-    buf_printf(b, "(cvar_%s_%s = ", c->classes[s->class_id].name, nm + 2);
+    int idx = comp_cvar_index(&c->classes[cid], nm);
+    if (idx >= 0) ct = c->classes[cid].cvar_types[idx];
+    buf_printf(b, "(cvar_%s_%s = ", c->classes[cid].name, nm + 2);
     if (ct == TY_POLY) emit_boxed(c, v, b); else emit_expr(c, v, b);
     buf_puts(b, ")");
     return;
@@ -10752,11 +10787,13 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     const char *op = nt_str(nt, id, "binary_operator");
     int v = nt_ref(nt, id, "value");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
     TyKind ct = TY_INT;
-    int idx = comp_cvar_index(&c->classes[s->class_id], nm);
-    if (idx >= 0) ct = c->classes[s->class_id].cvar_types[idx];
-    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    int idx = comp_cvar_index(&c->classes[cid], nm);
+    if (idx >= 0) ct = c->classes[cid].cvar_types[idx];
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
     if (ct == TY_STRING && op && !strcmp(op, "+")) {
       buf_printf(b, "(%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, v, b); buf_puts(b, "))");
@@ -10771,8 +10808,10 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
-    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
     buf_printf(b, "(%s ? %s : (%s = ", ref, ref, ref);
     emit_expr(c, v, b); buf_puts(b, "))");
     return;
@@ -10781,8 +10820,10 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
-    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[s->class_id].name, nm + 2);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
     buf_printf(b, "(%s ? (%s = ", ref, ref);
     emit_expr(c, v, b); buf_puts(b, ") : 0)");
     return;
@@ -11681,6 +11722,25 @@ static int emit_output_call(Compiler *c, int id, Buf *b, int indent) {
   }
   /* trap(...) stmt: no-op (Spinel has no signal-handler runtime) */
   if (!strcmp(name, "trap") && argc >= 1) return 1;
+  if (!strcmp(name, "exit") || !strcmp(name, "exit!")) {
+    emit_indent(b, indent);
+    if (argc == 0) buf_puts(b, "exit(0);\n");
+    else { buf_puts(b, "exit((int)("); emit_expr(c, argv[0], b); buf_puts(b, "));\n"); }
+    return 1;
+  }
+  if (!strcmp(name, "abort")) {
+    emit_indent(b, indent);
+    if (argc >= 1) {
+      buf_puts(b, "fputs(");
+      TyKind at = comp_ntype(c, argv[0]);
+      if (at == TY_STRING) emit_expr(c, argv[0], b);
+      else { buf_puts(b, "sp_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      buf_puts(b, ", stderr); fputc('\\n', stderr);\n");
+      emit_indent(b, indent);
+    }
+    buf_puts(b, "exit(1);\n");
+    return 1;
+  }
   if (!strcmp(name, "srand")) {
     emit_indent(b, indent);
     if (argc == 0) buf_puts(b, "srand((unsigned)time(NULL));\n");
@@ -12936,6 +12996,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int v = nt_ref(nt, id, "value");
     int sc = comp_scope_of(c, id)->class_id;
     if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) sc = comp_class_index(c, "Toplevel");
     if (sc < 0) { unsupported(c, id, "class variable write (no class scope)"); return; }
     TyKind ct = TY_INT;
     int idx = comp_cvar_index(&c->classes[sc], nm);
@@ -12952,6 +13013,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int v = nt_ref(nt, id, "value");
     int sc = comp_scope_of(c, id)->class_id;
     if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) sc = comp_class_index(c, "Toplevel");
     if (sc < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
     TyKind ct = TY_INT;
     int idx = comp_cvar_index(&c->classes[sc], nm);
@@ -12973,6 +13035,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int v = nt_ref(nt, id, "value");
     int sc = comp_scope_of(c, id)->class_id;
     if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) sc = comp_class_index(c, "Toplevel");
     if (sc < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
     char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
     emit_indent(b, indent);
@@ -12985,6 +13048,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     int v = nt_ref(nt, id, "value");
     int sc = comp_scope_of(c, id)->class_id;
     if (sc < 0) sc = g_class_body_id;
+    if (sc < 0) sc = comp_class_index(c, "Toplevel");
     if (sc < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
     char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
     emit_indent(b, indent);
@@ -14482,7 +14546,8 @@ static void emit_proc_literal(Compiler *c, int create, Buf *b) {
 /* Emit the struct + the constructor (sp_<Class>_new) for one class. */
 /* Returns 1 if the class name shadows a built-in runtime type (no struct/new to emit). */
 static int is_builtin_reopen(const char *name) {
-  return !strcmp(name, "String")    || !strcmp(name, "Integer") ||
+  return !strcmp(name, "Toplevel") ||
+         !strcmp(name, "String")    || !strcmp(name, "Integer") ||
          !strcmp(name, "Float")     || !strcmp(name, "Symbol")  ||
          !strcmp(name, "TrueClass") || !strcmp(name, "FalseClass") ||
          !strcmp(name, "NilClass")  || !strcmp(name, "Array")   ||
