@@ -1557,6 +1557,43 @@ static TyKind infer_call(Compiler *c, int id) {
     if (recv >= 0 && call_op && !strcmp(call_op, "&.")) return TY_POLY;
   }
 
+  /* Builtin class reopening: look up user-defined methods on Array/Numeric/Object
+     receivers where no builtin method matched. */
+  if (recv >= 0) {
+    /* Array reopening: any array-typed receiver */
+    if (ty_is_array(rt)) {
+      int oc_ci = comp_class_index(c, "Array");
+      if (oc_ci >= 0) {
+        int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
+        if (oc_mi >= 0) return c->scopes[oc_mi].ret;
+      }
+    }
+    /* Numeric reopening: integers and floats */
+    if (rt == TY_INT || rt == TY_FLOAT) {
+      int oc_ci = comp_class_index(c, "Numeric");
+      if (oc_ci >= 0) {
+        int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
+        if (oc_mi >= 0) return c->scopes[oc_mi].ret;
+      }
+    }
+    /* FalseClass methods (TrueClass already checked earlier for TY_BOOL) */
+    if (rt == TY_BOOL) {
+      int oc_ci = comp_class_index(c, "FalseClass");
+      if (oc_ci >= 0) {
+        int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
+        if (oc_mi >= 0) return c->scopes[oc_mi].ret;
+      }
+    }
+    /* Object reopening: universal fallback for any receiver type */
+    {
+      int oc_ci = comp_class_index(c, "Object");
+      if (oc_ci >= 0) {
+        int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
+        if (oc_mi >= 0) return c->scopes[oc_mi].ret;
+      }
+    }
+  }
+
   return TY_UNKNOWN;
 }
 
@@ -1695,6 +1732,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
     if (!strcmp(cn, "Symbol"))  return TY_SYMBOL;
     if (!strcmp(cn, "TrueClass") || !strcmp(cn, "FalseClass") || !strcmp(cn, "NilClass")) return TY_BOOL;
     if (!strcmp(cn, "Array"))   return TY_POLY_ARRAY;
+    if (!strcmp(cn, "Object"))  return TY_POLY;  /* dynamic: called on any receiver type */
     return ty_object(s->class_id);
   }
   if (!strcmp(ty, "InstanceVariableReadNode")) {
@@ -2407,6 +2445,43 @@ static void resolve_parents(Compiler *c) {
     if (sty && !strcmp(sty, "ConstantReadNode")) {
       int p = comp_class_index(c, nt_str(nt, sc, "name"));
       if (p >= 0 && p != i) c->classes[i].parent = p;
+    }
+  }
+}
+
+/* For each class, find `include M` declarations and transplant M's instance
+   methods into the class so they are reachable via comp_method_in_chain. */
+static void register_includes(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    int body = nt_ref(nt, c->classes[ci].def_node, "body");
+    int n = 0;
+    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    for (int k = 0; k < n; k++) {
+      int s = stmts[k];
+      const char *sty = nt_type(nt, s);
+      if (!sty || strcmp(sty, "CallNode")) continue;
+      const char *nm = nt_str(nt, s, "name");
+      if (!nm || strcmp(nm, "include")) continue;
+      if (nt_ref(nt, s, "receiver") >= 0) continue;
+      int anode = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      for (int j = 0; j < an; j++) {
+        const char *aty = nt_type(nt, args[j]);
+        const char *mname = NULL;
+        if (aty && !strcmp(aty, "ConstantReadNode")) mname = nt_str(nt, args[j], "name");
+        else if (aty && !strcmp(aty, "ConstantPathNode")) mname = nt_str(nt, args[j], "name");
+        int mod_id = mname ? comp_class_index(c, mname) : -1;
+        if (mod_id < 0) continue;
+        for (int ms = 0; ms < c->nscopes; ms++) {
+          Scope *sc = &c->scopes[ms];
+          if (sc->class_id != mod_id || sc->is_cmethod || !sc->name) continue;
+          /* Skip if class already has a method with this name */
+          if (comp_method_in_class(c, ci, sc->name) >= 0) continue;
+          sc->class_id = ci;
+        }
+      }
     }
   }
 }
@@ -4678,6 +4753,7 @@ void analyze_program(Compiler *c) {
 
   resolve_parents(c);
   inherit_members(c);
+  register_includes(c);
   register_prepends(c);
 
   /* collect top-level `include <Mod>` calls so bare method calls can

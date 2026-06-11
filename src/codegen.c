@@ -8247,7 +8247,6 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     else if (rt == TY_INT)     oc_cn = "Integer";
     else if (rt == TY_FLOAT)   oc_cn = "Float";
     else if (rt == TY_SYMBOL)  oc_cn = "Symbol";
-    else if (rt == TY_BOOL)    oc_cn = "TrueClass";
     if (oc_cn) {
       int oc_ci = comp_class_index(c, oc_cn);
       if (oc_ci >= 0) {
@@ -8256,6 +8255,78 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "sp_%s_%s(", oc_cn, mc(name));
           emit_expr(c, recv, b);
           emit_args_filled(c, oc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+          buf_puts(b, ")");
+          return;
+        }
+      }
+    }
+    /* bool: dispatch based on value to correct TrueClass/FalseClass impl */
+    if (rt == TY_BOOL) {
+      int tc_ci = comp_class_index(c, "TrueClass");
+      int fc_ci = comp_class_index(c, "FalseClass");
+      int tc_mi = tc_ci >= 0 ? comp_method_in_chain(c, tc_ci, name, NULL) : -1;
+      int fc_mi = fc_ci >= 0 ? comp_method_in_chain(c, fc_ci, name, NULL) : -1;
+      if (tc_mi >= 0 && fc_mi >= 0) {
+        /* both defined: ternary dispatch */
+        int bt = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "int _t%d = ", bt); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+        buf_printf(b, "(_t%d ? sp_TrueClass_%s(_t%d", bt, mc(name), bt);
+        emit_args_filled(c, tc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_printf(b, ") : sp_FalseClass_%s(_t%d", mc(name), bt);
+        emit_args_filled(c, fc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_puts(b, "))");
+        return;
+      }
+      if (tc_mi >= 0) {
+        /* only TrueClass defined */
+        buf_printf(b, "sp_TrueClass_%s(", mc(name));
+        emit_expr(c, recv, b);
+        emit_args_filled(c, tc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_puts(b, ")");
+        return;
+      }
+      if (fc_mi >= 0) {
+        /* only FalseClass defined: ternary still needed */
+        int bt = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "int _t%d = ", bt); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+        buf_printf(b, "(_t%d ? (", bt);
+        buf_printf(b, "sp_FalseClass_%s(_t%d", mc(name), bt);
+        emit_args_filled(c, fc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_puts(b, "), 0) : sp_FalseClass_");
+        buf_printf(b, "%s(_t%d", mc(name), bt);
+        emit_args_filled(c, fc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_puts(b, "))");
+        return;
+      }
+    }
+    /* Array reopening: any array-typed receiver -> box to sp_RbVal */
+    if (ty_is_array(rt)) {
+      int oc_ci2 = comp_class_index(c, "Array");
+      if (oc_ci2 >= 0) {
+        int oc_mi2 = comp_method_in_chain(c, oc_ci2, name, NULL);
+        if (oc_mi2 >= 0) {
+          const char *box_fn = (rt == TY_INT_ARRAY) ? "sp_box_int_array" :
+                               (rt == TY_STR_ARRAY) ? "sp_box_str_array" :
+                               (rt == TY_FLOAT_ARRAY) ? "sp_box_float_array" : "sp_box_poly_array";
+          buf_printf(b, "sp_Array_%s(", mc(name));
+          buf_printf(b, "%s(", box_fn); emit_expr(c, recv, b); buf_puts(b, ")");
+          emit_args_filled(c, oc_mi2, nt_ref(nt, id, "arguments"), ", ", b);
+          buf_puts(b, ")");
+          return;
+        }
+      }
+    }
+    /* Object reopening: universal fallback -> box receiver to sp_RbVal */
+    {
+      int oc_ci3 = comp_class_index(c, "Object");
+      if (oc_ci3 >= 0) {
+        int oc_mi3 = comp_method_in_chain(c, oc_ci3, name, NULL);
+        if (oc_mi3 >= 0) {
+          buf_printf(b, "sp_Object_%s(", mc(name));
+          emit_boxed(c, recv, b);
+          emit_args_filled(c, oc_mi3, nt_ref(nt, id, "arguments"), ", ", b);
           buf_puts(b, ")");
           return;
         }
@@ -13300,7 +13371,8 @@ static void emit_method_signature(Compiler *c, Scope *s, Buf *b) {
     else if (!strcmp(cn, "Float"))   { buf_puts(b, "double self"); }
     else if (!strcmp(cn, "Symbol"))  { buf_puts(b, "mrb_int self"); }
     else if (!strcmp(cn, "TrueClass") || !strcmp(cn, "FalseClass") || !strcmp(cn, "NilClass")) { buf_puts(b, "int self"); }
-    else if (!strcmp(cn, "Array"))   { buf_puts(b, "sp_PolyArray *self"); }
+    else if (!strcmp(cn, "Array"))   { buf_puts(b, "sp_RbVal self"); }
+    else if (!strcmp(cn, "Object") || !strcmp(cn, "Numeric")) { buf_puts(b, "sp_RbVal self"); }
     else { buf_printf(b, "sp_%s *self", cn); }
     wrote = 1;
   }
@@ -13937,7 +14009,14 @@ char *codegen_program(const NodeTable *nt) {
                    "if(sp_ndyn<8192){sp_dyn_syms[sp_ndyn]=sp_str_dup_external(s);return (sp_sym)(%d+sp_ndyn++);}"
                    "return (sp_sym)0;}\n\n", ns, ns > 0 ? "sp_sym_names[i]" : "\"\"", ns, ns);
   }
-  buf_puts(&b, "static const char *sp_class_to_s(sp_Class c){(void)c;return \"\";}\n\n\n");
+  {
+    buf_puts(&b, "static const char *sp_class_to_s(sp_Class c){switch(c.cls_id){");
+    for (int i = 0; i < c->nclasses; i++) {
+      if (!is_builtin_reopen(c->classes[i].name))
+        buf_printf(&b, "case %d:return SPL(\"%s\");", i, c->classes[i].name);
+    }
+    buf_puts(&b, "default:return \"\";} }\n\n\n");
+  }
 
   /* class structs + GC scan functions. Forward-declare every typedef first so
      a class struct may embed a pointer to a class defined later. */
