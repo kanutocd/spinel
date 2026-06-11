@@ -2450,6 +2450,16 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
   int mi = comp_method_in_chain(c, cid, name, &defcls);
   Scope *m = mi >= 0 ? &c->scopes[mi] : NULL;
   TyKind ret = m ? m->ret : TY_UNKNOWN;
+  /* Unify return type across all descendant implementations so that even
+     when the base method has TY_VOID/TY_UNKNOWN, a subclass override
+     with a real return type makes the dispatch virtual and typed. */
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    int kd = -1;
+    int kmi = comp_method_in_chain(c, k, name, &kd);
+    if (kmi >= 0 && (TyKind)c->scopes[kmi].ret != TY_UNKNOWN)
+      ret = ty_unify(ret, (TyKind)c->scopes[kmi].ret);
+  }
 
   int argc = 0;
   const int *argv = argsNode >= 0 ? nt_arr(nt, argsNode, "arguments", &argc) : NULL;
@@ -2512,15 +2522,62 @@ static void emit_dispatch(Compiler *c, int cid, const char *name,
     int kd = -1;
     int kmi = comp_method_in_chain(c, k, name, &kd);
     if (kmi < 0) continue;
-    buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)%s", k, rtmp,
-               c->classes[kd].name, mc(c->scopes[kmi].name), c->classes[kd].name, selfptr);
+    TyKind arm_ret = (TyKind)c->scopes[kmi].ret;
+    const char *kfn = mc(c->scopes[kmi].name);
+    if (arm_ret == TY_VOID || arm_ret == TY_NIL) {
+      /* void-returning override: call it, assign nil/zero to the result temp */
+      buf_printf(b, " case %d: sp_%s_%s((sp_%s *)%s", k,
+                 c->classes[kd].name, kfn, c->classes[kd].name, selfptr);
+      for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
+      buf_printf(b, "); _t%d = %s; break;", rtmp, default_value(ret));
+    }
+    else if (arm_ret != ret && ret == TY_POLY) {
+      /* arm returns a concrete type but switch expects sp_RbVal: box it */
+      buf_printf(b, " case %d: { ", k);
+      Buf _bx; memset(&_bx, 0, sizeof _bx);
+      buf_printf(&_bx, "sp_%s_%s((sp_%s *)%s",
+                 c->classes[kd].name, kfn, c->classes[kd].name, selfptr);
+      for (int a = 0; a < np; a++) buf_printf(&_bx, ", _t%d", atmp[a]);
+      buf_puts(&_bx, ")");
+      buf_printf(b, "_t%d = ", rtmp);
+      emit_boxed_text(c, arm_ret, _bx.p ? _bx.p : "0", b);
+      free(_bx.p);
+      buf_puts(b, "; break; }");
+    }
+    else {
+      buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)%s", k, rtmp,
+                 c->classes[kd].name, kfn, c->classes[kd].name, selfptr);
+      for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
+      buf_puts(b, "); break;");
+    }
+  }
+  /* default arm uses the base-class (defcls) implementation */
+  TyKind def_ret = m ? (TyKind)m->ret : TY_UNKNOWN;
+  if (def_ret == TY_VOID || def_ret == TY_NIL) {
+    buf_printf(b, " default: sp_%s_%s((sp_%s *)%s",
+               c->classes[defcls].name, mc(mname), c->classes[defcls].name, selfptr);
+    for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
+    buf_printf(b, "); _t%d = %s; break;", rtmp, default_value(ret));
+  }
+  else if (def_ret != ret && ret == TY_POLY) {
+    buf_printf(b, " default: { ");
+    Buf _bx; memset(&_bx, 0, sizeof _bx);
+    buf_printf(&_bx, "sp_%s_%s((sp_%s *)%s",
+               c->classes[defcls].name, mc(mname), c->classes[defcls].name, selfptr);
+    for (int a = 0; a < np; a++) buf_printf(&_bx, ", _t%d", atmp[a]);
+    buf_puts(&_bx, ")");
+    buf_printf(b, "_t%d = ", rtmp);
+    emit_boxed_text(c, def_ret, _bx.p ? _bx.p : "0", b);
+    free(_bx.p);
+    buf_puts(b, "; break; }");
+  }
+  else {
+    buf_printf(b, " default: _t%d = sp_%s_%s((sp_%s *)%s", rtmp,
+               c->classes[defcls].name, mc(mname), c->classes[defcls].name, selfptr);
     for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
     buf_puts(b, "); break;");
   }
-  buf_printf(b, " default: _t%d = sp_%s_%s((sp_%s *)%s", rtmp,
-             c->classes[defcls].name, mc(mname), c->classes[defcls].name, selfptr);
-  for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
-  buf_printf(b, "); break; } _t%d; })", rtmp);
+  buf_printf(b, " } _t%d; })", rtmp);
   free(atmp);
 }
 
