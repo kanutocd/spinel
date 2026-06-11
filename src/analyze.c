@@ -2026,7 +2026,25 @@ static void register_module_functions(Compiler *c) {
       if (!sty) continue;
       if (!strcmp(sty, "CallNode") && nt_ref(nt, s, "receiver") < 0) {
         const char *nm = nt_str(nt, s, "name");
-        if (nm && !strcmp(nm, "module_function")) { in_module_function = 1; continue; }
+        if (nm && !strcmp(nm, "module_function")) {
+          /* `module_function :m1, :m2` form: mark named methods */
+          int an = 0;
+          int anode = nt_ref(nt, s, "arguments");
+          const int *aargs = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+          if (an == 0) { in_module_function = 1; continue; }
+          for (int ai = 0; ai < an; ai++) {
+            const char *aty = nt_type(nt, aargs[ai]);
+            const char *aval = NULL;
+            if (aty && !strcmp(aty, "SymbolNode")) aval = nt_str(nt, aargs[ai], "value");
+            if (!aval) continue;
+            for (int mi = 0; mi < c->nscopes; mi++) {
+              if (c->scopes[mi].class_id == ci && !c->scopes[mi].is_cmethod &&
+                  c->scopes[mi].name && !strcmp(c->scopes[mi].name, aval))
+                c->scopes[mi].is_cmethod = 1;
+            }
+          }
+          continue;
+        }
       }
       if (!strcmp(sty, "DefNode") && in_module_function) {
         const char *mname = nt_str(nt, s, "name");
