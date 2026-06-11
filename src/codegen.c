@@ -13196,7 +13196,24 @@ static void emit_super(Compiler *c, int id, Buf *b) {
   if (mi < 0) { unsupported(c, id, "super (no parent method)"); return; }
   buf_printf(b, "sp_%s_%s((sp_%s *)%s", c->classes[defcls].name, mc(uname), c->classes[defcls].name, g_self);
   if (ty && !strcmp(ty, "ForwardingSuperNode")) {
-    for (int i = 0; i < s->nparams; i++) buf_printf(b, ", lv_%s", s->pnames[i]);
+    Scope *pm = &c->scopes[mi];
+    int n = s->nparams < pm->nparams ? s->nparams : pm->nparams;
+    for (int i = 0; i < n; i++) {
+      LocalVar *src = scope_local(s, s->pnames[i]);
+      LocalVar *dst = scope_local(pm, pm->pnames[i]);
+      TyKind st = src ? src->type : TY_UNKNOWN;
+      TyKind dt = dst ? dst->type : TY_UNKNOWN;
+      if (dt == TY_POLY && st != TY_POLY && st != TY_UNKNOWN) {
+        buf_puts(b, ", ");
+        Buf _bx; memset(&_bx, 0, sizeof _bx);
+        buf_printf(&_bx, "lv_%s", s->pnames[i]);
+        emit_boxed_text(c, st, _bx.p, b);
+        free(_bx.p);
+      }
+      else {
+        buf_printf(b, ", lv_%s", s->pnames[i]);
+      }
+    }
   }
   else {
     emit_args_filled(c, mi, nt_ref(c->nt, id, "arguments"), ", ", b);
