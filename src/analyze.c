@@ -3719,10 +3719,11 @@ static int infer_write_types(Compiler *c) {
       slot = &ci->ivar_types[iv];
       /* If the slot is TY_UNKNOWN but has a direct InstanceVariableWriteNode
          that assigns a typed value OR an empty array/hash literal (e.g.
-         @buf = [nil]*7 or @free = []), skip usage-driven hash promotion.
-         Without this guard, @free[0] read promotes @free to poly_poly_hash
-         before @free = [] has been processed as an array. */
-      if (*slot == TY_UNKNOWN && inm) {
+         @buf = [nil]*7 or @free = []), skip usage-driven hash promotion
+         (but allow push-driven array promotion through). Without this guard,
+         @free[0] read promotes @free to poly_poly_hash before @free = []
+         has been processed as an array. */
+      if (!is_push && *slot == TY_UNKNOWN && inm) {
         int has_typed_write = 0;
         for (int _wi = 0; _wi < nt->count && !has_typed_write; _wi++) {
           if (!nt_type(nt, _wi) || strcmp(nt_type(nt, _wi), "InstanceVariableWriteNode")) continue;
@@ -5671,6 +5672,29 @@ void analyze_program(Compiler *c) {
       if (!p) continue;
       if (p->type == TY_UNKNOWN || p->type == TY_SYMBOL || p->type == TY_BOOL)
         p->type = TY_POLY;
+    }
+  }
+
+  /* Backstop: transplanted module scopes share the same def_node. If one
+     copy has known param types (from call sites) but another copy lacks callers
+     and has TY_UNKNOWN params, propagate the known types across. */
+  for (int s1 = 0; s1 < c->nscopes; s1++) {
+    Scope *sc1 = &c->scopes[s1];
+    if (sc1->nparams == 0 || sc1->def_node < 0 || !sc1->name) continue;
+    for (int pi = 0; pi < sc1->nparams; pi++) {
+      if (!sc1->pnames[pi]) continue;
+      LocalVar *p1 = scope_local(sc1, sc1->pnames[pi]);
+      if (!p1 || p1->type != TY_UNKNOWN) continue;
+      for (int s2 = 0; s2 < c->nscopes; s2++) {
+        if (s2 == s1) continue;
+        Scope *sc2 = &c->scopes[s2];
+        if (sc2->def_node != sc1->def_node || sc2->nparams != sc1->nparams) continue;
+        if (pi >= sc2->nparams || !sc2->pnames[pi]) continue;
+        LocalVar *p2 = scope_local(sc2, sc2->pnames[pi]);
+        if (!p2 || p2->type == TY_UNKNOWN) continue;
+        p1->type = p2->type;
+        break;
+      }
     }
   }
 
