@@ -4510,6 +4510,7 @@ static int infer_block_params(Compiler *c) {
 
     /* array.reduce(init) { |acc, elem| } or inject: p0=acc type, p1=elem type */
     if ((!strcmp(name, "reduce") || !strcmp(name, "inject")) && ty_is_array(rt)) {
+      if (!p0) continue;
       Scope *rs = comp_scope_of(c, block);
       TyKind et2 = ty_array_elem(rt);
       /* Determine accumulator type from initial value argument (if any) */
@@ -4533,6 +4534,7 @@ static int infer_block_params(Compiler *c) {
     /* array.each_with_index { |x, i| } binds element + int index */
     if (!strcmp(name, "each_with_index") && ty_is_array(rt)) {
       Scope *es = comp_scope_of(c, block);
+      if (!p0) continue;
       LocalVar *ep = scope_local_intern(es, p0); ep->is_block_param = 1;
       TyKind em = ty_unify(ep->type, ty_array_elem(rt));
       if (em != ep->type) { ep->type = em; changed = 1; }
@@ -4645,7 +4647,8 @@ static int infer_block_params(Compiler *c) {
       continue;
     }
 
-    /* hash.each / each_pair { |k, v| } binds two params */
+    /* hash.each / each_pair { |k, v| } or { |(k,v)| } binds two params.
+       Also handles each_with_object { |(k,v), memo| }. */
     if ((!strcmp(name, "each") || !strcmp(name, "each_pair") || !strcmp(name, "map") ||
          !strcmp(name, "collect") || !strcmp(name, "flat_map") || !strcmp(name, "select") ||
          !strcmp(name, "filter") || !strcmp(name, "reject") || !strcmp(name, "find") ||
@@ -4654,14 +4657,55 @@ static int infer_block_params(Compiler *c) {
          !strcmp(name, "any?") || !strcmp(name, "all?") || !strcmp(name, "none?") ||
          !strcmp(name, "each_with_index") || !strcmp(name, "each_with_object")) && ty_is_hash(rt)) {
       Scope *hs = comp_scope_of(c, block);
-      LocalVar *kp = scope_local_intern(hs, p0); kp->is_block_param = 1;
-      TyKind km = ty_unify(kp->type, ty_hash_key(rt));
-      if (km != kp->type) { kp->type = km; changed = 1; }
-      const char *p1 = block_param_name(c, block, 1);
-      if (p1) {
-        LocalVar *vp = scope_local_intern(hs, p1); vp->is_block_param = 1;
-        TyKind vm = ty_unify(vp->type, ty_hash_val(rt));
-        if (vm != vp->type) { vp->type = vm; changed = 1; }
+      /* |(k,v)| or |(k,v), memo| destructuring (MultiTargetNode first param) */
+      if (block_param_is_multi(c, block, 0)) {
+        int lc = block_param_multi_count(c, block, 0);
+        if (lc >= 1) {
+          const char *kn = block_param_multi_leaf(c, block, 0, 0);
+          if (kn) {
+            LocalVar *kp2 = scope_local_intern(hs, kn); kp2->is_block_param = 1;
+            TyKind km2 = ty_unify(kp2->type, ty_hash_key(rt));
+            if (km2 != kp2->type) { kp2->type = km2; changed = 1; }
+          }
+        }
+        if (lc >= 2) {
+          const char *vn = block_param_multi_leaf(c, block, 0, 1);
+          if (vn) {
+            LocalVar *vp2 = scope_local_intern(hs, vn); vp2->is_block_param = 1;
+            TyKind vm2 = ty_unify(vp2->type, ty_hash_val(rt));
+            if (vm2 != vp2->type) { vp2->type = vm2; changed = 1; }
+          }
+        }
+        /* for each_with_object: bind the memo param (position 1) */
+        if (!strcmp(name, "each_with_object")) {
+          const char *mp = block_param_name(c, block, 1);
+          if (mp) {
+            int ewobj_args = nt_ref(nt, id, "arguments");
+            int ewobj_argc = 0;
+            const int *ewobj_argv = ewobj_args >= 0 ? nt_arr(nt, ewobj_args, "arguments", &ewobj_argc) : NULL;
+            if (ewobj_argc > 0 && ewobj_argv) {
+              TyKind at2 = infer_type(c, ewobj_argv[0]);
+              if (at2 != TY_UNKNOWN) {
+                LocalVar *mp_lv = scope_local_intern(hs, mp); mp_lv->is_block_param = 1;
+                TyKind mm = ty_unify(mp_lv->type, at2);
+                if (mm != mp_lv->type) { mp_lv->type = mm; changed = 1; }
+              }
+            }
+          }
+        }
+      }
+      else {
+        if (p0) {
+          LocalVar *kp = scope_local_intern(hs, p0); kp->is_block_param = 1;
+          TyKind km = ty_unify(kp->type, ty_hash_key(rt));
+          if (km != kp->type) { kp->type = km; changed = 1; }
+        }
+        const char *p1 = block_param_name(c, block, 1);
+        if (p1) {
+          LocalVar *vp = scope_local_intern(hs, p1); vp->is_block_param = 1;
+          TyKind vm = ty_unify(vp->type, ty_hash_val(rt));
+          if (vm != vp->type) { vp->type = vm; changed = 1; }
+        }
       }
       continue;
     }
