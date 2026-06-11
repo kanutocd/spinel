@@ -9031,6 +9031,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "pred") && argc == 0) buf_printf(b, "((%s) - 1)", r);
       else if ((!strcmp(name, "succ") || !strcmp(name, "next")) && argc == 0) buf_printf(b, "((%s) + 1)", r);
       else if (!strcmp(name, "to_s") && argc == 1) { buf_printf(b, "sp_int_to_s_base(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "coerce") && argc == 1) {
+        TyKind a0 = comp_ntype(c, argv[0]);
+        if (a0 == TY_FLOAT) {
+          int ta = ++g_tmp, o = ++g_tmp;
+          buf_printf(b, "({ mrb_float _t%d = ", ta); emit_expr(c, argv[0], b);
+          buf_printf(b, "; sp_FloatArray *_t%d = sp_FloatArray_new();"
+                        " sp_FloatArray_push(_t%d, _t%d);"
+                        " sp_FloatArray_push(_t%d, (mrb_float)(%s)); _t%d; })", o, o, ta, o, r, o);
+        }
+        else {
+          int ta = ++g_tmp, o = ++g_tmp;
+          buf_printf(b, "({ mrb_int _t%d = ", ta); emit_expr(c, argv[0], b);
+          buf_printf(b, "; sp_IntArray *_t%d = sp_IntArray_new();"
+                        " sp_IntArray_push(_t%d, _t%d);"
+                        " sp_IntArray_push(_t%d, (%s)); _t%d; })", o, o, ta, o, r, o);
+        }
+      }
       else handled = 0;
     }
     else { /* TY_FLOAT */
@@ -9078,6 +9095,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "prev_float")) buf_printf(b, "nextafter(%s, -INFINITY)", r);
       else if (!strcmp(name, "magnitude")) buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "modulo") && argc == 1) { buf_printf(b, "fmod(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "coerce") && argc == 1) {
+        TyKind a0 = comp_ntype(c, argv[0]);
+        int ta = ++g_tmp, o = ++g_tmp;
+        if (a0 == TY_INT) {
+          buf_printf(b, "({ mrb_int _t%d = ", ta); emit_expr(c, argv[0], b);
+          buf_printf(b, "; sp_FloatArray *_t%d = sp_FloatArray_new();"
+                        " sp_FloatArray_push(_t%d, (mrb_float)_t%d);"
+                        " sp_FloatArray_push(_t%d, (%s)); _t%d; })", o, o, ta, o, r, o);
+        }
+        else {
+          buf_printf(b, "({ mrb_float _t%d = ", ta); emit_expr(c, argv[0], b);
+          buf_printf(b, "; sp_FloatArray *_t%d = sp_FloatArray_new();"
+                        " sp_FloatArray_push(_t%d, _t%d);"
+                        " sp_FloatArray_push(_t%d, (%s)); _t%d; })", o, o, ta, o, r, o);
+        }
+      }
       else handled = 0;
     }
     free(rs.p);

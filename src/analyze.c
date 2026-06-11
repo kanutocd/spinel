@@ -1616,9 +1616,14 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "gcdlcm") && argc == 1) return TY_INT_ARRAY;  /* [gcd, lcm] */
     if (!strcmp(name, "digits")) return TY_INT_ARRAY;
     if (!strcmp(name, "to_s") && argc == 1) return TY_STRING;
+    if (!strcmp(name, "coerce") && argc == 1) {
+      TyKind a0 = infer_type(c, argv[0]);
+      return (a0 == TY_FLOAT) ? TY_FLOAT_ARRAY : TY_INT_ARRAY;
+    }
   }
   /* float receiver methods */
   if (recv >= 0 && rt == TY_FLOAT) {
+    if (!strcmp(name, "coerce") && argc == 1) return TY_FLOAT_ARRAY;  /* [Float(other), self] */
     if (!strcmp(name, "divmod") && argc == 1) return TY_POLY_ARRAY;  /* [Integer, Float] */
     if (!strcmp(name, "infinite?")) return TY_INT;   /* nil / 1 / -1 (nullable int) */
     if (!strcmp(name, "nan?") || !strcmp(name, "finite?") ||
@@ -3712,11 +3717,11 @@ static int infer_write_types(Compiler *c) {
       int iv = inm ? comp_ivar_index(ci, inm) : -1;
       if (iv < 0) continue;
       slot = &ci->ivar_types[iv];
-      /* If the slot is TY_UNKNOWN but has a direct non-empty InstanceVariableWriteNode
-         (e.g. @buf = [nil]*7), skip usage-driven promotion — infer_ivar_types will
-         set the correct type from the direct assignment. Without this guard,
-         @buf[0] = -1 in the first fixpoint iteration promotes @buf to an int hash
-         before @buf = [nil]*7 has been processed, causing ty_unify to widen to TY_POLY. */
+      /* If the slot is TY_UNKNOWN but has a direct InstanceVariableWriteNode
+         that assigns a typed value OR an empty array/hash literal (e.g.
+         @buf = [nil]*7 or @free = []), skip usage-driven hash promotion.
+         Without this guard, @free[0] read promotes @free to poly_poly_hash
+         before @free = [] has been processed as an array. */
       if (*slot == TY_UNKNOWN && inm) {
         int has_typed_write = 0;
         for (int _wi = 0; _wi < nt->count && !has_typed_write; _wi++) {
@@ -3728,7 +3733,12 @@ static int infer_write_types(Compiler *c) {
           int _wval = nt_ref(nt, _wi, "value");
           if (_wval < 0) continue;
           TyKind _wt = infer_type(c, _wval);
-          if (_wt != TY_UNKNOWN && _wt != TY_NIL) has_typed_write = 1;
+          if (_wt != TY_UNKNOWN && _wt != TY_NIL) { has_typed_write = 1; break; }
+          /* @ivar = [] or @ivar = {} literal: this slot is an array/hash, not
+             subject to hash-promotion from [] read or [0]= write. */
+          const char *_wvty = nt_type(nt, _wval);
+          if (_wvty && (!strcmp(_wvty, "ArrayNode") || !strcmp(_wvty, "HashNode")))
+            has_typed_write = 1;
         }
         if (has_typed_write) continue;
       }
@@ -4517,6 +4527,13 @@ static int infer_block_params(Compiler *c) {
       else {
         TyKind rt0 = infer_type(c, recv);
         if (ty_is_object(rt0)) mi = comp_method_in_chain(c, ty_object_class(rt0), name, NULL);
+        /* Class.new { |...| }: the yielding method is Class#initialize */
+        if (mi < 0 && !strcmp(name, "new") &&
+            nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode")) {
+          const char *cname = nt_str(nt, recv, "name");
+          int cid = cname ? comp_class_index(c, cname) : -1;
+          if (cid >= 0) mi = comp_method_in_chain(c, cid, "initialize", NULL);
+        }
       }
       if (mi >= 0 && c->scopes[mi].yields) {
         int yn = first_yield(c, mi);
