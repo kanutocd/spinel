@@ -330,6 +330,46 @@ static void unsupported(Compiler *c, int id, const char *what) {
   exit(1);
 }
 
+/* ---- builtin class IDs (negative, distinct from user cls_ids >= 0) ---- */
+/* Returns a negative cls_id for well-known builtin class/module names,
+   or 0 if the name is not a recognized builtin class. */
+static int builtin_class_id(const char *name) {
+  if (!name) return 0;
+  if (!strcmp(name, "Integer"))     return -100;
+  if (!strcmp(name, "Float"))       return -101;
+  if (!strcmp(name, "String"))      return -102;
+  if (!strcmp(name, "Symbol"))      return -103;
+  if (!strcmp(name, "Array"))       return -104;
+  if (!strcmp(name, "Hash"))        return -105;
+  if (!strcmp(name, "Range"))       return -106;
+  if (!strcmp(name, "Time"))        return -107;
+  if (!strcmp(name, "Module"))      return -108;
+  if (!strcmp(name, "Class"))       return -109;
+  if (!strcmp(name, "NilClass"))    return -110;
+  if (!strcmp(name, "TrueClass"))   return -111;
+  if (!strcmp(name, "FalseClass"))  return -112;
+  if (!strcmp(name, "Numeric"))     return -113;
+  if (!strcmp(name, "Comparable"))  return -114;
+  if (!strcmp(name, "Enumerable"))  return -115;
+  if (!strcmp(name, "Object"))      return -116;
+  if (!strcmp(name, "BasicObject")) return -117;
+  if (!strcmp(name, "Proc"))        return -118;
+  if (!strcmp(name, "Kernel"))      return -119;
+  if (!strcmp(name, "IO"))          return -120;
+  if (!strcmp(name, "File"))        return -121;
+  if (!strcmp(name, "Exception"))   return -122;
+  if (!strcmp(name, "StandardError")) return -123;
+  if (!strcmp(name, "RuntimeError")) return -124;
+  if (!strcmp(name, "TypeError"))   return -125;
+  if (!strcmp(name, "ArgumentError")) return -126;
+  if (!strcmp(name, "NameError"))   return -127;
+  if (!strcmp(name, "NoMethodError")) return -128;
+  if (!strcmp(name, "StopIteration")) return -129;
+  if (!strcmp(name, "Math"))        return -130;
+  if (!strcmp(name, "Complex"))     return -131;
+  return 0;
+}
+
 /* ---- type -> C ---- */
 
 static const char *c_type_name(TyKind t) {
@@ -4373,14 +4413,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     return;
   }
 
-  /* SomeClass.superclass -> the parent class name (Object when implicit) */
+  /* SomeClass.superclass -> the parent class as sp_Class value */
   if (recv >= 0 && argc == 0 && !strcmp(name, "superclass") &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name")) {
     int ci = comp_class_index(c, nt_str(nt, recv, "name"));
     if (ci >= 0) {
       int par = c->classes[ci].parent;
-      buf_printf(b, "SPL(\"%s\")", par >= 0 ? c->classes[par].name : "Object");
+      if (par >= 0) { buf_printf(b, "((sp_Class){%d})", par); return; }
+      /* Check if the class has a builtin superclass via AST. */
+      int sc_nd = nt_ref(nt, c->classes[ci].def_node, "superclass");
+      int bpar = -116;  /* Object */
+      if (sc_nd >= 0) {
+        const char *sc_ty2 = nt_type(nt, sc_nd);
+        const char *sc_nm2 = (sc_ty2 && (!strcmp(sc_ty2, "ConstantReadNode") || !strcmp(sc_ty2, "ConstantPathNode"))) ? nt_str(nt, sc_nd, "name") : NULL;
+        if (sc_nm2) { int bid2 = builtin_class_id(sc_nm2); if (bid2 != 0) bpar = bid2; }
+      }
+      buf_printf(b, "((sp_Class){%d})", bpar);
       return;
     }
   }
@@ -4440,6 +4489,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
     if (!strcmp(name, "nil?")) { buf_puts(b, "0"); return; }
     if (!strcmp(name, "class")) { buf_puts(b, "SPL(\"Class\")"); return; }
+    if (!strcmp(name, "superclass") && argc == 0) {
+      buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_class_superclass(_cl%d); })", _clt);
+      return;
+    }
+    if (!strcmp(name, "ancestors") && argc == 0) {
+      buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_class_ancestors(_cl%d); })", _clt);
+      return;
+    }
     if ((!strcmp(name, "==" ) || !strcmp(name, "eql?")) && argc == 1) {
       TyKind at = comp_ntype(c, argv[0]);
       if (at == TY_CLASS) {
@@ -4455,6 +4514,18 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
         buf_printf(b, "; sp_Class _cl%da = ", _clt); emit_expr(c, argv[0], b);
         buf_printf(b, "; _cl%d.cls_id != _cl%da.cls_id; })", _clt, _clt);
+        return;
+      }
+    }
+    if ((!strcmp(name, "<") || !strcmp(name, "<=") || !strcmp(name, ">") || !strcmp(name, ">=")) && argc == 1) {
+      TyKind at = comp_ntype(c, argv[0]);
+      if (at == TY_CLASS) {
+        const char *fn = !strcmp(name, "<") ? "sp_class_lt" :
+                         !strcmp(name, "<=") ? "sp_class_le" :
+                         !strcmp(name, ">") ? "sp_class_gt" : "sp_class_ge";
+        buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_Class _cl%da = ", _clt); emit_expr(c, argv[0], b);
+        buf_printf(b, "; %s(_cl%d, _cl%da); })", fn, _clt, _clt);
         return;
       }
     }
@@ -11781,10 +11852,16 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     if (nm && !strcmp(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
     if (nm) {
       int _cidx = comp_class_index(c, nm);
-      if (_cidx >= 0)
-        buf_printf(b, "((sp_Class){%d})", _cidx);  /* class as value: TY_CLASS unboxed */
-      else
-        buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), ((sp_Class){-1}))", nm);
+      if (_cidx >= 0) {
+        buf_printf(b, "((sp_Class){%d})", _cidx);  /* user class as value: TY_CLASS unboxed */
+      }
+      else {
+        int _bcid = builtin_class_id(nm);
+        if (_bcid != 0)
+          buf_printf(b, "((sp_Class){%d})", _bcid);  /* builtin class as value */
+        else
+          buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), ((sp_Class){-1}))", nm);
+      }
     }
     else unsupported(c, id, "constant read");
     return;
@@ -11828,6 +11905,8 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     if (nm) {
       int _cpidx = comp_class_index(c, nm);
       if (_cpidx >= 0) { buf_printf(b, "((sp_Class){%d})", _cpidx); return; }
+      int _bcpid = builtin_class_id(nm);
+      if (_bcpid != 0) { buf_printf(b, "((sp_Class){%d})", _bcpid); return; }
     }
     /* unresolved qualified constant: raise NameError at runtime */
     {
@@ -14261,6 +14340,37 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ";\n");
       }
     }
+    else if (op && vt == TY_POLY) {
+      /* @ivar OP= rhs where ivar is poly (e.g. nil | user_object). Scan for a
+         unique user class defining OP and dispatch through .v.p cast. */
+      int poly_defcls = -1, poly_mi = -1;
+      for (int _ci = 0; _ci < c->nclasses; _ci++) {
+        int _di = -1;
+        int _mi2 = comp_method_in_chain(c, _ci, op, &_di);
+        if (_mi2 >= 0) { poly_mi = _mi2; poly_defcls = _di; break; }
+      }
+      if (poly_mi >= 0 && poly_defcls >= 0) {
+        int ival = nt_ref(nt, id, "value");
+        TyKind rhst = comp_ntype(c, ival);
+        Scope *pms = &c->scopes[poly_mi];
+        LocalVar *pp = pms->nparams >= 1 ? scope_local(pms, pms->pnames[0]) : NULL;
+        TyKind paramt = (pp && pp->type != TY_UNKNOWN) ? pp->type : rhst;
+        if (paramt == TY_UNKNOWN) paramt = TY_INT;
+        int iatmp = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, paramt, g_pre);
+        buf_printf(g_pre, " _t%d = ", iatmp);
+        emit_expr(c, ival, g_pre);
+        buf_puts(g_pre, ";\n");
+        buf_printf(b, "%s = sp_box_obj(sp_%s_%s((sp_%s *)(%s).v.p, _t%d), %d);\n",
+                   ref, c->classes[poly_defcls].name, mc(pms->name),
+                   c->classes[poly_defcls].name, ref, iatmp, poly_defcls);
+      }
+      else {
+        buf_printf(b, "%s %s= ", ref, op);
+        emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ";\n");
+      }
+    }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_expr(c, nt_ref(nt, id, "value"), b); buf_puts(b, ";\n");
@@ -16182,7 +16292,192 @@ char *codegen_program(const NodeTable *nt) {
       if (!is_builtin_reopen(c->classes[i].name))
         buf_printf(&b, "case %d:return SPL(\"%s\");", i, c->classes[i].name);
     }
-    buf_puts(&b, "default:return \"\";} }\n\n\n");
+    /* builtin class name cases (negative cls_ids) */
+    buf_puts(&b, "case -100:return SPL(\"Integer\");case -101:return SPL(\"Float\");");
+    buf_puts(&b, "case -102:return SPL(\"String\");case -103:return SPL(\"Symbol\");");
+    buf_puts(&b, "case -104:return SPL(\"Array\");case -105:return SPL(\"Hash\");");
+    buf_puts(&b, "case -106:return SPL(\"Range\");case -107:return SPL(\"Time\");");
+    buf_puts(&b, "case -108:return SPL(\"Module\");case -109:return SPL(\"Class\");");
+    buf_puts(&b, "case -110:return SPL(\"NilClass\");case -111:return SPL(\"TrueClass\");");
+    buf_puts(&b, "case -112:return SPL(\"FalseClass\");case -113:return SPL(\"Numeric\");");
+    buf_puts(&b, "case -114:return SPL(\"Comparable\");case -115:return SPL(\"Enumerable\");");
+    buf_puts(&b, "case -116:return SPL(\"Object\");case -117:return SPL(\"BasicObject\");");
+    buf_puts(&b, "case -118:return SPL(\"Proc\");case -119:return SPL(\"Kernel\");");
+    buf_puts(&b, "case -120:return SPL(\"IO\");case -121:return SPL(\"File\");");
+    buf_puts(&b, "case -122:return SPL(\"Exception\");case -123:return SPL(\"StandardError\");");
+    buf_puts(&b, "case -124:return SPL(\"RuntimeError\");case -125:return SPL(\"TypeError\");");
+    buf_puts(&b, "case -126:return SPL(\"ArgumentError\");case -127:return SPL(\"NameError\");");
+    buf_puts(&b, "case -128:return SPL(\"NoMethodError\");case -129:return SPL(\"StopIteration\");");
+    buf_puts(&b, "case -130:return SPL(\"Math\");case -131:return SPL(\"Complex\");");
+    buf_puts(&b, "default:return \"\";} }\n\n");
+  }
+  /* sp_class_superclass: parent class for user classes (negative ids map to
+     Object builtin). Returns ((sp_Class){-116}) for unknown/root. */
+  {
+    buf_puts(&b, "static sp_Class sp_class_superclass(sp_Class c){\n");
+    buf_puts(&b, "  switch(c.cls_id){\n");
+    for (int i = 0; i < c->nclasses; i++) {
+      if (is_builtin_reopen(c->classes[i].name)) continue;
+      int par = c->classes[i].parent;
+      if (par >= 0) {
+        buf_printf(&b, "  case %d: return ((sp_Class){%d});\n", i, par);
+      }
+      else {
+        /* Check if the ClassNode has a builtin superclass. */
+        int sc_node = nt_ref(c->nt, c->classes[i].def_node, "superclass");
+        int builtin_par = -116;  /* Object */
+        if (sc_node >= 0) {
+          const char *sc_ty = nt_type(c->nt, sc_node);
+          const char *sc_nm = (sc_ty && (!strcmp(sc_ty, "ConstantReadNode") || !strcmp(sc_ty, "ConstantPathNode"))) ? nt_str(c->nt, sc_node, "name") : NULL;
+          if (sc_nm) { int bid = builtin_class_id(sc_nm); if (bid != 0) builtin_par = bid; }
+        }
+        buf_printf(&b, "  case %d: return ((sp_Class){%d});\n", i, builtin_par);
+      }
+    }
+    buf_puts(&b, "  default: return ((sp_Class){-116});\n  }\n}\n");
+  }
+  /* Forward decl: sp_builtin_superclass is defined below but used by sp_class_is_ancestor. */
+  buf_puts(&b, "static sp_Class sp_builtin_superclass(sp_Class c);\n");
+  /* sp_class_is_ancestor(anc, desc): 1 if anc is an ancestor of desc (or same). */
+  {
+    /* sp_class_is_ancestor is declared before sp_builtin_superclass; used only by
+       the simple sp_class_le before modules. sp_class_le_mod (defined after
+       sp_class_ancestors) supersedes it. Keep simple for non-module programs. */
+    buf_puts(&b, "static int sp_class_is_ancestor(sp_Class anc, sp_Class desc);\n");
+    buf_puts(&b, "static int sp_class_is_ancestor(sp_Class anc, sp_Class desc){\n");
+    buf_puts(&b, "  sp_Class cur = desc;\n");
+    int depth = c->nclasses + 40;
+    buf_printf(&b, "  for(int _i=0;_i<%d;_i++){\n", depth);
+    buf_puts(&b, "    if(cur.cls_id==anc.cls_id)return 1;\n");
+    buf_puts(&b, "    if(cur.cls_id==-117)break;\n"); /* BasicObject: root */
+    buf_puts(&b, "    sp_Class next=cur.cls_id>=0?sp_class_superclass(cur):sp_builtin_superclass(cur);\n");
+    buf_puts(&b, "    if(next.cls_id==cur.cls_id)break;\n");
+    buf_puts(&b, "    cur=next;\n");
+    buf_puts(&b, "  }\n");
+    buf_puts(&b, "  return 0;\n}\n");
+  }
+  /* Builtin superclass chain (simplified Ruby class hierarchy) */
+  buf_puts(&b, "static sp_Class sp_builtin_superclass(sp_Class c){\n");
+  buf_puts(&b, "  switch(c.cls_id){\n");
+  /* Integer, Float -> Numeric -> Object */
+  buf_puts(&b, "  case -100:case -101: return ((sp_Class){-113});\n"); /* -> Numeric */
+  /* Numeric, String, Array, Hash, Range, Symbol, Time -> Object */
+  buf_puts(&b, "  case -102:case -103:case -104:case -105:case -106:case -107:case -113: return ((sp_Class){-116});\n");
+  /* Exception -> Object */
+  buf_puts(&b, "  case -122: return ((sp_Class){-116});\n");
+  /* StandardError, RuntimeError -> Exception */
+  buf_puts(&b, "  case -123:case -124: return ((sp_Class){-122});\n");
+  /* TypeError, ArgumentError, NameError, StopIteration -> StandardError */
+  buf_puts(&b, "  case -125:case -126:case -127:case -129: return ((sp_Class){-123});\n");
+  /* NoMethodError -> NameError */
+  buf_puts(&b, "  case -128: return ((sp_Class){-127});\n");
+  /* NilClass, TrueClass, FalseClass, Proc -> Object */
+  buf_puts(&b, "  case -110:case -111:case -112:case -118: return ((sp_Class){-116});\n");
+  /* Module -> Object, Class -> Module */
+  buf_puts(&b, "  case -108: return ((sp_Class){-116});\n");
+  buf_puts(&b, "  case -109: return ((sp_Class){-108});\n");
+  /* Object -> BasicObject */
+  buf_puts(&b, "  case -116: return ((sp_Class){-117});\n");
+  /* BasicObject: root */
+  buf_puts(&b, "  case -117: return ((sp_Class){-117});\n");
+  buf_puts(&b, "  default: return ((sp_Class){-116});\n  }\n}\n");
+
+  buf_puts(&b, "static int sp_class_lt(sp_Class a,sp_Class b){return a.cls_id!=b.cls_id&&sp_class_is_ancestor(b,a);}\n");
+  buf_puts(&b, "static int sp_class_le(sp_Class a,sp_Class b){return sp_class_is_ancestor(b,a);}\n");
+  buf_puts(&b, "static int sp_class_gt(sp_Class a,sp_Class b){return sp_class_lt(b,a);}\n");
+  buf_puts(&b, "static int sp_class_ge(sp_Class a,sp_Class b){return sp_class_le(b,a);}\n");
+  /* module-aware versions (replace after sp_class_ancestors is defined) */
+  /* sp_class_includes_<i>: static array of included module cls_ids per class */
+  /* Also update sp_class_is_ancestor to walk includes. */
+  /* Build per-class includes array by scanning the AST. */
+  {
+    /* For each user class, collect included module ids (in include order). */
+    int **cls_incs = calloc((size_t)c->nclasses, sizeof(int *));
+    int  *cls_nincs = calloc((size_t)c->nclasses, sizeof(int));
+    for (int ci = 0; ci < c->nclasses; ci++) {
+      /* scan def_node body and all reopenings */
+      for (int id = 0; id < c->nt->count; id++) {
+        const char *ty2 = nt_type(c->nt, id);
+        if (!ty2 || (strcmp(ty2, "ClassNode") && strcmp(ty2, "ModuleNode"))) continue;
+        int cp2 = nt_ref(c->nt, id, "constant_path");
+        const char *cn2 = cp2 >= 0 ? nt_str(c->nt, cp2, "name") : NULL;
+        if (!cn2 || comp_class_index(c, cn2) != ci) continue;
+        int body2 = nt_ref(c->nt, id, "body");
+        int bn2 = 0;
+        const int *stmts2 = body2 >= 0 ? nt_arr(c->nt, body2, "body", &bn2) : NULL;
+        for (int k2 = 0; k2 < bn2; k2++) {
+          const char *sty2 = nt_type(c->nt, stmts2[k2]);
+          if (!sty2 || strcmp(sty2, "CallNode")) continue;
+          const char *nm2 = nt_str(c->nt, stmts2[k2], "name");
+          if (!nm2 || strcmp(nm2, "include")) continue;
+          if (nt_ref(c->nt, stmts2[k2], "receiver") >= 0) continue;
+          int anode2 = nt_ref(c->nt, stmts2[k2], "arguments");
+          int an2 = 0;
+          const int *aargs = anode2 >= 0 ? nt_arr(c->nt, anode2, "arguments", &an2) : NULL;
+          for (int j2 = 0; j2 < an2; j2++) {
+            const char *aty2 = nt_type(c->nt, aargs[j2]);
+            const char *mname2 = (aty2 && !strcmp(aty2, "ConstantReadNode")) ? nt_str(c->nt, aargs[j2], "name") : NULL;
+            if (!mname2 && aty2 && !strcmp(aty2, "ConstantPathNode")) mname2 = nt_str(c->nt, aargs[j2], "name");
+            int mid2 = mname2 ? comp_class_index(c, mname2) : -1;
+            if (mid2 < 0) continue;
+            /* deduplicate */
+            int found2 = 0;
+            for (int q = 0; q < cls_nincs[ci]; q++) if (cls_incs[ci][q] == mid2) { found2 = 1; break; }
+            if (found2) continue;
+            cls_incs[ci] = realloc(cls_incs[ci], sizeof(int) * (size_t)(cls_nincs[ci] + 1));
+            cls_incs[ci][cls_nincs[ci]++] = mid2;
+          }
+        }
+      }
+    }
+    /* Emit sp_class_ancestors using the include info. */
+    buf_puts(&b, "static sp_PolyArray *sp_class_ancestors(sp_Class c){\n");
+    buf_puts(&b, "  sp_PolyArray *a=sp_PolyArray_new();\n");
+    buf_puts(&b, "  sp_Class cur=c;\n");
+    int depth2 = c->nclasses + 20;
+    buf_printf(&b, "  for(int _i=0;_i<%d;_i++){\n", depth2);
+    /* For builtin parent (negative cls_id), follow builtin chain. */
+    buf_puts(&b, "    if(cur.cls_id<0){\n");
+    buf_puts(&b, "      while(1){\n");
+    buf_puts(&b, "        sp_PolyArray_push(a,sp_box_class(cur));\n");
+    buf_puts(&b, "        sp_Class bn=sp_builtin_superclass(cur);\n");
+    buf_puts(&b, "        if(bn.cls_id==cur.cls_id)break;\n");
+    buf_puts(&b, "        cur=bn;\n");
+    buf_puts(&b, "      }\n");
+    buf_puts(&b, "      break;\n    }\n");
+    buf_puts(&b, "    sp_PolyArray_push(a,sp_box_class(cur));\n");
+    /* inline the includes switch for this class */
+    buf_puts(&b, "    switch(cur.cls_id){\n");
+    for (int ci = 0; ci < c->nclasses; ci++) {
+      if (cls_nincs[ci] == 0) continue;
+      buf_printf(&b, "    case %d:", ci);
+      /* Ruby includes are prepended: last include is highest priority, so
+         insert in reverse include order after the class itself. */
+      for (int q = cls_nincs[ci] - 1; q >= 0; q--)
+        buf_printf(&b, " sp_PolyArray_push(a,sp_box_class(((sp_Class){%d})));", cls_incs[ci][q]);
+      buf_puts(&b, " break;\n");
+    }
+    buf_puts(&b, "    }\n");
+    buf_puts(&b, "    sp_Class next=sp_class_superclass(cur);\n");
+    buf_puts(&b, "    if(next.cls_id==cur.cls_id)break;\n");
+    buf_puts(&b, "    cur=next;\n");
+    buf_puts(&b, "  }\n");
+    buf_puts(&b, "  return a;\n}\n\n");
+    /* Module-aware <= by walking sp_class_ancestors (replaces simpler versions). */
+    buf_puts(&b, "static int sp_class_le_mod(sp_Class a,sp_Class b){\n");
+    buf_puts(&b, "  /* a<=b: b is an ancestor of a, so b must appear in a's ancestors */\n");
+    buf_puts(&b, "  sp_PolyArray *ancs=sp_class_ancestors(a);\n");
+    buf_puts(&b, "  for(mrb_int _i=0;_i<sp_PolyArray_length(ancs);_i++){\n");
+    buf_puts(&b, "    sp_RbVal v=sp_PolyArray_get(ancs,_i);\n");
+    buf_puts(&b, "    if(v.tag==7&&(int)v.cls_id==b.cls_id)return 1;\n");
+    buf_puts(&b, "  }\n");
+    buf_puts(&b, "  return 0;\n}\n");
+    buf_puts(&b, "#undef sp_class_le\n#define sp_class_le sp_class_le_mod\n");
+    buf_puts(&b, "#undef sp_class_lt\n#define sp_class_lt(a,b) ((a).cls_id!=(b).cls_id&&sp_class_le_mod(a,b))\n");
+    buf_puts(&b, "#undef sp_class_gt\n#define sp_class_gt(a,b) ((a).cls_id!=(b).cls_id&&sp_class_le_mod(b,a))\n");
+    buf_puts(&b, "#undef sp_class_ge\n#define sp_class_ge(a,b) sp_class_le_mod(b,a)\n");
+    for (int ci = 0; ci < c->nclasses; ci++) free(cls_incs[ci]);
+    free(cls_incs); free(cls_nincs);
   }
   /* User exception hierarchy: sp_user_exc_parent(cls) -> parent class name.
      Used by sp_exc_cls_matches (rescue arms) and sp_exc_is_a (is_a?). */

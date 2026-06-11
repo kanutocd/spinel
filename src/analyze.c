@@ -4,6 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int is_builtin_class_name(const char *n) {
+  if (!n) return 0;
+  static const char *const CL[] = {
+    "Integer","Float","String","Symbol","Array","Hash","Range","Time",
+    "Module","Class","NilClass","TrueClass","FalseClass","Numeric",
+    "Comparable","Enumerable","Object","BasicObject","Proc","Kernel",
+    "IO","File","Exception","StandardError","RuntimeError","TypeError",
+    "ArgumentError","NameError","NoMethodError","StopIteration","Math",
+    "Complex","Rational","Encoding","Method","UnboundMethod","Fiber",
+    "Thread","Mutex","GC","ObjectSpace","Signal","Process","Regexp",
+    "MatchData","StringIO","StringScanner",NULL
+  };
+  for (int i = 0; CL[i]; i++) if (!strcmp(n, CL[i])) return 1;
+  return 0;
+}
+
 static int is_builtin_exception_name(const char *n) {
   if (!n) return 0;
   static const char *const EXC[] = {
@@ -398,6 +414,19 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "parameters")) return TY_POLY_ARRAY;
   }
 
+  /* TY_CLASS method dispatch -- do NOT intercept .new here; fall through to
+     the AST-based handler that knows which class the constant refers to. */
+  if (recv >= 0 && rt == TY_CLASS && strcmp(name, "new") != 0) {
+    if (argc == 0 && (!strcmp(name, "to_s") || !strcmp(name, "name") || !strcmp(name, "inspect")))
+      return TY_STRING;
+    if (argc == 0 && !strcmp(name, "nil?")) return TY_BOOL;
+    if (argc == 0 && !strcmp(name, "class")) return TY_STRING;
+    if (argc == 0 && !strcmp(name, "superclass")) return TY_CLASS;
+    if (argc == 1 && (!strcmp(name, "==") || !strcmp(name, "eql?") || !strcmp(name, "!="))) return TY_BOOL;
+    if (argc == 1 && (!strcmp(name, "<") || !strcmp(name, ">") || !strcmp(name, "<=") || !strcmp(name, ">="))) return TY_BOOL;
+    if (argc == 0 && !strcmp(name, "ancestors")) return TY_POLY_ARRAY;
+  }
+
   /* __method__ / __callee__ -> the enclosing method's name (a symbol) */
   if (recv < 0 && argc == 0 &&
       (!strcmp(name, "__method__") || !strcmp(name, "__callee__")))
@@ -476,13 +505,17 @@ static TyKind infer_call(Compiler *c, int id) {
     }
   }
 
-  /* SomeClass.name / .to_s / .inspect / .superclass -> the class-name string */
+  /* SomeClass.name / .to_s / .inspect -> class name string */
   if (recv >= 0 && argc == 0 &&
-      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect") ||
-       !strcmp(name, "superclass")) &&
+      (!strcmp(name, "name") || !strcmp(name, "to_s") || !strcmp(name, "inspect")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
     return TY_STRING;
+  /* SomeClass.superclass -> sp_Class value for the parent class */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "superclass") &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0)
+    return TY_CLASS;
 
   /* SomeClass.ancestors -> PolyArray of class objects */
   if (recv >= 0 && argc == 0 && !strcmp(name, "ancestors") &&
@@ -1970,6 +2003,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
                !strcmp(nm, "RUBY_REVISION") || !strcmp(nm, "RUBY_COPYRIGHT"))) return TY_STRING;
     if (nm && !strcmp(nm, "ARGV")) return TY_STR_ARRAY;
     if (nm && comp_class_index(c, nm) >= 0) return TY_CLASS;
+    if (nm && is_builtin_class_name(nm)) return TY_CLASS;
     return TY_UNKNOWN;
   }
   if (!strcmp(ty, "DefinedNode")) return TY_STRING;  /* a label string, or nil (NULL) */
@@ -2002,6 +2036,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
       if (nm && (!strcmp(nm, "MAX") || !strcmp(nm, "MIN"))) return TY_UNKNOWN; /* raises NameError */
     }
     if (nm && comp_class_index(c, nm) >= 0) return TY_CLASS;
+    if (nm && is_builtin_class_name(nm)) return TY_CLASS;
     return TY_UNKNOWN;
   }
   if (!strcmp(ty, "SelfNode")) {
@@ -3302,6 +3337,17 @@ static int infer_ivar_types(Compiler *c) {
       int old_ni = ci->nivars;
       int iv = comp_ivar_intern(ci, nm);
       if (ci->nivars != old_ni) changed = 1;  /* new ivar registered, need another pass */
+      /* For operator-write (@b += rhs), vt is the RHS type, not the result type.
+         When the slot holds a user object, the result is the method's return type. */
+      if (!strcmp(ty, "InstanceVariableOperatorWriteNode") && ty_is_object(ci->ivar_types[iv])) {
+        const char *op2 = nt_str(nt, id, "binary_operator");
+        int cid2 = ty_object_class(ci->ivar_types[iv]);
+        int mi2 = op2 ? comp_method_in_chain(c, cid2, op2, NULL) : -1;
+        if (mi2 >= 0 && c->scopes[mi2].ret != TY_UNKNOWN)
+          vt = c->scopes[mi2].ret;
+        else
+          vt = ci->ivar_types[iv];  /* keep existing type, don't widen */
+      }
       TyKind merged = ty_unify(ci->ivar_types[iv], vt);
       if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
     }
@@ -4512,8 +4558,15 @@ static int infer_param_types(Compiler *c) {
         int iidx = nm ? comp_ivar_index(&c->classes[s2->class_id], nm) : -1;
         slot_t = iidx >= 0 ? c->classes[s2->class_id].ivar_types[iidx] : TY_UNKNOWN;
       }
-      if (!ty_is_object(slot_t)) continue;
-      int cid2 = ty_object_class(slot_t);
+      /* For TY_POLY slots, scan all user classes for a matching operator method. */
+      int cid2 = -1;
+      if (ty_is_object(slot_t)) cid2 = ty_object_class(slot_t);
+      else if (slot_t == TY_POLY) {
+        for (int _sc = 0; _sc < c->nclasses; _sc++) {
+          if (comp_method_in_chain(c, _sc, op, NULL) >= 0) { cid2 = _sc; break; }
+        }
+      }
+      if (cid2 < 0) continue;
       int mi2 = comp_method_in_chain(c, cid2, op, NULL);
       if (mi2 < 0) continue;
       Scope *ms2 = &c->scopes[mi2];
