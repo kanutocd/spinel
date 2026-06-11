@@ -619,7 +619,21 @@ static TyKind infer_call(Compiler *c, int id) {
       int mi = comp_method_in_chain(c, self->class_id, name, NULL);
       if (mi < 0 && self->is_cmethod)
         mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
-      if (mi >= 0) return method_call_ret(c, mi, id);
+      if (mi >= 0) {
+        TyKind r = method_call_ret(c, mi, id);
+        /* Unify with descendant direct overrides: codegen dispatch will
+           emit a cls_id switch over all overrides, so the return type
+           must accommodate every override's return type. */
+        for (int k = 0; k < c->nclasses; k++) {
+          int is_desc = 0;
+          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
+            if (p == self->class_id) { is_desc = 1; break; }
+          if (!is_desc) continue;
+          int dmi = comp_method_in_class(c, k, name);
+          if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
+        }
+        return r;
+      }
     }
   }
 
@@ -1270,7 +1284,10 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv >= 0 && argc == 1 && is_arith_op(name)) {
     if (rt == TY_STRING) {
       if (!strcmp(name, "%")) return TY_STRING;  /* sprintf (array or single value) */
-      if (!strcmp(name, "+") || !strcmp(name, "*")) return TY_STRING;
+      if (!strcmp(name, "+") || !strcmp(name, "*")) {
+        if (a0 == TY_POLY) return TY_POLY;  /* codegen uses sp_poly_add for poly operand */
+        return TY_STRING;
+      }
       return TY_UNKNOWN;
     }
     /* array + (same kind) -> same kind */
@@ -3326,10 +3343,14 @@ static int infer_param_types(Compiler *c) {
 
     if (recv < 0) {
       int mi = comp_method_index(c, name);
+      int caller_cid = -1;
       if (mi < 0) {
         Scope *self = comp_scope_of(c, id);
         if (self->class_id >= 0) {
-          mi = comp_method_in_chain(c, self->class_id, name, NULL);
+          caller_cid = self->class_id;
+          int def_cid = -1;
+          mi = comp_method_in_chain(c, self->class_id, name, &def_cid);
+          if (mi >= 0 && def_cid >= 0) caller_cid = def_cid;
           /* inside a class method: also check sibling class methods */
           if (mi < 0 && self->is_cmethod)
             mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
@@ -3337,6 +3358,20 @@ static int infer_param_types(Compiler *c) {
       }
       if (mi < 0) mi = comp_included_method_index(c, name);
       changed |= bind_call_params(c, id, mi);
+      /* Propagate to descendant classes that directly override the same method.
+         When Base#foo calls bar(arg), and Sub overrides bar, Sub#bar must also
+         receive the same arg types so the cls_id-switch dispatch is type-safe. */
+      if (mi >= 0 && caller_cid >= 0) {
+        for (int k = 0; k < c->nclasses; k++) {
+          if (k == caller_cid) continue;
+          int is_desc = 0;
+          for (int p = c->classes[k].parent; p >= 0; p = c->classes[p].parent)
+            if (p == caller_cid) { is_desc = 1; break; }
+          if (!is_desc) continue;
+          int dmi = comp_method_in_class(c, k, name);
+          if (dmi >= 0) changed |= bind_call_params(c, id, dmi);
+        }
+      }
       continue;
     }
     /* Class.new -> initialize params; Class.cmethod -> cmethod params */
