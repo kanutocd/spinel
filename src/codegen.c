@@ -3507,20 +3507,27 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  /* poly_val.call — the poly value is a proc; unbox then call. */
+  /* poly_val.call — the poly value is a proc; unbox then call.
+     Only applies when no user-defined class has a `call` method (otherwise
+     use the existing poly dispatch switch which handles user-defined call). */
   if (recv >= 0 && comp_ntype(c, recv) == TY_POLY &&
       (!strcmp(name, "call") || !strcmp(name, "()"))) {
-    int t = ++g_tmp;
-    emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "sp_RbVal _t%d = ", t); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
-    buf_printf(b, "sp_proc_call((sp_Proc *)_t%d.v.p, (mrb_int[16]){", t);
-    for (int k = 0; k < argc; k++) {
-      if (k) buf_puts(b, ", ");
-      if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
-      else emit_expr(c, argv[k], b);
+    int has_user_call = 0;
+    for (int _k = 0; _k < c->nclasses && !has_user_call; _k++)
+      if (comp_method_in_class(c, _k, name) >= 0) has_user_call = 1;
+    if (!has_user_call) {
+      int t = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_RbVal _t%d = ", t); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+      buf_printf(b, "sp_proc_call((sp_Proc *)_t%d.v.p, (mrb_int[16]){", t);
+      for (int k = 0; k < argc; k++) {
+        if (k) buf_puts(b, ", ");
+        if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[k], b);
+      }
+      buf_puts(b, "})");
+      return;
     }
-    buf_puts(b, "})");
-    return;
   }
   /* <proc>.call(args) / .() / [] -> sp_proc_call with the mrb_int[] ABI.
      (A `&block`-param `.call` is handled earlier by the inline path, whose
@@ -4216,7 +4223,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     int dispatch_cid = (g_emitting_class_id >= 0) ? g_emitting_class_id : self->class_id;
     if (dispatch_cid >= 0) {
       if (comp_reader_in_chain(c, dispatch_cid, name, NULL)) {
-        buf_printf(b, "%s->iv_%s", g_self, name);
+        const char *rn = comp_resolve_alias(c, dispatch_cid, name);
+        buf_printf(b, "%s->iv_%s", g_self, rn);
         return;
       }
       int mi = comp_method_in_chain(c, dispatch_cid, name, NULL);
@@ -6122,7 +6130,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     int cid = ty_object_class(rt);
     /* attr reader -> field access (recv).iv_x */
     if (comp_reader_in_chain(c, cid, name, NULL)) {
-      buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ")->iv_%s", name);
+      const char *rn2 = comp_resolve_alias(c, cid, name);
+      buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ")->iv_%s", rn2);
       return;
     }
     int mi = comp_method_in_chain(c, cid, name, NULL);
@@ -6355,9 +6364,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         }
         int rdcls = -1;
         if (comp_reader_in_chain(c, k, name, &rdcls)) {
+          const char *rn3 = comp_resolve_alias(c, k, name);
           char fld[600];
-          snprintf(fld, sizeof fld, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[rdcls].name, tv, name);
-          char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", name);
+          snprintf(fld, sizeof fld, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[rdcls].name, tv, rn3);
+          char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", rn3);
           int ivx = comp_ivar_index(&c->classes[rdcls], ivn);
           TyKind ivt = ivx >= 0 ? c->classes[rdcls].ivar_types[ivx] : TY_INT;
           buf_printf(b, " case %d: _t%d = ", k, tr);

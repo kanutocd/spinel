@@ -682,12 +682,16 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "is_a?") || !strcmp(name, "kind_of?") || !strcmp(name, "instance_of?") ||
         !strcmp(name, "respond_to?") || !strcmp(name, "==") || !strcmp(name, "!=") ||
         !strcmp(name, "nil?") || !strcmp(name, "equal?") || !strcmp(name, "frozen?")) return TY_BOOL;
-    /* attr reader */
-    if (comp_reader_in_chain(c, cid, name, NULL)) {
-      char ivn[256];
-      snprintf(ivn, sizeof ivn, "@%s", name);
-      int iv = comp_ivar_index(cls, ivn);
-      if (iv >= 0) return cls->ivar_types[iv];
+    /* attr reader (resolve alias so `alias v access_token` returns @access_token type) */
+    { int rdcls = -1;
+      if (comp_reader_in_chain(c, cid, name, &rdcls)) {
+        const char *rname = comp_resolve_alias(c, cid, name);
+        char ivn[256];
+        snprintf(ivn, sizeof ivn, "@%s", rname);
+        ClassInfo *rci = (rdcls >= 0 && rdcls < c->nclasses) ? &c->classes[rdcls] : cls;
+        int iv = comp_ivar_index(rci, ivn);
+        if (iv >= 0) return rci->ivar_types[iv];
+      }
     }
     /* attr writer: obj.x= returns the assigned value */
     size_t ln = strlen(name);
@@ -720,11 +724,15 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv < 0) {
     Scope *self = comp_scope_of(c, id);
     if (self->class_id >= 0) {
-      if (comp_reader_in_chain(c, self->class_id, name, NULL)) {
-        char ivn[256];
-        snprintf(ivn, sizeof ivn, "@%s", name);
-        int iv = comp_ivar_index(&c->classes[self->class_id], ivn);
-        if (iv >= 0) return c->classes[self->class_id].ivar_types[iv];
+      { int rdcls2 = -1;
+        if (comp_reader_in_chain(c, self->class_id, name, &rdcls2)) {
+          const char *rname2 = comp_resolve_alias(c, self->class_id, name);
+          char ivn[256];
+          snprintf(ivn, sizeof ivn, "@%s", rname2);
+          ClassInfo *rci2 = (rdcls2 >= 0 && rdcls2 < c->nclasses) ? &c->classes[rdcls2] : &c->classes[self->class_id];
+          int iv = comp_ivar_index(rci2, ivn);
+          if (iv >= 0) return rci2->ivar_types[iv];
+        }
       }
       /* bare `new` inside a class method returns an instance of self's class */
       if (self->is_cmethod && !strcmp(name, "new"))
@@ -2278,67 +2286,102 @@ static void register_attr_call(Compiler *c, ClassInfo *cls, int s, int singleton
 /* Collect attr_reader/attr_writer/attr_accessor declarations in class
    bodies, registering backing ivars + reader/writer method names.
    Also scans class << self bodies for singleton-level attr_accessors. */
-static void register_attrs(Compiler *c) {
+static void register_attrs_body(Compiler *c, ClassInfo *cls, int body) {
   const NodeTable *nt = c->nt;
-  for (int ci = 0; ci < c->nclasses; ci++) {
-    ClassInfo *cls = &c->classes[ci];
-    int body = nt_ref(nt, cls->def_node, "body");
-    int n = 0;
-    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
-    for (int k = 0; k < n; k++) {
-      int s = stmts[k];
-      const char *sty = nt_type(nt, s);
-      if (!sty) continue;
-      if (!strcmp(sty, "CallNode")) {
-        register_attr_call(c, cls, s, 0);
-      } else if (!strcmp(sty, "SingletonClassNode")) {
-        /* class << self; attr_accessor :x; end */
-        int sbody = nt_ref(nt, s, "body");
-        if (sbody < 0) continue;
-        int sn = 0;
-        const int *sstmts = nt_arr(nt, sbody, "body", &sn);
-        for (int j = 0; j < sn; j++) {
-          int ss = sstmts[j];
-          const char *ssty = nt_type(nt, ss);
-          if (ssty && !strcmp(ssty, "CallNode"))
-            register_attr_call(c, cls, ss, 1);
-        }
+  int n = 0;
+  const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  for (int k = 0; k < n; k++) {
+    int s = stmts[k];
+    const char *sty = nt_type(nt, s);
+    if (!sty) continue;
+    if (!strcmp(sty, "CallNode")) {
+      register_attr_call(c, cls, s, 0);
+    }
+    else if (!strcmp(sty, "SingletonClassNode")) {
+      /* class << self; attr_accessor :x; end */
+      int sbody = nt_ref(nt, s, "body");
+      if (sbody < 0) continue;
+      int sn = 0;
+      const int *sstmts = nt_arr(nt, sbody, "body", &sn);
+      for (int j = 0; j < sn; j++) {
+        int ss = sstmts[j];
+        const char *ssty = nt_type(nt, ss);
+        if (ssty && !strcmp(ssty, "CallNode"))
+          register_attr_call(c, cls, ss, 1);
       }
     }
   }
 }
 
-/* Collect `alias new old` (AliasMethodNode) and `alias_method :new, :old`
-   (CallNode) statements in class bodies into the class alias table. */
-static void register_aliases(Compiler *c) {
+static void register_attrs(Compiler *c) {
   const NodeTable *nt = c->nt;
+  /* Pass 1: process primary definition bodies. */
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cls = &c->classes[ci];
-    int body = nt_ref(nt, cls->def_node, "body");
-    int n = 0;
-    const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
-    for (int k = 0; k < n; k++) {
-      int s = stmts[k];
-      const char *sty = nt_type(nt, s);
-      if (!sty) continue;
-      if (!strcmp(sty, "AliasMethodNode")) {
-        int nn = nt_ref(nt, s, "new_name");
-        int on = nt_ref(nt, s, "old_name");
-        const char *nw = nn >= 0 ? nt_str(nt, nn, "value") : NULL;
-        const char *od = on >= 0 ? nt_str(nt, on, "value") : NULL;
-        comp_add_alias(cls, nw, od);
-      }
-      else if (!strcmp(sty, "CallNode")) {
-        const char *nm = nt_str(nt, s, "name");
-        if (!nm || strcmp(nm, "alias_method")) continue;
-        int args = nt_ref(nt, s, "arguments");
-        int an = 0;
-        const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-        if (an >= 2 && nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "SymbolNode") &&
-            nt_type(nt, argv[1]) && !strcmp(nt_type(nt, argv[1]), "SymbolNode"))
-          comp_add_alias(cls, nt_str(nt, argv[0], "value"), nt_str(nt, argv[1], "value"));
-      }
+    register_attrs_body(c, cls, nt_ref(nt, cls->def_node, "body"));
+  }
+  /* Pass 2: scan all ClassNode/ModuleNode reopenings. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || (strcmp(ty, "ClassNode") && strcmp(ty, "ModuleNode"))) continue;
+    int cp = nt_ref(nt, id, "constant_path");
+    const char *cname = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!cname) continue;
+    int ci = comp_class_index(c, cname);
+    if (ci < 0) continue;
+    if (id == c->classes[ci].def_node) continue;  /* already handled above */
+    register_attrs_body(c, &c->classes[ci], nt_ref(nt, id, "body"));
+  }
+}
+
+/* Collect `alias new old` (AliasMethodNode) and `alias_method :new, :old`
+   (CallNode) statements in class bodies into the class alias table. */
+static void register_aliases_body(Compiler *c, ClassInfo *cls, int body) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  for (int k = 0; k < n; k++) {
+    int s = stmts[k];
+    const char *sty = nt_type(nt, s);
+    if (!sty) continue;
+    if (!strcmp(sty, "AliasMethodNode")) {
+      int nn = nt_ref(nt, s, "new_name");
+      int on = nt_ref(nt, s, "old_name");
+      const char *nw = nn >= 0 ? nt_str(nt, nn, "value") : NULL;
+      const char *od = on >= 0 ? nt_str(nt, on, "value") : NULL;
+      comp_add_alias(cls, nw, od);
     }
+    else if (!strcmp(sty, "CallNode")) {
+      const char *nm = nt_str(nt, s, "name");
+      if (!nm || strcmp(nm, "alias_method")) continue;
+      int args = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an >= 2 && nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "SymbolNode") &&
+          nt_type(nt, argv[1]) && !strcmp(nt_type(nt, argv[1]), "SymbolNode"))
+        comp_add_alias(cls, nt_str(nt, argv[0], "value"), nt_str(nt, argv[1], "value"));
+    }
+  }
+}
+
+static void register_aliases(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  /* Pass 1: primary definition bodies. */
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    ClassInfo *cls = &c->classes[ci];
+    register_aliases_body(c, cls, nt_ref(nt, cls->def_node, "body"));
+  }
+  /* Pass 2: reopened class/module bodies. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || (strcmp(ty, "ClassNode") && strcmp(ty, "ModuleNode"))) continue;
+    int cp = nt_ref(nt, id, "constant_path");
+    const char *cname = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!cname) continue;
+    int ci = comp_class_index(c, cname);
+    if (ci < 0) continue;
+    if (id == c->classes[ci].def_node) continue;
+    register_aliases_body(c, &c->classes[ci], nt_ref(nt, id, "body"));
   }
 }
 
