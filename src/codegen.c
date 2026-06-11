@@ -1787,6 +1787,187 @@ static int emit_collect_expr(Compiler *c, int id, Buf *b) {
       }
     }
   }
+  /* array.each_cons(n).map { |pair| } or { |a,b| } or { |(a,b)| } chain */
+  if ((!strcmp(name, "map") || !strcmp(name, "collect")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_cons") &&
+      nt_ref(nt, recv, "block") < 0) {
+    int ec_recv = nt_ref(nt, recv, "receiver");
+    int ec_args = nt_ref(nt, recv, "arguments");
+    int ec_argc = 0; const int *ec_argv = ec_args >= 0 ? nt_arr(nt, ec_args, "arguments", &ec_argc) : NULL;
+    if (ec_argc == 1 && ec_recv >= 0) {
+      TyKind arr_ec = comp_ntype(c, ec_recv);
+      if (ty_is_array(arr_ec)) {
+        const char *kec = (arr_ec == TY_POLY_ARRAY) ? "Poly" : array_kind(arr_ec);
+        if (kec) {
+          TyKind restype_ec = comp_ntype(c, id);
+          int res_poly_ec = (restype_ec == TY_POLY_ARRAY);
+          const char *rk_ec = res_poly_ec ? "Poly" : array_kind(restype_ec);
+          if (!rk_ec) rk_ec = "Int";
+          int body_ec = nt_ref(nt, block, "body");
+          int bn_ec = 0; const int *bb_ec = body_ec >= 0 ? nt_arr(nt, body_ec, "body", &bn_ec) : NULL;
+          if (bn_ec >= 1) {
+            int ta_ec = ++g_tmp, tn_ec = ++g_tmp, tres_ec = ++g_tmp, ti_ec = ++g_tmp;
+            Buf rb_ec; memset(&rb_ec, 0, sizeof rb_ec); emit_expr(c, ec_recv, &rb_ec);
+            emit_indent(g_pre, g_indent); emit_ctype(c, arr_ec, g_pre);
+            buf_printf(g_pre, " _t%d = %s;\n", ta_ec, rb_ec.p ? rb_ec.p : ""); free(rb_ec.p);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "mrb_int _t%d = ", tn_ec); emit_expr(c, ec_argv[0], g_pre); buf_puts(g_pre, ";\n");
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", rk_ec, tres_ec, rk_ec);
+            emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres_ec);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++) {\n",
+                       ti_ec, ti_ec, tn_ec, kec, ta_ec, ti_ec);
+            int np_ec = 0; while (block_param_name(c, block, np_ec)) np_ec++;
+            int is_multi_ec = block_param_is_multi(c, block, 0);
+            if (is_multi_ec) {
+              /* |(a, b)| destructuring: assign each leaf from window */
+              int lc_ec = block_param_multi_count(c, block, 0);
+              for (int li = 0; li < lc_ec; li++) {
+                const char *ln = block_param_multi_leaf(c, block, 0, li);
+                if (!ln) continue;
+                emit_indent(g_pre, g_indent + 1);
+                buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n",
+                           rename_local(ln), kec, ta_ec, ti_ec, li);
+              }
+            }
+            else if (np_ec > 1) {
+              /* |a, b| flat multi-param: each element */
+              for (int pj = 0; pj < np_ec; pj++) {
+                const char *pn = block_param_name(c, block, pj); if (!pn) break;
+                emit_indent(g_pre, g_indent + 1);
+                buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n",
+                           rename_local(pn), kec, ta_ec, ti_ec, pj);
+              }
+            }
+            else if (np_ec == 1) {
+              /* |pair| single param: slice of the window */
+              const char *p0_ec = block_param_name(c, block, 0);
+              const char *p0_ec_r = p0_ec ? rename_local(p0_ec) : NULL;
+              if (p0_ec_r) {
+                emit_indent(g_pre, g_indent + 1);
+                buf_printf(g_pre, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n",
+                           p0_ec_r, kec, ta_ec, ti_ec, tn_ec);
+              }
+            }
+            for (int j = 0; j < bn_ec - 1; j++) emit_stmt(c, bb_ec[j], g_pre, g_indent + 1);
+            int saveInd_ec = g_indent; g_indent = g_indent + 1;
+            Buf vb_ec; memset(&vb_ec, 0, sizeof vb_ec); emit_expr(c, bb_ec[bn_ec - 1], &vb_ec);
+            g_indent = saveInd_ec;
+            TyKind bty_ec = comp_ntype(c, bb_ec[bn_ec - 1]);
+            emit_indent(g_pre, g_indent + 1);
+            buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk_ec, tres_ec);
+            if (res_poly_ec && bty_ec != TY_POLY) {
+              Buf bx_ec; memset(&bx_ec, 0, sizeof bx_ec);
+              emit_boxed_text(c, bty_ec, vb_ec.p ? vb_ec.p : "", &bx_ec);
+              buf_puts(g_pre, bx_ec.p ? bx_ec.p : ""); free(bx_ec.p);
+            }
+            else buf_puts(g_pre, vb_ec.p ? vb_ec.p : "");
+            buf_puts(g_pre, ");\n"); free(vb_ec.p);
+            emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+            buf_printf(b, "_t%d", tres_ec);
+            return 1;
+          }
+        }
+      }
+    }
+  }
+
+  /* array.each_cons(n).with_index(off).map { |pair, i| } or { |(a,b), i| } chain */
+  if ((!strcmp(name, "map") || !strcmp(name, "collect")) &&
+      nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "with_index") &&
+      nt_ref(nt, recv, "block") < 0) {
+    int wi_recv = nt_ref(nt, recv, "receiver");
+    if (wi_recv >= 0 && nt_type(nt, wi_recv) && !strcmp(nt_type(nt, wi_recv), "CallNode") &&
+        nt_str(nt, wi_recv, "name") && !strcmp(nt_str(nt, wi_recv, "name"), "each_cons") &&
+        nt_ref(nt, wi_recv, "block") < 0) {
+      int ec_recv2 = nt_ref(nt, wi_recv, "receiver");
+      int ec_args2 = nt_ref(nt, wi_recv, "arguments");
+      int ec_argc2 = 0; const int *ec_argv2 = ec_args2 >= 0 ? nt_arr(nt, ec_args2, "arguments", &ec_argc2) : NULL;
+      int wi_args = nt_ref(nt, recv, "arguments");
+      int wi_argc = 0; const int *wi_argv = wi_args >= 0 ? nt_arr(nt, wi_args, "arguments", &wi_argc) : NULL;
+      if (ec_argc2 == 1 && ec_recv2 >= 0) {
+        TyKind arr_wi = comp_ntype(c, ec_recv2);
+        if (ty_is_array(arr_wi)) {
+          const char *kwi = (arr_wi == TY_POLY_ARRAY) ? "Poly" : array_kind(arr_wi);
+          if (kwi) {
+            TyKind restype_wi = comp_ntype(c, id);
+            int res_poly_wi = (restype_wi == TY_POLY_ARRAY);
+            const char *rk_wi = res_poly_wi ? "Poly" : array_kind(restype_wi);
+            if (!rk_wi) rk_wi = "Int";
+            int body_wi = nt_ref(nt, block, "body");
+            int bn_wi = 0; const int *bb_wi = body_wi >= 0 ? nt_arr(nt, body_wi, "body", &bn_wi) : NULL;
+            if (bn_wi >= 1) {
+              int ta_wi = ++g_tmp, tn_wi = ++g_tmp, tres_wi = ++g_tmp;
+              int ti_wi = ++g_tmp, toff_wi = ++g_tmp, tidx_wi = ++g_tmp;
+              Buf rb_wi; memset(&rb_wi, 0, sizeof rb_wi); emit_expr(c, ec_recv2, &rb_wi);
+              emit_indent(g_pre, g_indent); emit_ctype(c, arr_wi, g_pre);
+              buf_printf(g_pre, " _t%d = %s;\n", ta_wi, rb_wi.p ? rb_wi.p : ""); free(rb_wi.p);
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "mrb_int _t%d = ", tn_wi); emit_expr(c, ec_argv2[0], g_pre); buf_puts(g_pre, ";\n");
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "mrb_int _t%d = ", toff_wi);
+              if (wi_argc > 0 && wi_argv) { emit_expr(c, wi_argv[0], g_pre); }
+              else { buf_puts(g_pre, "0"); }
+              buf_puts(g_pre, ";\n");
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", rk_wi, tres_wi, rk_wi);
+              emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tres_wi);
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "mrb_int _t%d = _t%d;\n", tidx_wi, toff_wi);
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d + _t%d - 1 < sp_%sArray_length(_t%d); _t%d++, _t%d++) {\n",
+                         ti_wi, ti_wi, tn_wi, kwi, ta_wi, ti_wi, tidx_wi);
+              /* assign second param (index) */
+              const char *idx_p_wi = block_param_name(c, block, 1);
+              if (idx_p_wi) {
+                emit_indent(g_pre, g_indent + 1);
+                buf_printf(g_pre, "lv_%s = _t%d;\n", rename_local(idx_p_wi), tidx_wi);
+              }
+              if (block_param_is_multi(c, block, 0)) {
+                int lc_wi = block_param_multi_count(c, block, 0);
+                for (int li = 0; li < lc_wi; li++) {
+                  const char *ln = block_param_multi_leaf(c, block, 0, li);
+                  if (!ln) continue;
+                  emit_indent(g_pre, g_indent + 1);
+                  buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n",
+                             rename_local(ln), kwi, ta_wi, ti_wi, li);
+                }
+              }
+              else {
+                const char *pair_p_wi = block_param_name(c, block, 0);
+                if (pair_p_wi) {
+                  emit_indent(g_pre, g_indent + 1);
+                  buf_printf(g_pre, "lv_%s = sp_%sArray_slice(_t%d, _t%d, _t%d);\n",
+                             rename_local(pair_p_wi), kwi, ta_wi, ti_wi, tn_wi);
+                }
+              }
+              for (int j = 0; j < bn_wi - 1; j++) emit_stmt(c, bb_wi[j], g_pre, g_indent + 1);
+              int saveInd_wi = g_indent; g_indent = g_indent + 1;
+              Buf vb_wi; memset(&vb_wi, 0, sizeof vb_wi); emit_expr(c, bb_wi[bn_wi - 1], &vb_wi);
+              g_indent = saveInd_wi;
+              TyKind bty_wi = comp_ntype(c, bb_wi[bn_wi - 1]);
+              emit_indent(g_pre, g_indent + 1);
+              buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk_wi, tres_wi);
+              if (res_poly_wi && bty_wi != TY_POLY) {
+                Buf bx_wi; memset(&bx_wi, 0, sizeof bx_wi);
+                emit_boxed_text(c, bty_wi, vb_wi.p ? vb_wi.p : "", &bx_wi);
+                buf_puts(g_pre, bx_wi.p ? bx_wi.p : ""); free(bx_wi.p);
+              }
+              else buf_puts(g_pre, vb_wi.p ? vb_wi.p : "");
+              buf_puts(g_pre, ");\n"); free(vb_wi.p);
+              emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+              buf_printf(b, "_t%d", tres_wi);
+              return 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
   if (ty_is_hash(rt)) return emit_hash_collect_expr(c, id, b);
   int range_recv = (rt == TY_RANGE);
   if (rt == TY_POLY) {
@@ -6349,20 +6530,33 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   /* `arr[i] = v` in expression position: do the store, evaluate to the rhs
      (Ruby []= returns the assigned value). The statement form is emitted
      elsewhere; this covers rvalue chains like `b = arr[i] = v`. */
-  /* a[i, n] = src  —  slice assignment (same-length only) */
+  /* a[i, n] = src  —  slice assignment */
   if (recv >= 0 && ty_is_array(rt) && !strcmp(name, "[]=") && argc == 3) {
     const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
-    if (k) {
+    TyKind rhs_ty = comp_ntype(c, argv[2]);
+    if (k && ty_is_array(rhs_ty)) {
+      /* src is an array: copy elements from src into arr starting at i */
       int ta = ++g_tmp, ti = ++g_tmp, ts = ++g_tmp, tj = ++g_tmp;
       buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
       buf_printf(b, "; mrb_int _t%d = ", ti); emit_expr(c, argv[0], b); buf_puts(b, "; ");
       buf_printf(b, "sp_%sArray *_t%d = ", k, ts); emit_expr(c, argv[2], b); buf_puts(b, "; ");
       buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++)", tj, tj, k, ts, tj);
-      if (rt == TY_POLY_ARRAY)
-        buf_printf(b, " sp_%sArray_set(_t%d, _t%d + _t%d, sp_%sArray_get(_t%d, _t%d));", k, ta, ti, tj, k, ts, tj);
-      else
-        buf_printf(b, " sp_%sArray_set(_t%d, _t%d + _t%d, sp_%sArray_get(_t%d, _t%d));", k, ta, ti, tj, k, ts, tj);
+      buf_printf(b, " sp_%sArray_set(_t%d, _t%d + _t%d, sp_%sArray_get(_t%d, _t%d));", k, ta, ti, tj, k, ts, tj);
       buf_printf(b, " _t%d; })", ts);
+      return;
+    }
+    if (k && !ty_is_array(rhs_ty)) {
+      /* scalar RHS: set element at start index and return the scalar value */
+      int ta2 = ++g_tmp, ti2 = ++g_tmp, tv2 = ++g_tmp;
+      buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta2); emit_expr(c, recv, b);
+      buf_printf(b, "; mrb_int _t%d = ", ti2); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+      if (rt == TY_POLY_ARRAY) {
+        buf_printf(b, "sp_RbVal _t%d = ", tv2); emit_boxed(c, argv[2], b);
+      }
+      else {
+        emit_ctype(c, ty_array_elem(rt), b); buf_printf(b, " _t%d = ", tv2); emit_expr(c, argv[2], b);
+      }
+      buf_printf(b, "; sp_%sArray_set(_t%d, _t%d, _t%d); _t%d; })", k, ta2, ti2, tv2, tv2);
       return;
     }
   }
@@ -7489,7 +7683,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "lstrip"))     buf_printf(b, "sp_str_lstrip(%s)", r);
       else if (!strcmp(name, "rstrip"))     buf_printf(b, "sp_str_rstrip(%s)", r);
       else if (!strcmp(name, "chomp") && argc == 1) {
-        buf_printf(b, "sp_str_chomp_sep(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        const char *a0ty = nt_type(nt, argv[0]);
+        if (a0ty && !strcmp(a0ty, "NilNode")) {
+          /* chomp(nil) returns the string unchanged */
+          buf_puts(b, r);
+        }
+        else {
+          buf_printf(b, "sp_str_chomp_sep(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        }
       }
       else if (!strcmp(name, "chomp"))      buf_printf(b, "sp_str_chomp(%s)", r);
       else if (!strcmp(name, "chop"))       buf_printf(b, "sp_str_chop(%s)", r);
@@ -9448,9 +9649,9 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
     int right = nt_ref(nt, id, "right");
     int excl = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
     buf_puts(b, "sp_range_new(");
-    if (left >= 0) emit_expr(c, left, b); else buf_puts(b, "0");
+    if (left >= 0) emit_expr(c, left, b); else buf_puts(b, "INTPTR_MIN");  /* beginless */
     buf_puts(b, ", ");
-    if (right >= 0) emit_expr(c, right, b); else buf_puts(b, "0");
+    if (right >= 0) emit_expr(c, right, b); else buf_puts(b, "INTPTR_MAX");  /* endless */
     buf_printf(b, ", %d)", excl);
     return;
   }
