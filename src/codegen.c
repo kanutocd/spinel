@@ -5285,6 +5285,32 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, " && _t%d <= ", tv); emit_expr(c, argv[1], b); buf_puts(b, "); })");
       return;
     }
+    /* Comparable: user type with <=> method */
+    if (ty_is_object(rt)) {
+      int cid_b = ty_object_class(rt);
+      int defcls_b = -1;
+      int mi_b = comp_method_in_chain(c, cid_b, "<=>", &defcls_b);
+      if (mi_b >= 0) {
+        int ts = ++g_tmp, tlo = ++g_tmp, thi = ++g_tmp;
+        const char *cname = c->classes[defcls_b].name;
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", ts);
+        Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+        buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", tlo);
+        Buf lb; memset(&lb, 0, sizeof lb); emit_expr(c, argv[0], &lb);
+        buf_puts(g_pre, lb.p ? lb.p : ""); buf_puts(g_pre, ";\n"); free(lb.p);
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", thi);
+        Buf hb; memset(&hb, 0, sizeof hb); emit_expr(c, argv[1], &hb);
+        buf_puts(g_pre, hb.p ? hb.p : ""); buf_puts(g_pre, ";\n"); free(hb.p);
+        buf_printf(b, "(sp_%s_%s((sp_%s *)_t%d, _t%d) >= 0 && sp_%s_%s((sp_%s *)_t%d, _t%d) <= 0)",
+                   cname, mc("<=>"), cname, ts, tlo,
+                   cname, mc("<=>"), cname, ts, thi);
+        return;
+      }
+    }
   }
 
   /* object_id: a stable integer id. Int uses MRI's 2n+1; pointer-backed
