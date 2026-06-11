@@ -2963,6 +2963,36 @@ static void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const ch
           buf_printf(out, "%s", default_value(pt));
         }
       }
+      else if (m->kwrest_idx >= 0 && i == m->kwrest_idx) {
+        /* Collect remaining (unbound) keyword args into a sp_SymPolyHash. */
+        int krhash = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_SymPolyHash *_t%d = sp_SymPolyHash_new();\n", krhash);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", krhash);
+        if (kwh >= 0 && ds_hash_tmp < 0) {
+          int en3 = 0; const int *elems3 = nt_arr(nt, kwh, "elements", &en3);
+          for (int e3 = 0; e3 < en3; e3++) {
+            int key3 = nt_ref(nt, elems3[e3], "key");
+            int val3 = nt_ref(nt, elems3[e3], "value");
+            if (key3 < 0 || val3 < 0) continue;
+            const char *kty3 = nt_type(nt, key3);
+            const char *kname3 = (kty3 && !strcmp(kty3, "SymbolNode")) ? nt_str(nt, key3, "value") : NULL;
+            if (!kname3) continue;
+            int consumed = 0;
+            for (int jj = 0; jj < m->nparams; jj++) {
+              if (jj == m->kwrest_idx) continue;
+              if (m->pnames[jj] && !strcmp(m->pnames[jj], kname3)) { consumed = 1; break; }
+            }
+            if (consumed) continue;
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_SymPolyHash_set(_t%d, sp_sym_intern(\"%s\"), ", krhash, kname3);
+            emit_boxed(c, val3, g_pre);
+            buf_puts(g_pre, ");\n");
+          }
+        }
+        buf_printf(out, "_t%d", krhash);
+      }
       else if (i < pos_argc) {
         emit_arg_or_default(c, m, i, argv[i], out);
       }

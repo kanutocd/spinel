@@ -2229,6 +2229,25 @@ static void collect_def_params(Compiler *c, int def_id, Scope *s) {
     int dv = !strcmp(pty, "OptionalKeywordParameterNode") ? nt_ref(c->nt, kws[i], "value") : -1;
     if (pname) scope_add_param(s, pname, dv);
   }
+  int kwrp = nt_ref(c->nt, pn, "keyword_rest");
+  if (kwrp >= 0) {
+    const char *kwrpty = nt_type(c->nt, kwrp);
+    if (kwrpty && !strcmp(kwrpty, "KeywordRestParameterNode")) {
+      const char *kwrname = nt_str(c->nt, kwrp, "name");
+      if (kwrname) {
+        LocalVar *lv = scope_local_intern(s, kwrname);
+        lv->is_param = 1;
+        lv->type = TY_SYM_POLY_HASH;
+        if (s->nparams % 8 == 0) {
+          s->pnames   = realloc(s->pnames,   sizeof(char *) * (size_t)(s->nparams + 8));
+          s->pdefault = realloc(s->pdefault, sizeof(int)    * (size_t)(s->nparams + 8));
+        }
+        s->pdefault[s->nparams] = -1;
+        s->pnames[s->nparams++] = strdup(kwrname);
+        s->kwrest_idx = s->nparams - 1;
+      }
+    }
+  }
   int bp = nt_ref(c->nt, pn, "block");
   if (bp >= 0 && nt_type(c->nt, bp) && !strcmp(nt_type(c->nt, bp), "BlockParameterNode")) {
     const char *bn = nt_str(c->nt, bp, "name");
@@ -2884,6 +2903,7 @@ static void process_include_body(Compiler *c, int ci, int body_node) {
         dst->yields = src->yields;
         dst->nrequired = src->nrequired;
         dst->rest_idx = src->rest_idx;
+        dst->kwrest_idx = src->kwrest_idx;
         if (src->blk_param) dst->blk_param = strdup(src->blk_param);
         src->is_transplanted_source = 1;
         /* Copy parameter names and defaults. */
@@ -2987,6 +3007,7 @@ static void register_extends(Compiler *c) {
           dst->yields = src->yields;
           dst->nrequired = src->nrequired;
           dst->rest_idx = src->rest_idx;
+          dst->kwrest_idx = src->kwrest_idx;
           if (src->blk_param) dst->blk_param = strdup(src->blk_param);
           dst->nparams = src->nparams;
           if (src->nparams > 0) {

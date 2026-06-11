@@ -114,6 +114,7 @@ Scope *comp_scope_new(Compiler *c, const char *name, int def_node) {
   s->body = -1;
   s->class_id = -1;
   s->rest_idx = -1;
+  s->kwrest_idx = -1;
   s->ret = TY_UNKNOWN;
   return s;
 }

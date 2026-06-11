@@ -45,6 +45,7 @@ typedef struct {
   int nrequired;    /* count of leading required params */
   int rest_idx;     /* index in pnames[] of *rest param, -1 if none */
   int npost_rest;   /* number of required params AFTER the rest param (Prism "posts") */
+  int kwrest_idx;   /* index in pnames[] of **kwrest param, -1 if none */
 
   TyKind ret;       /* inferred return type */
   int ret_proc_ret; /* when ret==TY_PROC: the returned proc's body return type
