@@ -3277,7 +3277,10 @@ static int infer_ivar_types(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
-    if (!strcmp(ty, "InstanceVariableWriteNode")) {
+    if (!strcmp(ty, "InstanceVariableWriteNode") ||
+        !strcmp(ty, "InstanceVariableOrWriteNode") ||
+        !strcmp(ty, "InstanceVariableAndWriteNode") ||
+        !strcmp(ty, "InstanceVariableOperatorWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
       TyKind vt = infer_type(c, nt_ref(nt, id, "value"));
       if (vt == TY_NIL) continue;  /* nil write doesn't pin the ivar type */

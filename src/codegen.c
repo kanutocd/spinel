@@ -11413,6 +11413,30 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
       emit_expr(c, v, b);
       buf_printf(b, "; %s; })", ref3);
     }
+    else if (ivt3 == TY_INT) {
+      if (is_or) {
+        buf_printf(b, "({ if (%s == SP_INT_NIL) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+      else {
+        buf_printf(b, "({ if (%s != SP_INT_NIL) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+    }
+    else if (ivt3 == TY_STRING) {
+      if (is_or) {
+        buf_printf(b, "({ if (!%s) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+      else {
+        buf_printf(b, "({ if (%s) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+    }
     else if (!is_or) {
       buf_printf(b, "({ %s = ", ref3);
       emit_expr(c, v, b);
@@ -13929,6 +13953,18 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "if (%s%s) %s = ", is_or ? "!" : "", ref2, ref2);
       emit_expr(c, v, b); buf_puts(b, ";\n");
     }
+    else if (ivt2 == TY_INT) {
+      emit_indent(b, indent);
+      if (is_or) buf_printf(b, "if (%s == SP_INT_NIL) %s = ", ref2, ref2);
+      else       buf_printf(b, "if (%s != SP_INT_NIL) %s = ", ref2, ref2);
+      emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
+    else if (ivt2 == TY_STRING) {
+      emit_indent(b, indent);
+      if (is_or) buf_printf(b, "if (!%s) %s = ", ref2, ref2);
+      else       buf_printf(b, "if (%s) %s = ", ref2, ref2);
+      emit_expr(c, v, b); buf_puts(b, ";\n");
+    }
     else if (!is_or) {
       emit_indent(b, indent);
       buf_printf(b, "%s = ", ref2); emit_expr(c, v, b); buf_puts(b, ";\n");
@@ -14966,8 +15002,6 @@ static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       !strcmp(ty, "LocalVariableAndWriteNode") ||
       !strcmp(ty, "InstanceVariableWriteNode") ||
       !strcmp(ty, "InstanceVariableOperatorWriteNode") ||
-      !strcmp(ty, "InstanceVariableOrWriteNode") ||
-      !strcmp(ty, "InstanceVariableAndWriteNode") ||
       !strcmp(ty, "GlobalVariableWriteNode") ||
       !strcmp(ty, "ConstantWriteNode") ||
       !strcmp(ty, "WhileNode") || !strcmp(ty, "UntilNode") ||
@@ -16142,10 +16176,14 @@ char *codegen_program(const NodeTable *nt) {
     ClassInfo *ci = &c->classes[i];
     for (int j = 0; j < ci->nivars; j++) {
       TyKind t = ci->ivar_types[j] == TY_UNKNOWN ? TY_INT : ci->ivar_types[j];
-      /* static initializers must be constant: struct-valued types (poly /
-         range / time) zero-init with {0}; scalars use their default. */
-      const char *init = (t == TY_POLY || t == TY_RANGE || t == TY_TIME) ? "{0}"
-                       : (is_scalar_ret(t) && t != TY_POLY) ? default_value(t) : "0";
+      /* static initializers must be constant.  Class-level ivars start as nil:
+         int → SP_INT_NIL, string → NULL, poly → {SP_TAG_NIL,0,{0}}.
+         range/time zero-init with {0}. */
+      const char *init = (t == TY_RANGE || t == TY_TIME) ? "{0}"
+                       : (t == TY_POLY) ? "{SP_TAG_NIL, 0, {0}}"
+                       : (t == TY_INT)  ? "SP_INT_NIL"
+                       : (t == TY_STRING) ? "NULL"
+                       : (is_scalar_ret(t)) ? default_value(t) : "0";
       buf_puts(&b, "static ");
       emit_ctype(c, t, &b);
       buf_printf(&b, " civ_%s_%s = %s;\n", ci->name, ci->ivars[j] + 1, init);
