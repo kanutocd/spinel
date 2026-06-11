@@ -4289,6 +4289,8 @@ typedef struct sp_Exception_s {
   const char *parent_cls_name; /* builtin ancestor for user subclasses, or NULL */
   const char *msg;
 } sp_Exception;
+/* Registered by the generated program to provide user exception hierarchy. */
+static const char *(*sp_user_exc_parent_fn)(const char *) = NULL;
 static void sp_exc_gc_scan(void *p) {
   sp_Exception *e = (sp_Exception *)p;
   if (e->msg) sp_mark_string(e->msg);
@@ -4324,6 +4326,16 @@ static void sp_raise_exc(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
   if (!e) sp_raise("(nil exception)");
   sp_raise_cls(e->cls_name, e->msg);
+}
+/* Create an exception for a `rescue => e` binding: like sp_exc_new but
+   also looks up the parent class via the user hierarchy callback. */
+static sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {
+  sp_Exception *e = sp_exc_new(cls, msg);
+  if (sp_user_exc_parent_fn) {
+    const char *par = sp_user_exc_parent_fn(cls);
+    if (par) e->parent_cls_name = par;
+  }
+  return e;
 }
 /* Exception#is_a?(ClassName): checks class name and known hierarchy. */
 static mrb_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn) {
@@ -4364,19 +4376,70 @@ static mrb_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn) {
     for (int i = 0; HIER[i][0]; i++)
       if (!strcmp(cls, HIER[i][0])) { parent = HIER[i][1]; break; }
     if (!parent) {
-      /* unknown (user) class: jump to stored parent class if available */
-      if (!used_parent && e->parent_cls_name) {
-        cls = e->parent_cls_name;
-        used_parent = 1;
-        continue;
+      /* unknown (user) class: try user hierarchy first */
+      if (sp_user_exc_parent_fn) { parent = sp_user_exc_parent_fn(cls); }
+      if (!parent) {
+        if (!used_parent && e->parent_cls_name) {
+          cls = e->parent_cls_name;
+          used_parent = 1;
+          continue;
+        }
+        if (!strcmp(cn, "Exception")) return 1;
+        if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject")) return 1;
+        break;
       }
-      if (!strcmp(cn, "Exception")) return 1;
-      if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject")) return 1;
-      break;
     }
     cls = parent;
   }
   if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject") || !strcmp(cn, "Kernel")) return 1;
+  return 0;
+}
+
+/* Check if exception class name `raised` is the same as or a subclass of
+   `target`, using both the built-in hierarchy and the user hierarchy callback. */
+static int sp_exc_cls_matches(const char *raised, const char *target) {
+  if (!raised || !target) return 0;
+  static const char *const HIER2[][2] = {
+    {"RuntimeError",         "StandardError"},
+    {"ArgumentError",        "StandardError"},
+    {"TypeError",            "StandardError"},
+    {"NameError",            "StandardError"},
+    {"NoMethodError",        "NameError"},
+    {"IndexError",           "StandardError"},
+    {"KeyError",             "IndexError"},
+    {"RangeError",           "StandardError"},
+    {"IOError",              "StandardError"},
+    {"EOFError",             "IOError"},
+    {"ZeroDivisionError",    "StandardError"},
+    {"NotImplementedError",  "StandardError"},
+    {"StopIteration",        "IndexError"},
+    {"FloatDomainError",     "RangeError"},
+    {"FrozenError",          "RuntimeError"},
+    {"EncodingError",        "StandardError"},
+    {"LoadError",            "StandardError"},
+    {"RegexpError",          "StandardError"},
+    {"SyntaxError",          "ScriptError"},
+    {"ScriptError",          "Exception"},
+    {"StandardError",        "Exception"},
+    {NULL, NULL}
+  };
+  const char *cls = raised;
+  for (int depth = 0; depth < 30 && cls; depth++) {
+    if (!strcmp(cls, target)) return 1;
+    const char *parent = NULL;
+    /* user hierarchy first */
+    if (sp_user_exc_parent_fn) parent = sp_user_exc_parent_fn(cls);
+    if (!parent) {
+      for (int i = 0; HIER2[i][0]; i++)
+        if (!strcmp(cls, HIER2[i][0])) { parent = HIER2[i][1]; break; }
+    }
+    if (!parent) {
+      if (!strcmp(target, "Exception") || !strcmp(target, "Object") || !strcmp(target, "BasicObject")) return 1;
+      break;
+    }
+    cls = parent;
+  }
+  if (!strcmp(target, "Object") || !strcmp(target, "BasicObject") || !strcmp(target, "Kernel")) return 1;
   return 0;
 }
 

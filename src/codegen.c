@@ -3756,7 +3756,11 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       emit_expr(c, av[1], b); buf_puts(b, ")");
     }
     else {
-      buf_puts(b, "sp_raise("); emit_expr(c, av[0], b); buf_puts(b, ")");
+      TyKind at = ac > 0 ? comp_ntype(c, av[0]) : TY_UNKNOWN;
+      if (at == TY_EXCEPTION)
+        { buf_puts(b, "sp_raise_exc("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
+      else
+        { buf_puts(b, "sp_raise("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
     }
     return;
   }
@@ -12403,7 +12407,15 @@ static void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const c
       if (!en || (strcmp(en, "ConstantReadNode") && strcmp(en, "ConstantPathNode"))) continue;
       if (!first) buf_puts(b, " || ");
       first = 0;
-      buf_printf(b, "sp_str_eq(_rcls_%d, \"%s\")", rc, nt_str(nt, exc[i], "name"));
+      const char *ename = nt_str(nt, exc[i], "name");
+      /* use hierarchy-aware check for exception classes */
+      int is_exc_cls = (ename && is_exc_name(ename)) ||
+                       (ename && comp_class_index(c, ename) >= 0 &&
+                        class_is_exc_subclass(c, comp_class_index(c, ename)));
+      if (is_exc_cls)
+        buf_printf(b, "sp_exc_cls_matches(_rcls_%d, \"%s\")", rc, ename);
+      else
+        buf_printf(b, "sp_str_eq(_rcls_%d, \"%s\")", rc, ename);
     }
     if (first) buf_puts(b, "1");  /* no usable type -> always */
     buf_puts(b, ") {\n");
@@ -12413,7 +12425,7 @@ static void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const c
   g_rescue_cls = clsbuf; g_rescue_msg = msgbuf;
   if (ref >= 0 && nt_type(nt, ref) && !strcmp(nt_type(nt, ref), "LocalVariableTargetNode")) {
     emit_indent(b, indent);
-    buf_printf(b, "lv_%s = sp_exc_new(_rcls_%d, _rmsg_%d);\n", nt_str(nt, ref, "name"), rc, rc);
+    buf_printf(b, "lv_%s = sp_exc_new_for_catch(_rcls_%d, _rmsg_%d);\n", nt_str(nt, ref, "name"), rc, rc);
   }
   if (resultvar) {
     const char *sv = g_result_var; g_result_var = resultvar;
@@ -14766,6 +14778,7 @@ static void emit_regex_section(Buf *b) {
   }
   buf_puts(b, "static void sp_re_init(void) {\n");
   buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
+  buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n");
   if (g_re_count > 0) {
     buf_puts(b, "  sp_re_set_error_handler(sp_re_startup_error_handler);\n");
     for (int i = 0; i < g_re_count; i++) {
@@ -14824,6 +14837,39 @@ char *codegen_program(const NodeTable *nt) {
         buf_printf(&b, "case %d:return SPL(\"%s\");", i, c->classes[i].name);
     }
     buf_puts(&b, "default:return \"\";} }\n\n\n");
+  }
+  /* User exception hierarchy: sp_user_exc_parent(cls) -> parent class name.
+     Used by sp_exc_cls_matches (rescue arms) and sp_exc_is_a (is_a?). */
+  {
+    int any = 0;
+    for (int i = 0; i < c->nclasses; i++) {
+      if (class_is_exc_subclass(c, i)) { any = 1; break; }
+    }
+    buf_puts(&b, "static const char *sp_user_exc_parent(const char *cls){\n");
+    if (any) {
+      for (int i = 0; i < c->nclasses; i++) {
+        if (!class_is_exc_subclass(c, i)) continue;
+        const char *cn = class_ruby_name(c, i);
+        if (!cn) cn = c->classes[i].name;
+        /* find the direct parent name (builtin or user) */
+        const char *par = NULL;
+        int sc = nt_ref(c->nt, c->classes[i].def_node, "superclass");
+        if (sc >= 0) {
+          const char *sty = nt_type(c->nt, sc);
+          if (sty && (!strcmp(sty, "ConstantReadNode") || !strcmp(sty, "ConstantPathNode")))
+            par = nt_str(c->nt, sc, "name");
+        }
+        if (!par && c->classes[i].parent >= 0)
+          par = c->classes[c->classes[i].parent].name;
+        if (par) {
+          buf_printf(&b, "  if(!strcmp(cls,\"%s\"))return \"%s\";\n", cn, par);
+          /* also register the leaf name if different from qualified name */
+          if (cn != c->classes[i].name && strcmp(cn, c->classes[i].name))
+            buf_printf(&b, "  if(!strcmp(cls,\"%s\"))return \"%s\";\n", c->classes[i].name, par);
+        }
+      }
+    }
+    buf_puts(&b, "  return 0;\n}\n");
   }
 
   /* class structs + GC scan functions. Forward-declare every typedef first so
