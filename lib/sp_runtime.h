@@ -4286,18 +4286,25 @@ static void sp_mark_in_flight_exceptions(void) { for (int i = 0; i < sp_exc_top;
    (sp_str_alloc'd). */
 typedef struct sp_Exception_s {
   const char *cls_name;
+  const char *parent_cls_name; /* builtin ancestor for user subclasses, or NULL */
   const char *msg;
 } sp_Exception;
 static void sp_exc_gc_scan(void *p) {
   sp_Exception *e = (sp_Exception *)p;
   if (e->msg) sp_mark_string(e->msg);
-  /* cls_name points into the .rodata sp_class_names[] table -- not
-     a GC-managed string, no mark needed. */
+  /* cls_name/parent_cls_name point into rodata -- not GC-managed strings */
 }
 static sp_Exception *sp_exc_new(const char *cls_name, const char *msg) {
   sp_Exception *e = (sp_Exception *)sp_gc_alloc(sizeof(sp_Exception), NULL, sp_exc_gc_scan);
   e->cls_name = cls_name ? cls_name : "RuntimeError";
-  e->msg = msg ? msg : sp_str_empty;
+  e->parent_cls_name = NULL;
+  e->msg = (msg && msg[0]) ? msg : (cls_name ? cls_name : "RuntimeError");
+  return e;
+}
+static sp_Exception *sp_exc_new_sub(const char *cls_name, const char *parent_cls, const char *msg) {
+  sp_Exception *e = sp_exc_new(cls_name, msg);
+  e->parent_cls_name = parent_cls;
+  if (!msg || !msg[0]) e->msg = cls_name ? cls_name : "RuntimeError";
   return e;
 }
 /* Accept `volatile` pointers: LV slots holding sp_Exception * are
@@ -4318,13 +4325,67 @@ static void sp_raise_exc(volatile sp_Exception *ve) {
   if (!e) sp_raise("(nil exception)");
   sp_raise_cls(e->cls_name, e->msg);
 }
+/* Exception#is_a?(ClassName): checks class name and known hierarchy. */
+static mrb_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn) {
+  sp_Exception *e = (sp_Exception *)ve;
+  if (!e || !cn) return 0;
+  if (!strcmp(e->cls_name, cn)) return 1;
+  /* Walk the well-known exception hierarchy */
+  static const char *const HIER[][2] = {
+    {"RuntimeError",          "StandardError"},
+    {"ArgumentError",         "StandardError"},
+    {"TypeError",             "StandardError"},
+    {"NameError",             "StandardError"},
+    {"NoMethodError",         "NameError"},
+    {"IndexError",            "StandardError"},
+    {"KeyError",              "IndexError"},
+    {"RangeError",            "StandardError"},
+    {"IOError",               "StandardError"},
+    {"EOFError",              "IOError"},
+    {"ZeroDivisionError",     "StandardError"},
+    {"NotImplementedError",   "StandardError"},
+    {"StopIteration",         "IndexError"},
+    {"FloatDomainError",      "RangeError"},
+    {"FrozenError",           "RuntimeError"},
+    {"EncodingError",         "StandardError"},
+    {"LoadError",             "StandardError"},
+    {"RegexpError",           "StandardError"},
+    {"SyntaxError",           "ScriptError"},
+    {"ScriptError",           "Exception"},
+    {"StandardError",         "Exception"},
+    {NULL, NULL}
+  };
+  /* find the exception's class chain and check if cn appears in it */
+  const char *cls = e->cls_name;
+  int used_parent = 0;
+  for (int depth = 0; depth < 20 && cls; depth++) {
+    if (!strcmp(cls, cn)) return 1;
+    const char *parent = NULL;
+    for (int i = 0; HIER[i][0]; i++)
+      if (!strcmp(cls, HIER[i][0])) { parent = HIER[i][1]; break; }
+    if (!parent) {
+      /* unknown (user) class: jump to stored parent class if available */
+      if (!used_parent && e->parent_cls_name) {
+        cls = e->parent_cls_name;
+        used_parent = 1;
+        continue;
+      }
+      if (!strcmp(cn, "Exception")) return 1;
+      if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject")) return 1;
+      break;
+    }
+    cls = parent;
+  }
+  if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject") || !strcmp(cn, "Kernel")) return 1;
+  return 0;
+}
 
 /* Cross-TU bridge for sp_bigint.c (compiled as a separate translation
    unit; can't see static helpers in this header). Defined non-static
    so sp_bigint.c's mrb_raise macro can dispatch into spinel's
    longjmp-based rescue net rather than fprintf+exit. */
 void sp_bigint_raise_zerodiv(const char *msg) { sp_raise_cls("ZeroDivisionError", msg); }
-static mrb_bool sp_exc_is_a(const char *cls, const char *target) { return strcmp(cls, target) == 0; }
+/* sp_exc_is_a: see earlier definition (takes volatile sp_Exception *) */
 
 #define SP_CATCH_STACK_MAX 64
 static jmp_buf sp_catch_stack[SP_CATCH_STACK_MAX];

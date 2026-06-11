@@ -128,6 +128,7 @@ ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node) {
   ci->name = name ? strdup(name) : NULL;
   ci->def_node = def_node;
   ci->parent = -1;
+  ci->enclosing_class = -1;
   return ci;
 }
 

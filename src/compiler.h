@@ -89,6 +89,7 @@ typedef struct {
   char **prep_to;        /* target shadow name */
   int nprep_chain, cprep_chain;
   int prep_shadow_count; /* next shadow index to assign */
+  int enclosing_class;   /* index of enclosing module/class, or -1 for top-level */
 } ClassInfo;
 
 typedef struct {

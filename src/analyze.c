@@ -4,6 +4,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int is_builtin_exception_name(const char *n) {
+  if (!n) return 0;
+  static const char *const EXC[] = {
+    "Exception", "StandardError", "RuntimeError", "ArgumentError",
+    "TypeError", "NameError", "NoMethodError", "IndexError",
+    "KeyError", "RangeError", "IOError", "EOFError", "Errno::ENOENT",
+    "ZeroDivisionError", "NotImplementedError", "StopIteration",
+    "FloatDomainError", "FrozenError", "EncodingError", "LoadError",
+    "SystemExit", "Interrupt", "ScriptError", "SyntaxError",
+    "RegexpError", NULL
+  };
+  for (int i = 0; EXC[i]; i++) if (!strcmp(n, EXC[i])) return 1;
+  return 0;
+}
+
+/* Returns 1 if user class ci (or any ancestor in user chain) has a builtin
+   exception as direct superclass (per its ClassNode superclass field). */
+static int class_inherits_builtin_exception(Compiler *c, int ci) {
+  for (int k = ci; k >= 0; k = c->classes[k].parent) {
+    int sc = nt_ref(c->nt, c->classes[k].def_node, "superclass");
+    if (sc < 0) continue;
+    const char *sty = nt_type(c->nt, sc);
+    if (sty && !strcmp(sty, "ConstantReadNode") &&
+        is_builtin_exception_name(nt_str(c->nt, sc, "name")))
+      return 1;
+    if (sty && !strcmp(sty, "ConstantPathNode") &&
+        is_builtin_exception_name(nt_str(c->nt, sc, "name")))
+      return 1;
+  }
+  return 0;
+}
+
 static int re_has_captures(const char *src) {
   if (!src) return 0;
   for (const char *p = src; *p; p++) {
@@ -397,19 +429,23 @@ static TyKind infer_call(Compiler *c, int id) {
       const char *cn = nt_str(nt, recv, "name");
       int ci = cn ? comp_class_index(c, cn) : -1;
       if (ci >= 0) {
+        if (class_inherits_builtin_exception(c, ci)) return TY_EXCEPTION;
         int ucnew = comp_cmethod_in_chain(c, ci, "new", NULL);
         if (ucnew >= 0) return (TyKind)c->scopes[ucnew].ret;
         return ty_object(ci);
       }
+      if (cn && is_builtin_exception_name(cn)) return TY_EXCEPTION;
     }
     if (rty && !strcmp(rty, "ConstantReadNode")) {
       const char *cn = nt_str(nt, recv, "name");
       int ci = comp_class_index(c, cn);
       if (ci >= 0) {
+        if (class_inherits_builtin_exception(c, ci)) return TY_EXCEPTION;
         int ucnew = comp_cmethod_in_chain(c, ci, "new", NULL);
         if (ucnew >= 0) return (TyKind)c->scopes[ucnew].ret;
         return ty_object(ci);
       }
+      if (cn && is_builtin_exception_name(cn)) return TY_EXCEPTION;
       if (cn && !strcmp(cn, "Array") && argc == 2) return ty_array_of(infer_type(c, argv[1]));
       if (cn && !strcmp(cn, "Array")) {
         int blk = nt_ref(nt, id, "block");
@@ -2081,6 +2117,7 @@ static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
     if (cname && comp_class_index(c, cname) < 0) {
       comp_class_new(c, cname, id);
       child_class = c->nclasses - 1;
+      c->classes[child_class].enclosing_class = class_id;
     }
     else if (cname) {
       child_class = comp_class_index(c, cname);  /* reopened class/module */

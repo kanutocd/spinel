@@ -467,6 +467,9 @@ static void emit_str_literal(Buf *b, const char *content) {
 /* ---- forward decls ---- */
 
 static int is_builtin_reopen(const char *name);
+static int is_exc_name(const char *n);
+static int class_is_exc_subclass(Compiler *c, int ci);
+static const char *class_ruby_name(Compiler *c, int ci);
 static void emit_method_cname(Compiler *c, Scope *s, Buf *b);
 static void emit_expr(Compiler *c, int id, Buf *b);
 static void emit_stmt(Compiler *c, int id, Buf *b, int indent);
@@ -3792,6 +3795,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), sp_StrArray_new())");
       return;
     }
+    if (argc == 1 && (!strcmp(name, "is_a?") || !strcmp(name, "kind_of?") || !strcmp(name, "instance_of?"))) {
+      const char *cn = nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "ConstantReadNode")
+                       ? nt_str(nt, argv[0], "name") : NULL;
+      if (cn) {
+        buf_puts(b, "sp_exc_is_a("); emit_expr(c, recv, b);
+        buf_printf(b, ", \"%s\")", cn);
+        return;
+      }
+    }
   }
 
   if (recv < 0 && comp_method_index(c, name) >= 0) { emit_method_call(c, id, b); return; }
@@ -4350,6 +4362,28 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     const char *cn = nt_str(nt, recv, "name");
     int ci = cn ? comp_class_index(c, cn) : -1;
     if (ci >= 0) {
+      if (class_is_exc_subclass(c, ci)) {
+        const char *cn2 = class_ruby_name(c, ci);
+        if (!cn2) cn2 = c->classes[ci].name;
+        const char *par = NULL;
+        for (int k = ci; k >= 0; k = c->classes[k].parent) {
+          int sc = nt_ref(c->nt, c->classes[k].def_node, "superclass");
+          if (sc < 0) continue;
+          const char *sty = nt_type(c->nt, sc);
+          const char *sn = nt_str(c->nt, sc, "name");
+          if (sty && (!strcmp(sty, "ConstantReadNode") || !strcmp(sty, "ConstantPathNode")) && is_exc_name(sn))
+            { par = sn; break; }
+        }
+        if (!par) par = "StandardError";
+        int initm = comp_method_in_chain(c, ci, "initialize", NULL);
+        buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
+        if (argc >= 1) emit_expr(c, argv[0], b);
+        else if (initm >= 0 && c->scopes[initm].nparams > 0)
+          emit_arg_or_default(c, &c->scopes[initm], 0, -1, b);
+        else buf_puts(b, "(&(\"\\xff\")[1])");
+        buf_puts(b, ")");
+        return;
+      }
       int ucnew = comp_cmethod_in_chain(c, ci, "new", NULL);
       if (ucnew >= 0) {
         /* user-defined def self.new: call it as a regular class method */
@@ -4366,6 +4400,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, ")");
         return;
       }
+    }
+    if (cn && is_exc_name(cn)) {
+      buf_printf(b, "sp_exc_new(\"%s\", ", cn);
+      if (argc >= 1) emit_expr(c, argv[0], b);
+      else buf_puts(b, "(&(\"\\xff\")[1])");
+      buf_puts(b, ")");
+      return;
     }
   }
 
@@ -4395,6 +4436,35 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
       if (ci >= 0) {
+        /* user exception subclass: emit sp_exc_new_sub(ClassName, parent, msg) */
+        if (class_is_exc_subclass(c, ci)) {
+          const char *cn2 = class_ruby_name(c, ci);
+          if (!cn2) cn2 = c->classes[ci].name;
+          /* find builtin parent name */
+          const char *par = NULL;
+          for (int k = ci; k >= 0; k = c->classes[k].parent) {
+            int sc = nt_ref(c->nt, c->classes[k].def_node, "superclass");
+            if (sc < 0) continue;
+            const char *sty = nt_type(c->nt, sc);
+            const char *sn = nt_str(c->nt, sc, "name");
+            if (sty && (!strcmp(sty, "ConstantReadNode") || !strcmp(sty, "ConstantPathNode")) && is_exc_name(sn))
+              { par = sn; break; }
+          }
+          if (!par) par = "StandardError";
+          /* get the message: first call-site arg, or the initialize default */
+          int initm = comp_method_in_chain(c, ci, "initialize", NULL);
+          buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
+          if (argc >= 1) {
+            emit_expr(c, argv[0], b);
+          }
+          else if (initm >= 0 && c->scopes[initm].nparams > 0) {
+            /* use the initialize's first param default, if any */
+            emit_arg_or_default(c, &c->scopes[initm], 0, -1, b);
+          }
+          else buf_puts(b, "(&(\"\\xff\")[1])");
+          buf_puts(b, ")");
+          return;
+        }
         /* user-defined def self.new takes precedence over the constructor */
         int ucnew = comp_cmethod_in_chain(c, ci, "new", NULL);
         if (ucnew >= 0) {
@@ -4411,6 +4481,14 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
       const char *cn = nt_str(nt, recv, "name");
+      if (cn && is_exc_name(cn)) {
+        /* builtin exception class .new(msg) */
+        buf_printf(b, "sp_exc_new(\"%s\", ", cn);
+        if (argc >= 1) emit_expr(c, argv[0], b);
+        else buf_puts(b, "(&(\"\\xff\")[1])");
+        buf_puts(b, ")");
+        return;
+      }
       if (cn && !strcmp(cn, "String")) {
         /* String.new / String.new(s): always create a mutable heap copy */
         if (argc == 1) { buf_puts(b, "sp_str_dup_external("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
@@ -14370,6 +14448,58 @@ static int is_builtin_reopen(const char *name) {
          !strcmp(name, "Object")    || !strcmp(name, "Numeric");
 }
 
+/* Returns 1 if n is a known built-in exception class name. */
+static int is_exc_name(const char *n) {
+  if (!n) return 0;
+  static const char *const EX[] = {
+    "Exception", "StandardError", "RuntimeError", "ArgumentError",
+    "TypeError", "NameError", "NoMethodError", "IndexError",
+    "KeyError", "RangeError", "IOError", "EOFError",
+    "ZeroDivisionError", "NotImplementedError", "StopIteration",
+    "FloatDomainError", "FrozenError", "EncodingError", "LoadError",
+    "RegexpError", NULL
+  };
+  for (int i = 0; EX[i]; i++) if (!strcmp(n, EX[i])) return 1;
+  return 0;
+}
+
+/* Returns 1 if user class ci (or any ancestor) directly inherits a builtin exception. */
+static int class_is_exc_subclass(Compiler *c, int ci) {
+  for (int k = ci; k >= 0; k = c->classes[k].parent) {
+    int sc = nt_ref(c->nt, c->classes[k].def_node, "superclass");
+    if (sc < 0) continue;
+    const char *sty = nt_type(c->nt, sc);
+    const char *sn = nt_str(c->nt, sc, "name");
+    if (sty && (!strcmp(sty, "ConstantReadNode") || !strcmp(sty, "ConstantPathNode")) &&
+        is_exc_name(sn))
+      return 1;
+  }
+  return 0;
+}
+
+/* Build the full Ruby-style qualified name ("ActiveRecord::RecordNotFound") for
+   class index ci by walking enclosing_class up to the top level. */
+static const char *class_ruby_name(Compiler *c, int ci) {
+  if (ci < 0 || ci >= c->nclasses) return NULL;
+  /* collect ancestry: max 16 levels deep */
+  int chain[16]; int depth = 0;
+  for (int k = ci; k >= 0 && depth < 16; ) {
+    chain[depth++] = k;
+    k = c->classes[k].enclosing_class;
+  }
+  if (depth == 1) return c->classes[ci].name; /* top-level: no qualification needed */
+  /* build "A::B::C" from outermost to innermost */
+  static char buf[256];
+  buf[0] = '\0';
+  for (int i = depth - 1; i >= 0; i--) {
+    const char *seg = c->classes[chain[i]].name;
+    if (!seg) continue;
+    if (buf[0]) strncat(buf, "::", sizeof(buf) - strlen(buf) - 1);
+    strncat(buf, seg, sizeof(buf) - strlen(buf) - 1);
+  }
+  return buf;
+}
+
 static void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   /* the typedef is forward-declared for every class first (see codegen_program)
      so a class can embed a pointer to a class defined later in the file */
@@ -14593,7 +14723,13 @@ static void emit_super(Compiler *c, int id, Buf *b) {
   int p = c->classes[s->class_id].parent;
   int defcls = -1;
   int mi = p >= 0 ? comp_method_in_chain(c, p, uname, &defcls) : -1;
-  if (mi < 0) { unsupported(c, id, "super (no parent method)"); return; }
+  if (mi < 0) {
+    /* super in exception subclass initialize: no-op (message was set at .new call site) */
+    if (class_is_exc_subclass(c, s->class_id) && s->name && !strcmp(s->name, "initialize"))
+      { buf_puts(b, "((void)0)"); return; }
+    unsupported(c, id, "super (no parent method)");
+    return;
+  }
   buf_printf(b, "sp_%s_%s((sp_%s *)%s", c->classes[defcls].name, mc(uname), c->classes[defcls].name, g_self);
   if (ty && !strcmp(ty, "ForwardingSuperNode")) {
     Scope *pm = &c->scopes[mi];
