@@ -13057,7 +13057,8 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     for (int k = 0; k < n; k++) {
       const char *sty = nt_type(nt, stmts[k]);
       if (!sty) continue;
-      if (!strcmp(sty, "DefNode") || !strcmp(sty, "AliasMethodNode")) continue;
+      if (!strcmp(sty, "DefNode") || !strcmp(sty, "AliasMethodNode") ||
+          !strcmp(sty, "SingletonClassNode")) continue;
       /* A receiver-less call in a class body is, by default, a declaration
          macro (attr_*, include, private, an FFI/DSL directive) -- skip it.
          Only run the genuine side-effecting ones: output calls and calls

@@ -1909,12 +1909,97 @@ static void scope_add_param(Scope *s, const char *name, int defnode) {
   lv->is_param = 1;
 }
 
+/* Collect parameters from a DefNode into scope s. */
+static void collect_def_params(Compiler *c, int def_id, Scope *s) {
+  int pn = nt_ref(c->nt, def_id, "parameters");
+  if (pn < 0) return;
+  int rn = 0;
+  const int *reqs = nt_arr(c->nt, pn, "requireds", &rn);
+  for (int i = 0; i < rn; i++) {
+    const char *pname = nt_str(c->nt, reqs[i], "name");
+    if (pname) scope_add_param(s, pname, -1);
+  }
+  int on = 0;
+  const int *opts = nt_arr(c->nt, pn, "optionals", &on);
+  for (int i = 0; i < on; i++) {
+    const char *pname = nt_str(c->nt, opts[i], "name");
+    int dv = nt_ref(c->nt, opts[i], "value");
+    if (pname) scope_add_param(s, pname, dv);
+  }
+  int rp = nt_ref(c->nt, pn, "rest");
+  if (rp >= 0) {
+    const char *rpty = nt_type(c->nt, rp);
+    if (rpty && !strcmp(rpty, "RestParameterNode")) {
+      const char *rname = nt_str(c->nt, rp, "name");
+      if (rname) {
+        if (s->nparams % 8 == 0) {
+          s->pnames  = realloc(s->pnames,  sizeof(char *) * (size_t)(s->nparams + 8));
+          s->pdefault = realloc(s->pdefault, sizeof(int)    * (size_t)(s->nparams + 8));
+        }
+        s->pdefault[s->nparams] = -1;
+        s->pnames[s->nparams++] = strdup(rname);
+        LocalVar *lv = scope_local_intern(s, rname);
+        lv->is_param = 1;
+        lv->type = TY_POLY_ARRAY;
+        s->rest_idx = s->nparams - 1;
+      }
+    }
+  }
+  int kn = 0;
+  const int *kws = nt_arr(c->nt, pn, "keywords", &kn);
+  for (int i = 0; i < kn; i++) {
+    const char *pty = nt_type(c->nt, kws[i]);
+    if (!pty) continue;
+    const char *pname = nt_str(c->nt, kws[i], "name");
+    int dv = !strcmp(pty, "OptionalKeywordParameterNode") ? nt_ref(c->nt, kws[i], "value") : -1;
+    if (pname) scope_add_param(s, pname, dv);
+  }
+  int bp = nt_ref(c->nt, pn, "block");
+  if (bp >= 0 && nt_type(c->nt, bp) && !strcmp(nt_type(c->nt, bp), "BlockParameterNode")) {
+    const char *bn = nt_str(c->nt, bp, "name");
+    s->blk_param = strdup(bn ? bn : "");
+  }
+}
+
 static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (id < 0 || id >= c->nt->count) return;
   c->nscope[id] = scope_idx;
   const char *ty = nt_type(c->nt, id);
   int child = scope_idx;
   int child_class = class_id;
+
+  /* `class << self; def X; ...; end; end` — treat body defs as class methods. */
+  if (ty && !strcmp(ty, "SingletonClassNode")) {
+    int sbody = nt_ref(c->nt, id, "body");
+    if (sbody >= 0) {
+      int n = 0;
+      const int *stmts = nt_arr(c->nt, sbody, "body", &n);
+      for (int k = 0; k < n; k++) {
+        int s = stmts[k];
+        const char *sty = nt_type(c->nt, s);
+        if (!sty) continue;
+        if (!strcmp(sty, "DefNode")) {
+          const char *name = nt_str(c->nt, s, "name");
+          if (!name) continue;
+          Scope *sc = comp_scope_new(c, name, s);
+          int new_idx = c->nscopes - 1;
+          sc->body = nt_ref(c->nt, s, "body");
+          sc->class_id = class_id;
+          sc->is_cmethod = 1;
+          collect_def_params(c, s, sc);
+          /* Assign scope to the def node and its body */
+          c->nscope[s] = new_idx;
+          if (sc->body >= 0) walk_scope(c, sc->body, new_idx, class_id);
+        }
+        else {
+          walk_scope(c, s, scope_idx, class_id);
+        }
+      }
+      c->nscope[id] = scope_idx;
+      c->nscope[sbody] = scope_idx;
+    }
+    return;
+  }
 
   if (ty && (!strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode"))) {
     int cp = nt_ref(c->nt, id, "constant_path");
@@ -1935,60 +2020,7 @@ static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
     s->class_id = class_id;   /* instance method of the enclosing class */
     /* `def self.foo` / `def Klass.foo`: a class (singleton) method. */
     if (nt_ref(c->nt, id, "receiver") >= 0) s->is_cmethod = 1;
-    int pn = nt_ref(c->nt, id, "parameters");
-    if (pn >= 0) {
-      int rn = 0;
-      const int *reqs = nt_arr(c->nt, pn, "requireds", &rn);
-      for (int i = 0; i < rn; i++) {
-        const char *pname = nt_str(c->nt, reqs[i], "name");
-        if (pname) scope_add_param(s, pname, -1);
-      }
-      int on = 0;
-      const int *opts = nt_arr(c->nt, pn, "optionals", &on);
-      for (int i = 0; i < on; i++) {
-        const char *pname = nt_str(c->nt, opts[i], "name");
-        int dv = nt_ref(c->nt, opts[i], "value");
-        if (pname) scope_add_param(s, pname, dv);
-      }
-      /* `*rest` parameter */
-      int rp = nt_ref(c->nt, pn, "rest");
-      if (rp >= 0) {
-        const char *rpty = nt_type(c->nt, rp);
-        if (rpty && !strcmp(rpty, "RestParameterNode")) {
-          const char *rname = nt_str(c->nt, rp, "name");
-          if (rname) {
-            /* Add param slot without bumping nrequired */
-            if (s->nparams % 8 == 0) {
-              s->pnames  = realloc(s->pnames,  sizeof(char *) * (size_t)(s->nparams + 8));
-              s->pdefault = realloc(s->pdefault, sizeof(int)    * (size_t)(s->nparams + 8));
-            }
-            s->pdefault[s->nparams] = -1;
-            s->pnames[s->nparams++] = strdup(rname);
-            LocalVar *lv = scope_local_intern(s, rname);
-            lv->is_param = 1;
-            lv->type = TY_POLY_ARRAY;
-            s->rest_idx = s->nparams - 1;
-          }
-        }
-      }
-      /* keyword parameters: `tag:` (required) or `tag: default` (optional) */
-      int kn = 0;
-      const int *kws = nt_arr(c->nt, pn, "keywords", &kn);
-      for (int i = 0; i < kn; i++) {
-        const char *pty = nt_type(c->nt, kws[i]);
-        if (!pty) continue;
-        const char *pname = nt_str(c->nt, kws[i], "name");
-        int dv = !strcmp(pty, "OptionalKeywordParameterNode") ? nt_ref(c->nt, kws[i], "value") : -1;
-        if (pname) scope_add_param(s, pname, dv);
-      }
-      /* `&block` parameter: tracked for yield-style inlining, no typed slot.
-         Anonymous `&` has no name; record "" so forwarding still works. */
-      int bp = nt_ref(c->nt, pn, "block");
-      if (bp >= 0 && nt_type(c->nt, bp) && !strcmp(nt_type(c->nt, bp), "BlockParameterNode")) {
-        const char *bn = nt_str(c->nt, bp, "name");
-        s->blk_param = strdup(bn ? bn : "");
-      }
-    }
+    collect_def_params(c, id, s);
     child = new_idx;
   }
 
