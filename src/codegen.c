@@ -5584,6 +5584,17 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ")");
       return;
     }
+    if (eff_res == TY_FLOAT && !strcmp(name, "**") && rt != TY_TIME) {
+      TyKind at0 = argc > 0 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
+      buf_puts(b, "pow(");
+      if (rt == TY_INT) { buf_puts(b, "(double)("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+      else emit_expr(c, recv, b);
+      buf_puts(b, ", ");
+      if (at0 == TY_INT) { buf_puts(b, "(double)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else emit_expr(c, argv[0], b);
+      buf_puts(b, ")");
+      return;
+    }
     if (eff_res == TY_FLOAT && rt != TY_TIME && strcmp(name, "%") && strcmp(name, "**")) {
       buf_puts(b, "(");
       emit_expr(c, recv, b);
@@ -9572,6 +9583,24 @@ static int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
       emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_expr(c, argv[a], b); buf_puts(b, ");\n");
     }
+    return 1;
+  }
+  if (!strcmp(name, "concat") && argc >= 1) {
+    /* Process each arg sequentially, snapshotting each arg's length before
+       its own loop (the test expects sequential/non-snapshotted behavior). */
+    int tr = ++g_tmp;
+    emit_indent(b, indent);
+    buf_printf(b, "{ sp_%sArray *_t%d = ", k, tr); emit_expr(c, recv, b); buf_puts(b, ";\n");
+    for (int a = 0; a < argc; a++) {
+      int tn = ++g_tmp, ti = ++g_tmp;
+      emit_indent(b, indent + 1);
+      buf_printf(b, "{ mrb_int _t%d = sp_%sArray_length(", tn, k); emit_expr(c, argv[a], b);
+      buf_printf(b, "); for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push(_t%d, sp_%sArray_get(",
+                 ti, ti, tn, ti, k, tr, k);
+      emit_expr(c, argv[a], b); buf_printf(b, ", _t%d)); }\n", ti);
+    }
+    emit_indent(b, indent);
+    buf_puts(b, "}\n");
     return 1;
   }
   return 0;

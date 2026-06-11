@@ -938,8 +938,9 @@ static TyKind infer_call(Compiler *c, int id) {
           }
           else if (brt == TY_FLOAT) {
             if (!strcmp(name, "+") || !strcmp(name, "-") || !strcmp(name, "*") ||
-                !strcmp(name, "/") || !strcmp(name, "abs") || !strcmp(name, "floor") ||
-                !strcmp(name, "ceil") || !strcmp(name, "round") || !strcmp(name, "truncate"))
+                !strcmp(name, "/") || !strcmp(name, "**") || !strcmp(name, "abs") ||
+                !strcmp(name, "floor") || !strcmp(name, "ceil") || !strcmp(name, "round") ||
+                !strcmp(name, "truncate"))
               return TY_FLOAT;
             if (!strcmp(name, "to_i")) return TY_INT;
             if (!strcmp(name, "to_s")) return TY_STRING;
