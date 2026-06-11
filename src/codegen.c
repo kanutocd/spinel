@@ -4248,9 +4248,20 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "class")) {
     if (comp_ntype(c, recv) == TY_CLASS) {
-      int _clt = ++g_tmp;
-      buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_class_to_s(_cl%d); })", _clt);
+      /* When emitting a builtin-reopen method, the inner .class emits
+         sp_poly_class_name (returns const char *), not sp_Class — no wrapper needed. */
+      int _inner = nt_ref(nt, recv, "receiver");
+      int _is_poly_ov = (_inner >= 0 && g_emitting_class_id >= 0 &&
+        nt_type(nt, _inner) && !strcmp(nt_type(nt, _inner), "SelfNode") &&
+        is_builtin_reopen(c->classes[g_emitting_class_id].name));
+      if (_is_poly_ov) {
+        emit_expr(c, recv, b);
+      }
+      else {
+        int _clt = ++g_tmp;
+        buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_class_to_s(_cl%d); })", _clt);
+      }
     }
     else emit_expr(c, recv, b);
     return;

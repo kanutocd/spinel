@@ -414,11 +414,18 @@ static TyKind infer_call(Compiler *c, int id) {
     if (!strcmp(name, "parameters")) return TY_POLY_ARRAY;
   }
 
-  /* TY_CLASS method dispatch -- .new on a dynamic class variable returns TY_POLY */
+  /* TY_CLASS method dispatch -- .new on a dynamic class variable returns TY_POLY.
+     Exception: self.class.new(...) resolves to the enclosing class statically. */
   if (recv >= 0 && rt == TY_CLASS && !strcmp(name, "new") &&
       nt_type(nt, recv) && strcmp(nt_type(nt, recv), "ConstantReadNode") != 0 &&
-      strcmp(nt_type(nt, recv), "ConstantPathNode") != 0)
-    return TY_POLY;
+      strcmp(nt_type(nt, recv), "ConstantPathNode") != 0) {
+    int _is_self_class = (nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "class") &&
+      nt_ref(nt, recv, "receiver") >= 0 &&
+      nt_type(nt, nt_ref(nt, recv, "receiver")) &&
+      !strcmp(nt_type(nt, nt_ref(nt, recv, "receiver")), "SelfNode"));
+    if (!_is_self_class) return TY_POLY;
+  }
 
   if (recv >= 0 && rt == TY_CLASS && strcmp(name, "new") != 0) {
     if (argc == 0 && (!strcmp(name, "to_s") || !strcmp(name, "name") || !strcmp(name, "inspect")))
