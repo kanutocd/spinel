@@ -7051,6 +7051,19 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, " _t%d; })", ts);
       return;
     }
+    if (k && rhs_ty == TY_POLY && rt != TY_POLY_ARRAY) {
+      /* poly RHS wrapping a same-kind array (e.g. PolyArray element is IntArray):
+         unbox via v.p cast and copy elements */
+      int ta3 = ++g_tmp, ti3 = ++g_tmp, ts3 = ++g_tmp, tj3 = ++g_tmp;
+      buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta3); emit_expr(c, recv, b);
+      buf_printf(b, "; mrb_int _t%d = ", ti3); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+      buf_printf(b, "sp_RbVal _tv%d = ", ts3); emit_expr(c, argv[2], b); buf_puts(b, "; ");
+      buf_printf(b, "sp_%sArray *_t%d = (sp_%sArray *)_tv%d.v.p; ", k, ts3, k, ts3);
+      buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++)", tj3, tj3, k, ts3, tj3);
+      buf_printf(b, " sp_%sArray_set(_t%d, _t%d + _t%d, sp_%sArray_get(_t%d, _t%d));", k, ta3, ti3, tj3, k, ts3, tj3);
+      buf_printf(b, " _tv%d; })", ts3);
+      return;
+    }
     if (k && !ty_is_array(rhs_ty)) {
       /* scalar RHS: set element at start index and return the scalar value */
       int ta2 = ++g_tmp, ti2 = ++g_tmp, tv2 = ++g_tmp;
@@ -7060,7 +7073,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_RbVal _t%d = ", tv2); emit_boxed(c, argv[2], b);
       }
       else {
-        emit_ctype(c, ty_array_elem(rt), b); buf_printf(b, " _t%d = ", tv2); emit_expr(c, argv[2], b);
+        TyKind et2 = ty_array_elem(rt);
+        emit_ctype(c, et2, b); buf_printf(b, " _t%d = ", tv2);
+        if (rhs_ty == TY_POLY && et2 == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[2], b); buf_puts(b, ")"); }
+        else if (rhs_ty == TY_POLY && et2 == TY_STRING) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[2], b); buf_puts(b, ")"); }
+        else if (rhs_ty == TY_POLY && et2 == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[2], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[2], b);
       }
       buf_printf(b, "; sp_%sArray_set(_t%d, _t%d, _t%d); _t%d; })", k, ta2, ti2, tv2, tv2);
       return;
@@ -7075,7 +7093,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       if (rt == TY_POLY_ARRAY) {
         buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[1], b);
       }
-      else { emit_ctype(c, ty_array_elem(rt), b); buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[1], b); }
+      else {
+        TyKind et = ty_array_elem(rt);
+        TyKind vt = comp_ntype(c, argv[1]);
+        emit_ctype(c, et, b); buf_printf(b, " _t%d = ", tv);
+        if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[1], b);
+      }
       buf_printf(b, "; sp_%sArray_set(_t%d, _t%d, _t%d); _t%d; })", k, t, ti, tv, tv);
       return;
     }
