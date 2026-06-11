@@ -3260,12 +3260,31 @@ static int infer_param_types(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
-    if (!strcmp(ty, "SuperNode")) {
+    if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) {
       Scope *s = comp_scope_of(c, id);
       if (s->class_id < 0 || !s->name) continue;
       int p = c->classes[s->class_id].parent;
       if (p < 0) continue;
-      changed |= bind_call_params(c, id, comp_method_in_chain(c, p, s->name, NULL));
+      int pmi = comp_method_in_chain(c, p, s->name, NULL);
+      if (pmi < 0) continue;
+      if (!strcmp(ty, "ForwardingSuperNode")) {
+        /* bare `super` forwards all current params to parent */
+        Scope *pm = &c->scopes[pmi];
+        int n = s->nparams < pm->nparams ? s->nparams : pm->nparams;
+        if (pm->rest_idx >= 0 && n > pm->rest_idx) n = pm->rest_idx;
+        for (int k = 0; k < n; k++) {
+          LocalVar *src = scope_local(s, s->pnames[k]);
+          LocalVar *dst = scope_local(pm, pm->pnames[k]);
+          if (!src || !dst) continue;
+          TyKind at = src->type;
+          if (at == TY_UNKNOWN) continue;
+          TyKind mg = ty_unify(dst->type, at);
+          if (mg != dst->type) { dst->type = mg; changed = 1; }
+        }
+      }
+      else {
+        changed |= bind_call_params(c, id, pmi);
+      }
       continue;
     }
     /* op-assign on an object slot: `lv OP= rhs` / `@iv OP= rhs` is an
