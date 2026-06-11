@@ -2252,6 +2252,13 @@ static void collect_def_params(Compiler *c, int def_id, Scope *s) {
   if (bp >= 0 && nt_type(c->nt, bp) && !strcmp(nt_type(c->nt, bp), "BlockParameterNode")) {
     const char *bn = nt_str(c->nt, bp, "name");
     s->blk_param = strdup(bn ? bn : "");
+    /* Register the &block param as a local so mark_proc_captures can find it
+       and mark it is_cell when a nested proc body captures it. */
+    if (bn && bn[0]) {
+      LocalVar *blv = scope_local_intern(s, bn);
+      blv->is_param = 1;
+      blv->type = TY_PROC;
+    }
   }
 }
 
@@ -4825,6 +4832,40 @@ static int infer_block_params(Compiler *c) {
         }
         continue;
       }
+      /* Method with a named &block param (not inlined): blk_param.call(args)
+         inside the method body determines the arg types for the call-site block. */
+      if (mi >= 0 && !c->scopes[mi].yields &&
+          c->scopes[mi].blk_param && c->scopes[mi].blk_param[0]) {
+        const char *bpname = c->scopes[mi].blk_param;
+        Scope *bs = comp_scope_of(c, block);
+        for (int bid = 0; bid < nt->count; bid++) {
+          const char *bty2 = nt_type(nt, bid);
+          if (!bty2 || strcmp(bty2, "CallNode")) continue;
+          const char *bcn = nt_str(nt, bid, "name");
+          if (!bcn || strcmp(bcn, "call")) continue;
+          int brecv = nt_ref(nt, bid, "receiver");
+          if (brecv < 0) continue;
+          const char *brecvty = nt_type(nt, brecv);
+          if (!brecvty || strcmp(brecvty, "LocalVariableReadNode")) continue;
+          const char *brecvnm = nt_str(nt, brecv, "name");
+          if (!brecvnm || strcmp(brecvnm, bpname)) continue;
+          if (comp_scope_of(c, bid) != &c->scopes[mi]) continue;
+          int ba = nt_ref(nt, bid, "arguments");
+          int barc = 0; const int *barg = NULL;
+          if (ba >= 0) barg = nt_arr(nt, ba, "arguments", &barc);
+          if (barc == 0) continue;
+          for (int k = 0; k < barc; k++) {
+            const char *bp = block_param_name(c, block, k);
+            if (!bp) continue;
+            LocalVar *lv = scope_local_intern(bs, bp); lv->is_block_param = 1;
+            TyKind at = infer_type(c, barg[k]);
+            if (at == TY_UNKNOWN || at == lv->type) continue;
+            TyKind merged = ty_unify(lv->type, at);
+            if (merged != lv->type) { lv->type = merged; changed = 1; }
+          }
+        }
+        continue;
+      }
     }
 
     if (recv < 0) continue;
@@ -5835,6 +5876,18 @@ void analyze_program(Compiler *c) {
     /* Anonymous `&`: nameless, so it can only be forwarded -- always safe
        to inline (there is no escaping read to worry about). */
     if (!m->blk_param[0]) { m->yields = 1; continue; }
+    /* Mark nodes inside proc/lambda bodies nested within this method.
+       A blk_param read there is a real capture-escape: the proc runs
+       independently and needs blk to live in a heap cell. */
+    char *inproc_m = (char *)calloc((size_t)c->nt->count, 1);
+    if (inproc_m) {
+      for (int id = 0; id < c->nt->count; id++) {
+        if (!is_proc_create(c, id)) continue;
+        if (comp_scope_of(c, id) != m) continue;
+        int body = a_proc_body(c, id);
+        if (body >= 0) a_mark_subtree(c, body, inproc_m);
+      }
+    }
     int escapes = 0, uses = 0;
     for (int id = 0; id < c->nt->count && !escapes; id++) {
       const char *ty = nt_type(c->nt, id);
@@ -5842,6 +5895,9 @@ void analyze_program(Compiler *c) {
       if (comp_scope_of(c, id) != m) continue;
       const char *nm = nt_str(c->nt, id, "name");
       if (!nm || strcmp(nm, m->blk_param)) continue;
+      /* A read inside a nested proc body is a capture-escape: the proc
+         holds a reference to blk independently of the call site. */
+      if (inproc_m && inproc_m[id]) { escapes = 1; break; }
       uses++;
       /* approved: receiver of a `.call`, or expression of a `&block` arg */
       int ok = 0;
@@ -5856,6 +5912,7 @@ void analyze_program(Compiler *c) {
       }
       if (!ok) escapes = 1;
     }
+    free(inproc_m);
     if (!escapes && uses > 0) {
       /* Don't mark yields=1 if the method has an explicit return: emit_inlined_call
          would reject inlining anyway (scope_has_return), but the method would then

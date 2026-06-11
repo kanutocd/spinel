@@ -278,7 +278,13 @@ static const char *rename_local(const char *nm);
    writes share this (a cell deref is a valid lvalue). */
 static void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b) {
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
-    buf_printf(b, "(*((%s *)_cap)->%s)", g_cap_struct, name);
+    /* A TY_PROC capture is stored as (mrb_int)(uintptr_t)sp_Proc* in the cell.
+       Cast it back to sp_Proc* so call sites work. */
+    LocalVar *clv = scope_node >= 0 ? scope_local(comp_scope_of(c, scope_node), name) : NULL;
+    if (clv && clv->type == TY_PROC)
+      buf_printf(b, "(sp_Proc *)(uintptr_t)(*((%s *)_cap)->%s)", g_cap_struct, name);
+    else
+      buf_printf(b, "(*((%s *)_cap)->%s)", g_cap_struct, name);
     return;
   }
   LocalVar *lv = scope_node >= 0 ? scope_local(comp_scope_of(c, scope_node), name) : NULL;
@@ -3807,6 +3813,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     TyKind rty = comp_ntype(c, id);          /* the call's result = proc's body return */
     int unbox_ptr = proc_slot_is_ptr(rty);
     int unbox_poly = (rty == TY_POLY);
+    /* Ensure _sp_proc_poly_ret is declared even when triggered from a call site
+       (e.g. ivar-stored proc whose proc_ret is TY_UNKNOWN → TY_POLY at analysis). */
+    if (unbox_poly && !g_needs_proc_poly_retslot) {
+      g_needs_proc_poly_retslot = 1;
+      buf_puts(&g_proc_protos, "static sp_RbVal _sp_proc_poly_ret;\n");
+    }
     if (unbox_ptr) { buf_puts(b, "("); emit_ctype(c, rty, b); buf_puts(b, ")(uintptr_t)("); }
     /* poly return: proc stores result in _sp_proc_poly_ret; read it back after the call */
     if (unbox_poly) buf_puts(b, "((void)");
@@ -12714,6 +12726,23 @@ static void emit_op_assign(Compiler *c, int id, Buf *b, int indent) {
 /* ---- control flow ---- */
 
 static void emit_cond(Compiler *c, int id, Buf *b) {
+  /* &block parameter used as condition in a yielding (inlined) method must
+     be checked before the type-based dispatch below: now that blk_param is
+     a registered TY_PROC local, it would otherwise hit the "!= 0" pointer
+     path and emit lv_<blk> which is never declared at an inline site.
+     For non-inlined methods (yields=0) lv_<blk> is a real sp_Proc* and
+     the normal != 0 path handles it correctly. */
+  {
+    const char *nty = nt_type(c->nt, id);
+    if (nty && !strcmp(nty, "LocalVariableReadNode")) {
+      const char *nm = nt_str(c->nt, id, "name");
+      Scope *s = nm ? comp_scope_of(c, id) : NULL;
+      if (s && s->blk_param && nm && !strcmp(s->blk_param, nm) && s->yields) {
+        buf_puts(b, g_block_id >= 0 ? "1" : "0");
+        return;
+      }
+    }
+  }
   TyKind t = comp_ntype(c, id);
   if (t == TY_POLY) { buf_puts(b, "sp_poly_truthy("); emit_expr(c, id, b); buf_puts(b, ")"); return; }
   if (t == TY_NIL)  { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 0)"); return; }
@@ -12727,18 +12756,6 @@ static void emit_cond(Compiler *c, int id, Buf *b) {
   if (t == TY_INT)   { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != SP_INT_NIL)"); return; }
   if (t == TY_FLOAT) { buf_puts(b, "(!sp_float_is_nil("); emit_expr(c, id, b); buf_puts(b, "))"); return; }
   if (t == TY_SYMBOL) { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 1)"); return; }
-  /* &block parameter used as condition — same semantics as block_given? */
-  if (t == TY_UNKNOWN) {
-    const char *nty = nt_type(c->nt, id);
-    if (nty && !strcmp(nty, "LocalVariableReadNode")) {
-      const char *nm = nt_str(c->nt, id, "name");
-      Scope *s = nm ? comp_scope_of(c, id) : NULL;
-      if (s && s->blk_param && nm && !strcmp(s->blk_param, nm)) {
-        buf_puts(b, g_block_id >= 0 ? "1" : "0");
-        return;
-      }
-    }
-  }
   if (t != TY_BOOL) unsupported(c, id, "condition (non-bool)");
   emit_expr(c, id, b);
 }
