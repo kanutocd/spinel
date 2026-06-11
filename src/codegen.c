@@ -6217,10 +6217,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return; }
   }
 
-  /* poly.is_a?(class_var) where the argument is a TY_CLASS typed expression */
+  /* poly.is_a?(class_var) where the argument is a TY_CLASS typed expression.
+     Skip if argv[0] is a ConstantReadNode: the fast-path below handles builtins. */
   if (recv >= 0 && rt == TY_POLY && argc == 1 &&
       (!strcmp(name, "is_a?") || !strcmp(name, "kind_of?") || !strcmp(name, "instance_of?")) &&
-      comp_ntype(c, argv[0]) == TY_CLASS) {
+      comp_ntype(c, argv[0]) == TY_CLASS &&
+      !(nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "ConstantReadNode"))) {
     int t = ++g_tmp, k = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_expr(c, recv, b); buf_printf(b, "; ");
     buf_printf(b, "sp_Class _t%d = ", k); emit_expr(c, argv[0], b); buf_printf(b, "; ");
@@ -12566,7 +12568,7 @@ static void emit_expr(Compiler *c, int id, Buf *b) {
                Buf _vb; memset(&_vb,0,sizeof _vb); buf_printf(&_vb, "_t%d", t); \
                /* reuse emit_boxed by faking: just box by left type */ \
                if (lt==TY_INT) buf_printf(b, "sp_box_int(_t%d)", t); \
-               else if (lt==TY_STRING) buf_printf(b, "sp_box_str(_t%d)", t); \
+               else if (lt==TY_STRING) buf_printf(b, "sp_box_nullable_str(_t%d)", t); \
                else if (lt==TY_FLOAT) buf_printf(b, "sp_box_float(_t%d)", t); \
                else if (lt==TY_BOOL) buf_printf(b, "sp_box_bool(_t%d)", t); \
                else if (lt==TY_SYMBOL) buf_printf(b, "sp_box_sym(_t%d)", t); \
@@ -14438,6 +14440,9 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     if (vty && !strcmp(vty, "NilNode")) {
       if (ivt == TY_RANGE) buf_puts(b, "(sp_Range){0}");
       else if (ivt == TY_POLY) buf_puts(b, "sp_box_nil()");
+      else if (ivt == TY_INT) buf_puts(b, "SP_INT_NIL");
+      else if (ivt == TY_FLOAT) buf_puts(b, "sp_float_nil()");
+      else if (ivt == TY_STRING) buf_puts(b, "NULL");
       else buf_puts(b, default_value(ivt));
     }
     else if (v_empty_array && ivt == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
@@ -15434,6 +15439,22 @@ static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "CallNode") && nt_ref(nt, id, "block") >= 0 &&
       emit_iteration_stmt(c, id, b, indent))
     return;
+
+  /* string << at tail position: mutate receiver, then return it */
+  if (!strcmp(ty, "CallNode")) {
+    int _srecv = nt_ref(nt, id, "receiver");
+    const char *_snm = nt_str(nt, id, "name");
+    if (_srecv >= 0 && _snm && !strcmp(_snm, "<<") &&
+        comp_ntype(c, _srecv) == TY_STRING &&
+        emit_array_mutate_stmt(c, id, b, indent)) {
+      emit_indent(b, indent); emit_tail_lead(b);
+      int _wp = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
+      if (_wp) emit_boxed(c, _srecv, b);
+      else emit_expr(c, _srecv, b);
+      buf_puts(b, ";\n");
+      return;
+    }
+  }
 
   /* a value expression: return it (or assign to the begin/rescue result) */
   emit_indent(b, indent);
