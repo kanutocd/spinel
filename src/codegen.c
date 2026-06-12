@@ -402,6 +402,7 @@ static const char *c_type_name(TyKind t) {
     case TY_POLY_ARRAY:   return "sp_PolyArray *";
     case TY_PROC:         return "sp_Proc *";
     case TY_FIBER:        return "sp_Fiber *";
+    case TY_RANDOM:       return "sp_Random *";
     case TY_IO:           return "sp_File *";
     case TY_CLASS:        return "sp_Class";
     default:             return NULL;
@@ -411,7 +412,7 @@ static int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
          t == TY_SYMBOL || t == TY_RANGE || t == TY_TIME || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_MATCHDATA || t == TY_REGEX || t == TY_EXCEPTION ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
-         t == TY_POLY || t == TY_POLY_ARRAY || t == TY_PROC || t == TY_FIBER || t == TY_IO || t == TY_CLASS ||
+         t == TY_POLY || t == TY_POLY_ARRAY || t == TY_PROC || t == TY_FIBER || t == TY_RANDOM || t == TY_IO || t == TY_CLASS ||
          ty_is_hash(t) || ty_is_object(t);
 }
 /* Map an FFI type spec string to the C type used in extern prototypes.
@@ -459,6 +460,7 @@ static const char *default_value(TyKind t) {
     case TY_POLY_ARRAY: return "NULL";
     case TY_PROC:    return "NULL";
     case TY_FIBER:   return "NULL";
+    case TY_RANDOM:  return "NULL";
     case TY_IO:      return "NULL";
     case TY_POLY:    return "sp_box_nil()";
     case TY_CLASS:   return "((sp_Class){-1})";
@@ -4076,6 +4078,44 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* Random class methods: Random.rand(n) / Random.rand / Random.bytes(n)
+     share a lazily-seeded default instance. */
+  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
+      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Random")) {
+    if (!strcmp(name, "rand")) {
+      if (argc >= 1) {
+        buf_puts(b, "sp_Random_rand_int(sp_random_default_get(), ");
+        emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
+      else buf_puts(b, "sp_Random_rand_float(sp_random_default_get())");
+      return;
+    }
+    if (!strcmp(name, "bytes") && argc == 1) {
+      buf_puts(b, "sp_Random_bytes(sp_random_default_get(), ");
+      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
+  }
+
+  /* Random instance methods */
+  if (recv >= 0 && comp_ntype(c, recv) == TY_RANDOM) {
+    if (!strcmp(name, "rand")) {
+      if (argc >= 1) {
+        buf_puts(b, "sp_Random_rand_int("); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
+      else {
+        buf_puts(b, "sp_Random_rand_float("); emit_expr(c, recv, b); buf_puts(b, ")");
+      }
+      return;
+    }
+    if (!strcmp(name, "bytes") && argc == 1) {
+      buf_puts(b, "sp_Random_bytes("); emit_expr(c, recv, b); buf_puts(b, ", ");
+      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
+  }
+
   /* TY_IO (File/IO handle) instance methods */
   if (recv >= 0 && comp_ntype(c, recv) == TY_IO) {
     const char *r = NULL;
@@ -5368,6 +5408,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         /* Single-threaded: a Thread is modeled as a Fiber that runs to
            completion on #value (no preemption, no Fiber.yield in the body). */
         emit_fiber_new(c, id, b);
+        return;
+      }
+      if (cn && !strcmp(cn, "Random")) {
+        buf_puts(b, "sp_Random_new(");
+        if (argc >= 1) emit_expr(c, argv[0], b);
+        else buf_puts(b, "(mrb_int)time(NULL)");
+        buf_puts(b, ")");
         return;
       }
       if (cn && !strcmp(cn, "StringScanner") && argc == 1) {
