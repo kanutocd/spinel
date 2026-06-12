@@ -16543,6 +16543,31 @@ static int fiber_cap_needs_root(TyKind t) {
          t == TY_MATCHDATA || t == TY_REGEX || t == TY_TIME;
 }
 
+/* Returns 1 if the fiber body accesses instance state (ivars, self, or
+   implicit self-dispatch calls) without crossing into nested blocks/lambdas. */
+static int fiber_body_uses_self(Compiler *c, int id) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(c->nt, id);
+  if (!ty) return 0;
+  if (!strcmp(ty, "InstanceVariableReadNode") || !strcmp(ty, "InstanceVariableWriteNode") ||
+      !strcmp(ty, "InstanceVariableOperatorWriteNode") ||
+      !strcmp(ty, "InstanceVariableOrWriteNode") || !strcmp(ty, "InstanceVariableAndWriteNode") ||
+      !strcmp(ty, "SelfNode")) return 1;
+  if (!strcmp(ty, "CallNode") && nt_ref(c->nt, id, "receiver") < 0) return 1;
+  int nr = nt_num_refs(c->nt, id);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(c->nt, id, i);
+    if (ch >= 0 && !is_nested_block(nt_type(c->nt, ch)) && fiber_body_uses_self(c, ch)) return 1;
+  }
+  int na = nt_num_arrs(c->nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(c->nt, id, i, &n);
+    for (int k = 0; k < n; k++)
+      if (ids[k] >= 0 && !is_nested_block(nt_type(c->nt, ids[k])) && fiber_body_uses_self(c, ids[k])) return 1;
+  }
+  return 0;
+}
+
 static void emit_fiber_new(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int blk = nt_ref(nt, id, "block");
@@ -16589,9 +16614,18 @@ static void emit_fiber_new(Compiler *c, int id, Buf *b) {
 
   int ncap = caps.n;
 
-  /* Emit capture struct + GC scan function when there are captured vars */
-  if (ncap > 0) {
+  /* Capture self if the body accesses ivars or dispatches to self implicitly */
+  int cap_self = 0;
+  const char *cap_self_class = NULL;
+  if (encl && encl->class_id >= 0 && !encl->is_cmethod && body >= 0 && fiber_body_uses_self(c, body)) {
+    cap_self = 1;
+    cap_self_class = c->classes[encl->class_id].name;
+  }
+
+  /* Emit capture struct + GC scan function when there are captured vars or self */
+  if (ncap > 0 || cap_self) {
     buf_printf(&g_proc_protos, "typedef struct {");
+    if (cap_self) buf_printf(&g_proc_protos, " sp_%s *self_ptr;", cap_self_class);
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
       TyKind ct = lv ? lv->type : TY_POLY;
@@ -16602,6 +16636,7 @@ static void emit_fiber_new(Compiler *c, int id, Buf *b) {
     buf_printf(&g_proc_protos, "static void _fib_cap_scan_%d(void *p) {\n", fid);
     buf_printf(&g_proc_protos, "  sp_gc_mark(p);\n");
     buf_printf(&g_proc_protos, "  _fib_cap_%d *_c = (_fib_cap_%d *)p;\n", fid, fid);
+    if (cap_self) buf_printf(&g_proc_protos, "  if (_c->self_ptr) sp_gc_mark((void *)_c->self_ptr);\n");
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
       TyKind ct = lv ? lv->type : TY_POLY;
@@ -16630,8 +16665,13 @@ static void emit_fiber_new(Compiler *c, int id, Buf *b) {
   g_ret_type = TY_POLY; g_result_poly = 0; g_result_var = NULL;
 
   /* Unpack capture struct */
-  if (ncap > 0) {
+  if (ncap > 0 || cap_self) {
     buf_printf(pb, "    _fib_cap_%d *_fc = (_fib_cap_%d *)_fb->user_data;\n", fid, fid);
+    if (cap_self) {
+      const char *svar = sv_self ? sv_self : "self";
+      buf_printf(pb, "    sp_%s *%s = _fc->self_ptr;\n", cap_self_class, svar);
+      buf_printf(pb, "    SP_GC_ROOT(%s);\n", svar);
+    }
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
       TyKind ct = lv ? lv->type : TY_POLY;
@@ -16720,7 +16760,7 @@ static void emit_fiber_new(Compiler *c, int id, Buf *b) {
      If there are captures, allocate a GC-managed capture struct, fill it,
      assign to fiber->user_data, then return the fiber.
      Without captures: just sp_Fiber_new(fname). */
-  if (ncap > 0) {
+  if (ncap > 0 || cap_self) {
     int tf = ++g_tmp, tc = ++g_tmp;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_Fiber *_t%d = sp_Fiber_new(%s);\n", tf, fname);
@@ -16729,6 +16769,10 @@ static void emit_fiber_new(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "_fib_cap_%d *_t%d = (_fib_cap_%d *)sp_gc_alloc(sizeof(_fib_cap_%d), NULL, _fib_cap_scan_%d);\n",
                fid, tc, fid, fid, fid);
+    if (cap_self) {
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "_t%d->self_ptr = %s;\n", tc, sv_self ? sv_self : "self");
+    }
     for (int i = 0; i < ncap; i++) {
       const char *rn = rename_local(caps.v[i]);
       emit_indent(g_pre, g_indent);
