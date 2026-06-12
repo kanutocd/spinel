@@ -6957,11 +6957,12 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   }
   /* a predicate on an empty array literal folds to a constant: the block (if
      any) never runs, so empty all?/none? are true, any?/one? false */
-  if (recv >= 0 && argc == 0 &&
+  if (recv >= 0 && (argc == 0 || argc == 1) &&
       (!strcmp(name, "all?") || !strcmp(name, "any?") ||
-       !strcmp(name, "none?") || !strcmp(name, "one?")) &&
+       !strcmp(name, "none?") || !strcmp(name, "one?") || !strcmp(name, "count")) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ArrayNode") &&
       ({ int _n = 0; nt_arr(nt, recv, "elements", &_n); _n == 0; })) {
+    if (!strcmp(name, "count")) { buf_puts(b, "0"); return; }
     buf_puts(b, (!strcmp(name, "all?") || !strcmp(name, "none?")) ? "1" : "0");
     return;
   }
@@ -8846,7 +8847,16 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
                      ti, ti, ek, trecv, ti);
-          if (ip) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti); }
+          if (ip) {
+            Scope *eic = comp_scope_of(c, ei_blk);
+            LocalVar *eilv = eic ? scope_local(eic, ip) : NULL;
+            TyKind eit = eilv ? eilv->type : TY_INT;
+            emit_indent(g_pre, g_indent + 1);
+            if (eit == TY_POLY)
+              buf_printf(g_pre, "lv_%s = sp_box_int(_t%d);\n", ip, ti);
+            else
+              buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti);
+          }
           emit_stmts(c, body, g_pre, g_indent + 1);
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
           buf_printf(b, "_t%d", trecv); return;
@@ -8949,6 +8959,23 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           emit_expr(c, argv[0], b);
         }
         buf_puts(b, ")");
+        return;
+      }
+      if (!strcmp(name, "fetch") && (argc == 1 || argc == 2)) {
+        int ta = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp, tnorm = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_%sArray *_t%d = %s;", k, ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        buf_printf(b, " mrb_int _t%d = ", ti); emit_expr(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, " mrb_int _t%d = sp_%sArray_length(_t%d);", tn, k, ta);
+        buf_printf(b, " mrb_int _t%d = _t%d < 0 ? _t%d + _t%d : _t%d;", tnorm, ti, ti, tn, ti);
+        buf_printf(b, " (_t%d >= 0 && _t%d < _t%d) ? sp_%sArray_get(_t%d, _t%d) :", tnorm, tnorm, tn, k, ta, tnorm);
+        if (argc == 2) {
+          buf_puts(b, " "); emit_expr(c, argv[1], b); buf_puts(b, "; })");
+        }
+        else {
+          buf_printf(b, " (sp_raise_cls(\"IndexError\", \"index out of bounds\"), %s); })",
+                     default_value(ty_array_elem(rt)));
+        }
         return;
       }
       if (!strcmp(name, "dig") && argc >= 1) {
@@ -9123,6 +9150,52 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, " } _t%d; })", tr);
         return;
       }
+      if (!strcmp(name, "product") && argc == 1) {
+        TyKind at = comp_ntype(c, argv[0]);
+        const char *kb = (at == TY_POLY_ARRAY) ? "Poly" : (array_kind(at) ? array_kind(at) : "Poly");
+        int ta = ++g_tmp, tb = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp, tpair = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); Buf rb2; memset(&rb2, 0, sizeof rb2);
+        emit_expr(c, recv, &ra); emit_expr(c, argv[0], &rb2);
+        buf_printf(b, "({ sp_%sArray *_t%d = %s; sp_%sArray *_t%d = %s;",
+                   k, ta, ra.p ? ra.p : "NULL", kb, tb, rb2.p ? rb2.p : "NULL");
+        free(ra.p); free(rb2.p);
+        buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        buf_printf(b, " sp_PolyArray *_t%d = NULL;", tpair);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {", ti, ti, k, ta, ti);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {", tj, tj, kb, tb, tj);
+        buf_printf(b, " _t%d = sp_PolyArray_new();", tpair);
+        if (rt == TY_INT_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_IntArray_get(_t%d, _t%d)));", tpair, ta, ti);
+        else if (rt == TY_STR_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_StrArray_get(_t%d, _t%d)));", tpair, ta, ti);
+        else if (rt == TY_FLOAT_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_float(sp_FloatArray_get(_t%d, _t%d)));", tpair, ta, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, ta, ti);
+        if (at == TY_INT_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_IntArray_get(_t%d, _t%d)));", tpair, tb, tj);
+        else if (at == TY_STR_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_StrArray_get(_t%d, _t%d)));", tpair, tb, tj);
+        else if (at == TY_FLOAT_ARRAY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_float(sp_FloatArray_get(_t%d, _t%d)));", tpair, tb, tj);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, tb, tj);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));", tr, tpair);
+        buf_printf(b, " } } _t%d; })", tr);
+        return;
+      }
+      if (!strcmp(name, "repeated_combination") && argc == 1 && rt == TY_INT_ARRAY) {
+        int ta = ++g_tmp, tc = ++g_tmp, tout = ++g_tmp, ti = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_IntArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        buf_printf(b, " sp_PtrArray *_t%d = sp_IntArray_repeated_combination(_t%d, ", tc, ta);
+        emit_expr(c, argv[0], b);
+        buf_printf(b, "); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tout, tout);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++)", ti, ti, tc, ti);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int_array(_t%d->data[_t%d]));", tout, tc, ti);
+        buf_printf(b, " _t%d; })", tout);
+        return;
+      }
       if (!strcmp(name, "rotate!") && argc <= 1) {
         int t = ++g_tmp;
         buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
@@ -9174,8 +9247,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         if (bn >= 1) {
           TyKind et = ty_array_elem(rt);
           int trecv = ++g_tmp, tlo = ++g_tmp, thi = ++g_tmp, tres = ++g_tmp, tmid = ++g_tmp;
+          Buf rbs; memset(&rbs, 0, sizeof rbs); emit_expr(c, recv, &rbs);
           emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = ", trecv); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+          buf_printf(g_pre, " _t%d = %s;\n", trecv, rbs.p ? rbs.p : "NULL"); free(rbs.p);
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "mrb_int _t%d = 0, _t%d = sp_%sArray_length(_t%d) - 1;\n", tlo, thi, k, trecv);
           emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre);
@@ -9204,8 +9278,9 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
         if (bn >= 1) {
           int trecv = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp;
+          Buf rfi; memset(&rfi, 0, sizeof rfi); emit_expr(c, recv, &rfi);
           emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
-          buf_printf(g_pre, " _t%d = ", trecv); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
+          buf_printf(g_pre, " _t%d = %s;\n", trecv, rfi.p ? rfi.p : "NULL"); free(rfi.p);
           emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = SP_INT_NIL;\n", tres);
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
@@ -9218,7 +9293,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "if (%s) { _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
           free(cb.p);
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-          buf_printf(b, "_t%d", tres); return;
+          buf_printf(b, "(_t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d))", tres, tres);
+          return;
         }
       }
       /* find / detect { |x| cond } - returns element or nil */
@@ -9338,6 +9414,27 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         const char *op = !strcmp(name, "all?") ? ">= 0" : !strcmp(name, "any?") ? "> 0"
                        : !strcmp(name, "none?") ? "== 0" : "== 1";
         buf_printf(b, "(sp_%sArray_length(", k); emit_expr(c, recv, b); buf_printf(b, ") %s)", op);
+        return;
+      }
+      if ((!strcmp(name, "any?") || !strcmp(name, "none?") || !strcmp(name, "one?") || !strcmp(name, "count")) &&
+          argc == 1 && nt_ref(nt, id, "block") < 0) {
+        /* array.any?(v) / none?(v) / one?(v) / count(v) -- compare by == */
+        int ta = ++g_tmp, tv = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_%sArray *_t%d = %s;", k, ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        emit_indent(g_pre, 0);
+        buf_printf(b, " "); emit_ctype(c, ty_array_elem(rt), b);
+        buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, " mrb_int _t%d = 0;", tc);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++)", ti, ti, k, ta, ti);
+        if (rt == TY_STR_ARRAY)
+          buf_printf(b, " if (strcmp(sp_%sArray_get(_t%d, _t%d), _t%d) == 0) _t%d++;", k, ta, ti, tv, tc);
+        else
+          buf_printf(b, " if (sp_%sArray_get(_t%d, _t%d) == _t%d) _t%d++;", k, ta, ti, tv, tc);
+        if (!strcmp(name, "any?"))   buf_printf(b, " _t%d > 0; })", tc);
+        else if (!strcmp(name, "none?"))  buf_printf(b, " _t%d == 0; })", tc);
+        else if (!strcmp(name, "one?"))   buf_printf(b, " _t%d == 1; })", tc);
+        else                              buf_printf(b, " _t%d; })", tc);
         return;
       }
       if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) &&
@@ -9558,6 +9655,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "); })");
         return;
       }
+      if ((!strcmp(name, "any?") || !strcmp(name, "none?") || !strcmp(name, "one?") || !strcmp(name, "count")) &&
+          argc == 1 && nt_ref(nt, id, "block") < 0) {
+        /* poly_array.one?(v) / any?(v) / none?(v) / count(v) */
+        int ta = ++g_tmp, tv = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        buf_printf(b, " sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, " mrb_int _t%d = 0;", tc);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++)", ti, ti, ta, ti);
+        buf_printf(b, " if (sp_poly_eq(sp_PolyArray_get(_t%d, _t%d), _t%d)) _t%d++;", ta, ti, tv, tc);
+        if (!strcmp(name, "any?"))        buf_printf(b, " _t%d > 0; })", tc);
+        else if (!strcmp(name, "none?"))  buf_printf(b, " _t%d == 0; })", tc);
+        else if (!strcmp(name, "one?"))   buf_printf(b, " _t%d == 1; })", tc);
+        else                              buf_printf(b, " _t%d; })", tc);
+        return;
+      }
       if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0
           && nt_ref(nt, id, "block") < 0) {
         buf_puts(b, "sp_PolyArray_length("); emit_expr(c, recv, b); buf_puts(b, ")");
@@ -9603,6 +9716,50 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
       if (!strcmp(name, "to_a") && argc == 0) { emit_expr(c, recv, b); return; }
+      if (!strcmp(name, "fetch") && (argc == 1 || argc == 2)) {
+        int ta = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp, tnorm = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        buf_printf(b, " mrb_int _t%d = ", ti); emit_expr(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, " mrb_int _t%d = sp_PolyArray_length(_t%d);", tn, ta);
+        buf_printf(b, " mrb_int _t%d = _t%d < 0 ? _t%d + _t%d : _t%d;", tnorm, ti, ti, tn, ti);
+        buf_printf(b, " (_t%d >= 0 && _t%d < _t%d) ? sp_PolyArray_get(_t%d, _t%d) :", tnorm, tnorm, tn, ta, tnorm);
+        if (argc == 2) {
+          buf_puts(b, " "); emit_boxed(c, argv[1], b); buf_puts(b, "; })");
+        }
+        else {
+          buf_printf(b, " (sp_raise_cls(\"IndexError\", \"index out of bounds\"), sp_box_nil()); })");
+        }
+        return;
+      }
+      if (!strcmp(name, "zip") && argc >= 1 && nt_ref(nt, id, "block") < 0) {
+        int ta = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, tpair = ++g_tmp;
+        int tb[16]; TyKind at[16]; int nargs = argc < 16 ? argc : 16;
+        for (int j = 0; j < nargs; j++) { tb[j] = ++g_tmp; at[j] = comp_ntype(c, argv[j]); }
+        Buf ra; memset(&ra, 0, sizeof ra); emit_expr(c, recv, &ra);
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        for (int j = 0; j < nargs; j++) {
+          const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
+          buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
+        }
+        buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
+        buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new();", tpair);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, ta, ti);
+        for (int j = 0; j < nargs; j++) {
+          if (at[j] == TY_INT_ARRAY)
+            buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_IntArray_get(_t%d, _t%d)));", tpair, tb[j], ti);
+          else if (at[j] == TY_STR_ARRAY)
+            buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_StrArray_get(_t%d, _t%d)));", tpair, tb[j], ti);
+          else if (at[j] == TY_FLOAT_ARRAY)
+            buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_float(sp_FloatArray_get(_t%d, _t%d)));", tpair, tb[j], ti);
+          else
+            buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, tb[j], ti);
+        }
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));", tr, tpair);
+        buf_printf(b, " } _t%d; })", tr);
+        return;
+      }
       if (!strcmp(name, "last") && argc == 0) {
         int t = ++g_tmp;
         Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
@@ -9681,6 +9838,24 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "; sp_PolyArray_%s(_t%d); _t%d; })", base, t, t);
           return;
         }
+      }
+      if (!strcmp(name, "product") && argc == 1 && a0 == TY_POLY_ARRAY) {
+        int ta = ++g_tmp, tb = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp, tpair = ++g_tmp;
+        Buf ra; memset(&ra, 0, sizeof ra); Buf rb2; memset(&rb2, 0, sizeof rb2);
+        emit_expr(c, recv, &ra); emit_expr(c, argv[0], &rb2);
+        buf_printf(b, "({ sp_PolyArray *_t%d = %s; sp_PolyArray *_t%d = %s;",
+                   ta, ra.p ? ra.p : "NULL", tb, rb2.p ? rb2.p : "NULL");
+        free(ra.p); free(rb2.p);
+        buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        buf_printf(b, " sp_PolyArray *_t%d = NULL;", tpair);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {", tj, tj, tb, tj);
+        buf_printf(b, " _t%d = sp_PolyArray_new();", tpair);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, ta, ti);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_PolyArray_get(_t%d, _t%d));", tpair, tb, tj);
+        buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));", tr, tpair);
+        buf_printf(b, " } } _t%d; })", tr);
+        return;
       }
       if (!strcmp(name, "rotate!") && argc <= 1) {
         int t = ++g_tmp;

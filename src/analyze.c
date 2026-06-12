@@ -1322,6 +1322,7 @@ static TyKind infer_call(Compiler *c, int id) {
       return ty_array_elem(rt);
     }
     if (!strcmp(name, "at") && argc == 1) return ty_array_elem(rt);  /* like [i] */
+    if (!strcmp(name, "fetch") && (argc == 1 || argc == 2)) return ty_array_elem(rt);
     if (!strcmp(name, "dig") && argc >= 1) {
       if (argc == 1) return ty_array_elem(rt);
       return TY_POLY;
@@ -1439,6 +1440,8 @@ static TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "replace") ||
         !strcmp(name, "values_at")) return rt;
     if (!strcmp(name, "zip") && block < 0) return TY_POLY_ARRAY;
+    if (!strcmp(name, "product") && argc == 1) return TY_POLY_ARRAY;
+    if (!strcmp(name, "repeated_combination") && argc == 1) return TY_POLY_ARRAY;
     if (!strcmp(name, "frozen?")) return TY_BOOL;
     if ((!strcmp(name, "delete_at") || !strcmp(name, "delete")) && argc == 1)
       return ty_array_elem(rt);
