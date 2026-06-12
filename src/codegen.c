@@ -6480,6 +6480,55 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* Stage-2: the accessor holds one of several constants (stored as a boxed
+       Class). Dispatch the class method via a cls_id cascade over the slot. */
+    int cand[32];
+    int ncand = comp_sg_reader_candidates(c, recv, cand, 32);
+    if (ncand >= 2) {
+      int valid = 0;
+      for (int k = 0; k < ncand; k++) if (comp_cmethod_in_chain(c, cand[k], name, NULL) >= 0) valid++;
+      if (valid > 0) {
+        TyKind res = comp_ntype(c, id);
+        int void_res = (res == TY_VOID || res == TY_UNKNOWN);
+        int tcid = ++g_tmp;
+        buf_printf(b, "({ int _t%d = (", tcid); emit_expr(c, recv, b); buf_puts(b, ").cls_id; ");
+        if (void_res) {
+          for (int k = 0; k < ncand; k++) {
+            int defcls = -1;
+            int mi = comp_cmethod_in_chain(c, cand[k], name, &defcls);
+            if (mi < 0) continue;
+            buf_printf(b, "if (_t%d == %d) sp_%s_s_%s(", tcid, cand[k], c->classes[defcls].name, mc(c->scopes[mi].name));
+            emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
+            buf_puts(b, "); ");
+          }
+          buf_printf(b, "0; })");
+          return;
+        }
+        emit_ctype(c, res, b); buf_printf(b, " _t%d_r = %s; ", tcid, default_value(res));
+        for (int k = 0; k < ncand; k++) {
+          int defcls = -1;
+          int mi = comp_cmethod_in_chain(c, cand[k], name, &defcls);
+          if (mi < 0) continue;
+          buf_printf(b, "if (_t%d == %d) _t%d_r = ", tcid, cand[k], tcid);
+          if (res == TY_POLY && c->scopes[mi].ret != TY_POLY) {
+            Buf cb; memset(&cb, 0, sizeof cb);
+            buf_printf(&cb, "sp_%s_s_%s(", c->classes[defcls].name, mc(c->scopes[mi].name));
+            emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", &cb);
+            buf_puts(&cb, ")");
+            emit_boxed_text(c, c->scopes[mi].ret, cb.p ? cb.p : "0", b);
+            free(cb.p);
+          }
+          else {
+            buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].name, mc(c->scopes[mi].name));
+            emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
+            buf_puts(b, ")");
+          }
+          buf_puts(b, "; ");
+        }
+        buf_printf(b, "_t%d_r; })", tcid);
+        return;
+      }
+    }
   }
 
   /* Class.cmethod(args) / M::Sub.cmethod(args) -> sp_<Class>_s_<method>(args) */

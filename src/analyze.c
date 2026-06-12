@@ -1122,6 +1122,17 @@ static TyKind infer_call(Compiler *c, int id) {
       int mi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
       if (mi >= 0) return c->scopes[mi].ret;
     }
+    /* Stage-2: accessor holds one of several constants; unify their cmethod returns. */
+    int cand[32];
+    int ncand = comp_sg_reader_candidates(c, recv, cand, 32);
+    if (ncand >= 2) {
+      TyKind r = TY_UNKNOWN;
+      for (int k = 0; k < ncand; k++) {
+        int mi = comp_cmethod_in_chain(c, cand[k], name, NULL);
+        if (mi >= 0) r = ty_unify(r, c->scopes[mi].ret);
+      }
+      if (r != TY_UNKNOWN) return r;
+    }
   }
 
   /* Class.cmethod(...) / M::Sub.cmethod(...) -> the class method's return type */
@@ -5667,6 +5678,16 @@ static int infer_param_types(Compiler *c) {
       if (fold_ci >= 0) {
         int fmi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
         if (fmi >= 0) { changed |= bind_call_params(c, id, fmi); continue; }
+      }
+      int cand[32];
+      int ncand = comp_sg_reader_candidates(c, recv, cand, 32);
+      if (ncand >= 2) {
+        int bound = 0;
+        for (int k = 0; k < ncand; k++) {
+          int cmi = comp_cmethod_in_chain(c, cand[k], name, NULL);
+          if (cmi >= 0) { changed |= bind_call_params(c, id, cmi); bound = 1; }
+        }
+        if (bound) continue;
       }
     }
     /* Class.new -> initialize params; Class.cmethod -> cmethod params */

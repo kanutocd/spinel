@@ -266,11 +266,14 @@ int comp_trampoline_kind(Compiler *c, int class_id, const char *name, int *def_c
    constant: if `Class.base = SomeConst` appears exactly once program-wide and
    every write is the same constant-resolvable class/module, return that
    class's index; otherwise -1 (polymorphic / non-constant -> runtime path). */
-int comp_sg_const_binding(Compiler *c, int class_id, const char *base) {
+/* Collect the distinct constant class indices assigned to `Class.base = Const`
+   across the whole program (deduped, in first-seen order). Returns the count, or
+   -1 if any write's RHS is not a constant-resolvable class. */
+int comp_sg_const_candidates(Compiler *c, int class_id, const char *base, int *out, int max) {
   const NodeTable *nt = c->nt;
   const char *cls_name = c->classes[class_id].name;
   size_t blen = strlen(base);
-  int found = -1, count = 0;
+  int count = 0;
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "CallNode")) continue;
@@ -291,11 +294,18 @@ int comp_sg_const_binding(Compiler *c, int class_id, const char *base) {
     if (!vty || (strcmp(vty, "ConstantReadNode") && strcmp(vty, "ConstantPathNode"))) return -1;
     int rci = comp_class_index(c, nt_str(nt, av[0], "name"));
     if (rci < 0) return -1;
-    count++;
-    if (found < 0) found = rci;
-    else if (found != rci) return -1;
+    int seen = 0;
+    for (int j = 0; j < count; j++) if (out[j] == rci) { seen = 1; break; }
+    if (!seen && count < max) out[count++] = rci;
   }
-  return count == 1 ? found : -1;
+  return count;
+}
+
+/* Stage-1 fold: the accessor holds a single distinct constant program-wide. */
+int comp_sg_const_binding(Compiler *c, int class_id, const char *base) {
+  int cand[32];
+  int n = comp_sg_const_candidates(c, class_id, base, cand, 32);
+  return n == 1 ? cand[0] : -1;
 }
 
 /* If `call_id` reads a module singleton accessor (`Class.reader`) whose value
@@ -319,6 +329,29 @@ int comp_sg_reader_const(Compiler *c, int call_id) {
   int ci = rn ? comp_class_index(c, rn) : -1;
   if (ci < 0 || !comp_is_sg_reader(&c->classes[ci], nm)) return -1;
   return comp_sg_const_binding(c, ci, nm);
+}
+
+/* If `call_id` reads a module singleton accessor written with 2+ distinct
+   constants (Stage-2), fill out[] with those class indices and return the
+   count; otherwise 0 (or -1 if a non-constant RHS makes it un-resolvable). */
+int comp_sg_reader_candidates(Compiler *c, int call_id, int *out, int max) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, call_id);
+  if (!ty || strcmp(ty, "CallNode")) return 0;
+  if (nt_ref(nt, call_id, "block") >= 0) return 0;
+  if (nt_ref(nt, call_id, "arguments") >= 0) return 0;
+  const char *nm = nt_str(nt, call_id, "name");
+  if (!nm) return 0;
+  size_t nl = strlen(nm);
+  if (nl > 0 && nm[nl - 1] == '=') return 0;
+  int recv = nt_ref(nt, call_id, "receiver");
+  if (recv < 0) return 0;
+  const char *rty = nt_type(nt, recv);
+  if (!rty || (strcmp(rty, "ConstantReadNode") && strcmp(rty, "ConstantPathNode"))) return 0;
+  const char *rn = nt_str(nt, recv, "name");
+  int ci = rn ? comp_class_index(c, rn) : -1;
+  if (ci < 0 || !comp_is_sg_reader(&c->classes[ci], nm)) return 0;
+  return comp_sg_const_candidates(c, ci, nm, out, max);
 }
 
 /* A literal ArrayNode whose elements are all integer literals (or empty). */
