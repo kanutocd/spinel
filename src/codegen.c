@@ -4116,6 +4116,18 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   }
 
   /* Proc introspection: arity / lambda? read the sp_Proc metadata directly. */
+  /* proc << proc / proc >> proc -> composed Proc. f<<g = f(g(x)) (outer f,
+     inner g); f>>g = g(f(x)) (outer g, inner f). */
+  if (recv >= 0 && comp_ntype(c, recv) == TY_PROC && argc == 1 &&
+      (!strcmp(name, "<<") || !strcmp(name, ">>")) && comp_ntype(c, argv[0]) == TY_PROC) {
+    int fwd = !strcmp(name, ">>");
+    buf_puts(b, "sp_proc_compose(");
+    if (fwd) emit_expr(c, argv[0], b); else emit_expr(c, recv, b);
+    buf_puts(b, ", ");
+    if (fwd) emit_expr(c, recv, b); else emit_expr(c, argv[0], b);
+    buf_puts(b, ")");
+    return;
+  }
   if (recv >= 0 && comp_ntype(c, recv) == TY_PROC && argc == 0 && !strcmp(name, "arity")) {
     buf_puts(b, "sp_proc_arity("); emit_expr(c, recv, b); buf_puts(b, ")"); return;
   }

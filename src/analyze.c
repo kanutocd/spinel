@@ -337,6 +337,12 @@ static TyKind proc_ret_of(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, node);
   if (!ty) return TY_UNKNOWN;
+  /* unwrap `(expr)` so `(f << g).call` sees the composition node */
+  if (!strcmp(ty, "ParenthesesNode")) {
+    int body = nt_ref(nt, node, "body");
+    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    return bn == 1 ? proc_ret_of(c, bb[0]) : TY_UNKNOWN;
+  }
   if (!strcmp(ty, "LambdaNode") || is_proc_literal(c, node)) return proc_node_ret(c, node);
   if (!strcmp(ty, "LocalVariableReadNode")) {
     Scope *s = comp_scope_of(c, node);
@@ -347,6 +353,16 @@ static TyKind proc_ret_of(Compiler *c, int node) {
     /* a method call that returns a proc -> the callee's recorded proc return */
     int recv = nt_ref(nt, node, "receiver");
     const char *name = nt_str(nt, node, "name");
+    /* proc << proc / proc >> proc: the composed call returns the OUTER proc's
+       value (f<<g outer=f; f>>g outer=g). */
+    if (recv >= 0 && name && infer_type(c, recv) == TY_PROC) {
+      int args = nt_ref(nt, node, "arguments");
+      int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an == 1 && infer_type(c, av[0]) == TY_PROC) {
+        if (!strcmp(name, "<<")) return proc_ret_of(c, recv);
+        if (!strcmp(name, ">>")) return proc_ret_of(c, av[0]);
+      }
+    }
     int mi = -1;
     if (recv < 0) {
       mi = comp_method_index(c, name);
@@ -579,6 +595,12 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv >= 0 && rt == TY_PROC &&
       (!strcmp(name, "call") || !strcmp(name, "()") || !strcmp(name, "[]")))
     return proc_call_ret(c, recv);
+
+  /* Proc composition: proc << proc / proc >> proc -> a new Proc. */
+  if (recv >= 0 && rt == TY_PROC && argc == 1 &&
+      (!strcmp(name, "<<") || !strcmp(name, ">>")) &&
+      infer_type(c, argv[0]) == TY_PROC)
+    return TY_PROC;
 
   /* Proc introspection */
   if (recv >= 0 && rt == TY_PROC && argc == 0) {
