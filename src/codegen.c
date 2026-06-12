@@ -14786,11 +14786,67 @@ static void emit_cond(Compiler *c, int id, Buf *b) {
   emit_expr(c, id, b);
 }
 
+/* `obj.is_a?(Class)` (or kind_of?/instance_of?) with a concrete object receiver
+   is a compile-time constant: 1 (always) / 0 (never) / -1 (unknown). Lets a
+   specialized clone whose param has a known class drop statically-dead branches
+   (e.g. `instance.title=` in an arm guarded by `row.is_a?(ArticleRow)` when row
+   is a CommentRow), which would otherwise emit an unresolvable call. */
+static int static_isa_cond(Compiler *c, int pred) {
+  const NodeTable *nt = c->nt;
+  if (pred < 0 || !nt_type(nt, pred) || strcmp(nt_type(nt, pred), "CallNode")) return -1;
+  const char *nm = nt_str(nt, pred, "name");
+  if (!nm || (strcmp(nm, "is_a?") && strcmp(nm, "kind_of?") && strcmp(nm, "instance_of?"))) return -1;
+  int recv = nt_ref(nt, pred, "receiver");
+  if (recv < 0) return -1;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_object(rt)) return -1;
+  int args = nt_ref(nt, pred, "arguments");
+  int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+  if (ac != 1 || !av || !nt_type(nt, av[0]) || strcmp(nt_type(nt, av[0]), "ConstantReadNode")) return -1;
+  int target = comp_class_index(c, nt_str(nt, av[0], "name"));
+  if (target < 0) return -1;
+  int rcls = ty_object_class(rt);
+  if (rcls == target) return 1;
+  if (strcmp(nm, "instance_of?") && is_descendant(c, rcls, target)) return 1;
+  return 0;
+}
+
 static void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
   int then_b = nt_ref(nt, id, "statements");
   int sub = nt_ref(nt, id, is_unless ? "else_clause" : "subsequent");
+
+  /* Statically-decidable guard: drop the dead branch entirely. */
+  {
+    int sc = static_isa_cond(c, pred);
+    int eff = (sc < 0) ? -1 : (is_unless ? !sc : sc);
+    if (eff == 1) {
+      /* condition always true: emit only the then-branch */
+      emit_indent(b, indent); buf_puts(b, "{\n");
+      if (tail) emit_stmts_tail(c, then_b, b, indent + 1);
+      else      emit_stmts(c, then_b, b, indent + 1);
+      emit_indent(b, indent); buf_puts(b, "}\n");
+      return;
+    }
+    if (eff == 0) {
+      /* condition always false: emit only the subsequent (else / elsif) */
+      if (sub >= 0) {
+        const char *sty = nt_type(nt, sub);
+        if (sty && !strcmp(sty, "ElseNode")) {
+          emit_indent(b, indent); buf_puts(b, "{\n");
+          int s = nt_ref(nt, sub, "statements");
+          if (tail) emit_stmts_tail(c, s, b, indent + 1);
+          else      emit_stmts(c, s, b, indent + 1);
+          emit_indent(b, indent); buf_puts(b, "}\n");
+        }
+        else if (sty && !strcmp(sty, "IfNode")) {
+          emit_if(c, sub, b, indent, 0, tail);
+        }
+      }
+      return;
+    }
+  }
 
   emit_indent(b, indent);
   buf_puts(b, "if (");
