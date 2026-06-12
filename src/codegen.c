@@ -14820,33 +14820,80 @@ static int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *
 /* Emit the match condition for a pattern into buf as a C boolean expression.
    Returns 1 if a condition was emitted (requires a runtime check),
    0 if the pattern always matches (no condition needed). */
+/* Emit `_t<scrut> == <value-node>` as a C boolean, dispatching on the
+   scrutinee's static type (poly: sp_poly_eq with the value boxed). */
+static void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b) {
+  if (pt == TY_POLY) {
+    buf_printf(b, "sp_poly_eq(_t%d, ", t);
+    if (comp_ntype(c, valnode) != TY_POLY) emit_boxed(c, valnode, b);
+    else emit_expr(c, valnode, b);
+    buf_puts(b, ")");
+  }
+  else if (pt == TY_STRING) {
+    buf_printf(b, "sp_str_eq(_t%d, ", t); emit_expr(c, valnode, b); buf_puts(b, ")");
+  }
+  else {
+    buf_printf(b, "(_t%d == ", t); emit_expr(c, valnode, b); buf_puts(b, ")");
+  }
+}
+
 static int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *pty = nt_type(nt, pat);
   if (!pty) return 0;
-  if (!strcmp(pty, "IntegerNode")) {
-    long long v = (long long)nt_int(nt, pat, "value", 0);
-    buf_printf(b, "(_t%d == %lldLL)", t, v);
+  /* literal value patterns: scrutinee == literal */
+  if (!strcmp(pty, "IntegerNode") || !strcmp(pty, "FloatNode") ||
+      !strcmp(pty, "StringNode") || !strcmp(pty, "SymbolNode")) {
+    emit_pm_eq(c, t, pt, pat, b);
     return 1;
   }
-  if (!strcmp(pty, "StringNode")) {
-    const char *sv = nt_str(nt, pat, "content");
-    buf_printf(b, "sp_str_eq(_t%d, \"%s\")", t, sv ? sv : "");
+  /* nil / true / false literal patterns */
+  if (!strcmp(pty, "NilNode")) {
+    if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_NIL)", t);
+    else buf_puts(b, (pt == TY_NIL) ? "1" : "0");
     return 1;
   }
-  if (!strcmp(pty, "SymbolNode")) {
-    const char *sv = nt_str(nt, pat, "value");
-    if (sv) { buf_printf(b, "(_t%d == sp_sym_intern(\"%s\"))", t, sv); return 1; }
-    return 0;
+  if (!strcmp(pty, "TrueNode")) {
+    if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_BOOL && _t%d.v.b)", t, t);
+    else if (pt == TY_BOOL) buf_printf(b, "(_t%d)", t);
+    else buf_puts(b, "0");
+    return 1;
   }
+  if (!strcmp(pty, "FalseNode")) {
+    if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_BOOL && !_t%d.v.b)", t, t);
+    else if (pt == TY_BOOL) buf_printf(b, "(!_t%d)", t);
+    else buf_puts(b, "0");
+    return 1;
+  }
+  /* class pattern: runtime tag/class test for poly, compile-time fold otherwise */
   if (!strcmp(pty, "ConstantReadNode")) {
     const char *cn2 = nt_str(nt, pat, "name");
-    if (cn2) {
-      int yes = ty_matches_class(pt, cn2, 0);
-      buf_printf(b, "%d", yes > 0 ? 1 : 0);
+    if (!cn2) return 0;
+    if (pt == TY_POLY) {
+      char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
+      if (!emit_poly_class_when(c, pat, tmp, b)) buf_puts(b, "0");
       return 1;
     }
-    return 0;
+    int yes = ty_matches_class(pt, cn2, 0);
+    buf_printf(b, "%d", yes > 0 ? 1 : 0);
+    return 1;
+  }
+  /* alternation `a | b`: either side matches */
+  if (!strcmp(pty, "AlternationPatternNode")) {
+    int l = nt_ref(nt, pat, "left"), r = nt_ref(nt, pat, "right");
+    buf_puts(b, "(");
+    if (!emit_pm_cond(c, l, t, pt, b)) buf_puts(b, "1");
+    buf_puts(b, " || ");
+    if (!emit_pm_cond(c, r, t, pt, b)) buf_puts(b, "1");
+    buf_puts(b, ")");
+    return 1;
+  }
+  /* pin `^var` / `^@ivar` / `^(expr)`: scrutinee == the pinned value */
+  if (!strcmp(pty, "PinnedVariableNode") || !strcmp(pty, "PinnedExpressionNode")) {
+    int ex = nt_ref(nt, pat, "expression");
+    if (ex < 0) return 0;
+    emit_pm_eq(c, t, pt, ex, b);
+    return 1;
   }
   if (!strcmp(pty, "ArrayPatternNode")) {
     /* Length check */
@@ -14872,7 +14919,10 @@ static int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
 
 /* case/in (pattern match) -> bind pattern vars, optional guard check,
    then body; goto end_label to skip subsequent arms. */
-static void emit_case_match(Compiler *c, int id, Buf *b, int indent) {
+/* case/in pattern match. tail=1: each arm's body is in method-return position
+   (emitted via emit_stmts_tail), so arms diverge and no fallthrough label is
+   needed. tail=0: statement form, arms fall through to a shared end label. */
+static void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
   int cn = 0;
@@ -14990,13 +15040,13 @@ static void emit_case_match(Compiler *c, int id, Buf *b, int indent) {
       emit_indent(b, body_indent); buf_puts(b, "if (");
       emit_expr(c, guard, b);
       buf_puts(b, ") {\n");
-      emit_stmts(c, stmts, b, body_indent + 1);
-      emit_indent(b, body_indent + 1); buf_printf(b, "goto _pm_%d;\n", lbl);
+      if (tail) emit_stmts_tail(c, stmts, b, body_indent + 1);
+      else { emit_stmts(c, stmts, b, body_indent + 1); emit_indent(b, body_indent + 1); buf_printf(b, "goto _pm_%d;\n", lbl); }
       emit_indent(b, body_indent); buf_puts(b, "}\n");
     }
     else {
-      emit_stmts(c, stmts, b, body_indent);
-      emit_indent(b, body_indent); buf_printf(b, "goto _pm_%d;\n", lbl);
+      if (tail) emit_stmts_tail(c, stmts, b, body_indent);
+      else { emit_stmts(c, stmts, b, body_indent); emit_indent(b, body_indent); buf_printf(b, "goto _pm_%d;\n", lbl); }
     }
 
     if (has_cond) { emit_indent(b, indent + 1); buf_puts(b, "}\n"); }
@@ -15005,7 +15055,8 @@ static void emit_case_match(Compiler *c, int id, Buf *b, int indent) {
 
   if (else_clause >= 0) {
     emit_indent(b, indent); buf_puts(b, "{\n");
-    emit_stmts(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
+    if (tail) emit_stmts_tail(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
+    else emit_stmts(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
   }
   else {
@@ -15014,7 +15065,7 @@ static void emit_case_match(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "sp_raise_cls(\"NoMatchingPatternError\", \"no pattern matched\");\n");
   }
 
-  emit_indent(b, indent); buf_printf(b, "_pm_%d:;\n", lbl);
+  if (!tail) { emit_indent(b, indent); buf_printf(b, "_pm_%d:;\n", lbl); }
 }
 
 /* case/when -> an if / else-if chain. Statement form. */
@@ -16983,7 +17034,7 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     return;
   }
   if (!strcmp(ty, "CaseNode"))      { emit_case(c, id, b, indent); return; }
-  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent); return; }
+  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 0); return; }
   if (!strcmp(ty, "BeginNode"))  { emit_begin(c, id, b, indent, NULL); return; }
   if (!strcmp(ty, "RescueModifierNode")) {
     /* `expr rescue fallback` as a statement: run expr under a setjmp guard,
@@ -17022,6 +17073,7 @@ static void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
 
   if (!strcmp(ty, "IfNode"))     { emit_if(c, id, b, indent, 0, 1); return; }
   if (!strcmp(ty, "UnlessNode")) { emit_if(c, id, b, indent, 1, 1); return; }
+  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 1); return; }
   if (!strcmp(ty, "ReturnNode")) { emit_return(c, id, b, indent); return; }
   /* `raise` diverges -- no value to return; emit as a plain statement. */
   if (!strcmp(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&

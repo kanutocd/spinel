@@ -2537,6 +2537,18 @@ static TyKind infer_uncached(Compiler *c, int id) {
     else r = ty_unify(r, TY_NIL);
     return r;
   }
+  if (!strcmp(ty, "CaseMatchNode")) {
+    /* case X; in PATTERN; ... — value = unify of each arm's body (+ else). */
+    int nw = 0; const int *conds = nt_arr(nt, id, "conditions", &nw);
+    int else_c = nt_ref(nt, id, "else_clause");
+    TyKind r = TY_UNKNOWN;
+    for (int w = 0; w < nw; w++) {
+      int st = nt_ref(nt, conds[w], "statements");
+      r = ty_unify(r, st >= 0 ? infer_type(c, st) : TY_NIL);
+    }
+    if (else_c >= 0) { int st = nt_ref(nt, else_c, "statements"); r = ty_unify(r, st >= 0 ? infer_type(c, st) : TY_NIL); }
+    return r;
+  }
   if (!strcmp(ty, "IfNode") || !strcmp(ty, "UnlessNode")) {
     int is_unless = !strcmp(ty, "UnlessNode");
     int then_b = nt_ref(nt, id, "statements");
