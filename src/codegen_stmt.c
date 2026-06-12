@@ -1858,24 +1858,32 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
               if (comp_is_writer(&c->classes[k], base)) ncand++;
             if (an >= 1 && ncand > 0) {
               TyKind at = comp_ntype(c, argv[0]);
+              /* A nil literal RHS has void type; cache it as a boxed-nil
+                 sp_RbVal rather than declaring an (illegal) `void` temp. */
+              int nil_rhs = (at == TY_NIL || at == TY_VOID);
+              TyKind at_eff = nil_rhs ? TY_POLY : at;
               int tv = ++g_tmp, tval = ++g_tmp;
               emit_indent(b, indent);
               buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
-              emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
+              if (nil_rhs) {
+                buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+              } else {
+                emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
+              }
               buf_printf(b, " switch (_t%d.cls_id) {", tv);
               char src[32]; snprintf(src, sizeof src, "_t%d", tval);
               for (int k = 0; k < c->nclasses; k++) {
                 if (!comp_is_writer(&c->classes[k], base)) continue;
                 char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", base);
                 int iv = comp_ivar_index(&c->classes[k], ivn);
-                TyKind ivt = iv >= 0 ? c->classes[k].ivar_types[iv] : at;
+                TyKind ivt = iv >= 0 ? c->classes[k].ivar_types[iv] : at_eff;
                 /* skip a class whose slot can't hold this concrete rhs (the
                    runtime object isn't that class anyway): a raw assignment
                    between mismatched C types would not compile */
-                if (at != ivt && at != TY_POLY && ivt != TY_POLY) continue;
+                if (at_eff != ivt && at_eff != TY_POLY && ivt != TY_POLY) continue;
                 buf_printf(b, " case %d: ((sp_%s *)_t%d.v.p)->iv_%s = ", k, c->classes[k].name, tv, base);
-                if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
-                else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
+                if (ivt == TY_POLY && at_eff != TY_POLY) emit_boxed_text(c, at_eff, src, b);
+                else if (at_eff == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
                 else buf_puts(b, src);
                 buf_puts(b, "; break;");
               }
