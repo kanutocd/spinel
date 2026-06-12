@@ -5173,11 +5173,15 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  if (recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec"))) {
+  int ie_direct = recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec"));
+  int ie_tramp = 0;
+  if (!ie_direct && recv >= 0 && nt_ref(nt, id, "block") >= 0 && ty_is_object(comp_ntype(c, recv)))
+    ie_tramp = comp_trampoline_kind(c, ty_object_class(comp_ntype(c, recv)), name, NULL);
+  if (ie_direct || ie_tramp) {
     int blk = nt_ref(nt, id, "block");
     TyKind rtype = comp_ntype(c, recv);
     if (blk >= 0 && ty_is_object(rtype) &&
-        comp_method_in_chain(c, ty_object_class(rtype), name, NULL) < 0) {
+        (ie_tramp || comp_method_in_chain(c, ty_object_class(rtype), name, NULL) < 0)) {
       int blk_body = nt_ref(nt, blk, "body");
       int ie_bn = 0; const int *ie_bb = blk_body >= 0 ? nt_arr(nt, blk_body, "body", &ie_bn) : NULL;
       int cls_id = ty_object_class(rtype);
@@ -5199,7 +5203,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
          there): instance_exec assigns the call-site args; instance_eval
          yields the receiver to each param. */
       {
-        int is_exec = !strcmp(name, "instance_exec");
+        int is_exec = ie_tramp ? (ie_tramp == 2) : !strcmp(name, "instance_exec");
         int bp_node = nt_ref(nt, blk, "parameters");
         int inner = bp_node >= 0 ? nt_ref(nt, bp_node, "parameters") : -1;
         int pnode = inner >= 0 ? inner : bp_node;
@@ -17154,6 +17158,18 @@ static void emit_method_signature(Compiler *c, Scope *s, Buf *b) {
 }
 
 static void emit_method(Compiler *c, Scope *s, Buf *b) {
+  /* instance_eval/exec trampolines are inlined at every call site; the
+     method body itself is an unreachable stub (matches the legacy compiler). */
+  if (s->class_id >= 0 && !s->is_cmethod && s->name &&
+      comp_trampoline_kind(c, s->class_id, s->name, NULL)) {
+    emit_method_signature(c, s, b);
+    buf_puts(b, " {\n  return ");
+    if (method_is_void(s)) buf_puts(b, "0");
+    else if (ty_is_object(s->ret)) buf_puts(b, "NULL");
+    else buf_puts(b, default_value(s->ret));
+    buf_puts(b, ";\n}\n");
+    return;
+  }
   emit_method_signature(c, s, b);
   buf_puts(b, " {\n");
   buf_puts(b, "    SP_GC_SAVE();\n");

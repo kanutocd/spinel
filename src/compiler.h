@@ -208,6 +208,9 @@ int        comp_cmethod_in_chain(Compiler *c, int class_id, const char *name, in
 /* Like comp_method_in_class but walks the superclass chain. On success,
    *def_class (if non-NULL) is set to the class that defines the method. */
 int        comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
+/* Detect an instance_eval/exec trampoline (def m(args,&b); instance_eval/exec(args,&b); end).
+   Returns 1 (eval) / 2 (exec) / 0; sets *def_class to the defining class. */
+int        comp_trampoline_kind(Compiler *c, int class_id, const char *name, int *def_class);
 /* Walk the chain for an attr reader/writer; returns 1 and the owning class. */
 int        comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
 int        comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class);

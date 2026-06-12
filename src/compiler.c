@@ -227,6 +227,41 @@ int comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_c
   return -1;
 }
 
+/* Detect an instance_eval/exec trampoline method: a method whose body is a
+   single `instance_eval(&block)` / `instance_exec(args, &block)` that forwards
+   the method's own `&block` parameter. A call `recv.M(args) { ... }` to such a
+   method is compiled exactly like `recv.instance_eval/exec(args) { ... }`.
+   Returns 1 for an instance_eval trampoline, 2 for instance_exec, 0 otherwise.
+   When non-zero and def_class is non-NULL, it receives the defining class. */
+int comp_trampoline_kind(Compiler *c, int class_id, const char *name, int *def_class) {
+  const NodeTable *nt = c->nt;
+  int dc = -1;
+  int mi = comp_method_in_chain(c, class_id, name, &dc);
+  if (mi < 0) return 0;
+  Scope *s = &c->scopes[mi];
+  if (!s->blk_param || !s->blk_param[0]) return 0;  /* needs a named &block */
+  if (s->body < 0) return 0;
+  int bn = 0; const int *bb = nt_arr(nt, s->body, "body", &bn);
+  if (bn != 1 || !bb) return 0;
+  int call = bb[0];
+  const char *ct = nt_type(nt, call);
+  if (!ct || strcmp(ct, "CallNode")) return 0;
+  if (nt_ref(nt, call, "receiver") >= 0) return 0;  /* must be receiverless */
+  const char *cn = nt_str(nt, call, "name");
+  if (!cn) return 0;
+  int kind = !strcmp(cn, "instance_eval") ? 1 : !strcmp(cn, "instance_exec") ? 2 : 0;
+  if (!kind) return 0;
+  /* The block arg must forward the method's own &block parameter. */
+  int barg = nt_ref(nt, call, "block");
+  if (barg < 0) return 0;
+  int bexpr = nt_ref(nt, barg, "expression");
+  if (bexpr < 0) return 0;
+  const char *bvn = nt_str(nt, bexpr, "name");
+  if (!bvn || strcmp(bvn, s->blk_param)) return 0;
+  if (def_class) *def_class = dc;
+  return kind;
+}
+
 static int name_in(char **list, int n, const char *name) {
   for (int i = 0; i < n; i++) if (strcmp(list[i], name) == 0) return 1;
   return 0;

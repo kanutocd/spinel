@@ -549,9 +549,13 @@ static TyKind infer_call(Compiler *c, int id) {
   }
 
   /* recv.instance_eval/exec { ... } -> the block's last-expression type
-     (bare calls inside resolve via the ie node->class map). */
-  if (recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec")) &&
-      ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0) {
+     (bare calls inside resolve via the ie node->class map). A trampoline
+     method `recv.M { ... }` resolves the same way. */
+  int ie_kind = (recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec")) &&
+                 ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0);
+  if (!ie_kind && recv >= 0 && ty_is_object(rt) && nt_ref(nt, id, "block") >= 0)
+    ie_kind = comp_trampoline_kind(c, ty_object_class(rt), name, NULL) != 0;
+  if (ie_kind) {
     int blk = nt_ref(nt, id, "block");
     if (blk >= 0) {
       int body = nt_ref(nt, blk, "body");
@@ -5848,11 +5852,13 @@ static int infer_block_params(Compiler *c) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "CallNode")) continue;
     const char *cname = nt_str(nt, id, "name");
-    if (!cname || strcmp(cname, "instance_eval")) continue;
+    if (!cname) continue;
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) continue;
     TyKind rt = infer_type(c, recv);
     if (!ty_is_object(rt)) continue;
+    if (strcmp(cname, "instance_eval") &&
+        comp_trampoline_kind(c, ty_object_class(rt), cname, NULL) != 1) continue;
     int blk = nt_ref(nt, id, "block");
     if (blk < 0) continue;
     int pn = nt_ref(nt, blk, "parameters");
@@ -5875,8 +5881,14 @@ static int infer_block_params(Compiler *c) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "CallNode")) continue;
     const char *cname = nt_str(nt, id, "name");
-    if (!cname || strcmp(cname, "instance_exec")) continue;
-    if (nt_ref(nt, id, "receiver") < 0) continue;
+    if (!cname) continue;
+    int xrecv = nt_ref(nt, id, "receiver");
+    if (xrecv < 0) continue;
+    if (strcmp(cname, "instance_exec")) {
+      TyKind xrt = infer_type(c, xrecv);
+      if (!ty_is_object(xrt) ||
+          comp_trampoline_kind(c, ty_object_class(xrt), cname, NULL) != 2) continue;
+    }
     int blk = nt_ref(nt, id, "block");
     if (blk < 0) continue;
     int pn = nt_ref(nt, blk, "parameters");
@@ -7114,13 +7126,17 @@ static void build_ie_map(Compiler *c) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "CallNode")) continue;
     const char *nm = nt_str(nt, id, "name");
-    if (!nm || (strcmp(nm, "instance_eval") && strcmp(nm, "instance_exec"))) continue;
+    if (!nm) continue;
     int recv = nt_ref(nt, id, "receiver");
     int blk = nt_ref(nt, id, "block");
     if (recv < 0 || blk < 0) continue;
     TyKind rt = infer_type(c, recv);
     if (!ty_is_object(rt)) continue;
     int cls = ty_object_class(rt);
+    if (strcmp(nm, "instance_eval") && strcmp(nm, "instance_exec")) {
+      /* not a direct instance_eval/exec: maybe a trampoline method on `cls`? */
+      if (!comp_trampoline_kind(c, cls, nm, NULL)) continue;
+    }
     int body = nt_ref(nt, blk, "body");
     if (body >= 0) mark_ie_subtree(c, body, cls);
   }
@@ -7218,6 +7234,10 @@ void analyze_program(Compiler *c) {
   for (int mi = 0; mi < c->nscopes; mi++) {
     Scope *m = &c->scopes[mi];
     if (!m->blk_param) continue;
+    /* instance_eval/exec trampolines are inlined at call sites by their own
+       dedicated splice; don't treat the &block forward as a yield here. */
+    if (m->class_id >= 0 && !m->is_cmethod && m->name &&
+        comp_trampoline_kind(c, m->class_id, m->name, NULL)) continue;
     /* Anonymous `&`: nameless, so it can only be forwarded -- always safe
        to inline (there is no escaping read to worry about). */
     if (!m->blk_param[0]) { m->yields = 1; continue; }
