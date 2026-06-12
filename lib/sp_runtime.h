@@ -2740,6 +2740,7 @@ static const char *sp_exc_message(volatile struct sp_Exception_s *ve);
 #define SP_BUILTIN_OBJECT        (-21) /* Object.new identity sentinel */
 #define SP_BUILTIN_FIBER         (-22) /* sp_Fiber * boxed into poly slot */
 #define SP_BUILTIN_IO            (-23) /* sp_File * (File/IO handle) boxed into poly slot */
+#define SP_BUILTIN_METHOD        (-24) /* sp_BoundMethod * boxed into poly slot */
 /* sp_RbVal is defined in sp_gc.h (the mark helpers dispatch on its tag). */
 static sp_RbVal sp_box_int(mrb_int v) { sp_RbVal r; r.tag = SP_TAG_INT; r.cls_id = 0; r.v.i = v; return r; }
 static sp_RbVal sp_box_str(const char *v) { sp_RbVal r; r.tag = SP_TAG_STR; r.cls_id = 0; r.v.s = v; return r; }
@@ -2850,6 +2851,7 @@ static sp_RbVal sp_box_str_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_ST
 static sp_RbVal sp_box_sym_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_SYM_ARRAY); }
 static sp_RbVal sp_box_ptr_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_PTR_ARRAY); }
 static sp_RbVal sp_box_proc(void *p)        { return sp_box_obj(p, SP_BUILTIN_PROC); }
+static sp_RbVal sp_box_method(void *p)      { return sp_box_obj(p, SP_BUILTIN_METHOD); }
 
 /* CRuby-compatible Array#index / #rindex / #find_index: returns
    sp_RbVal (nil tag for not-found, int tag with the position when
@@ -4008,6 +4010,7 @@ static sp_RbVal sp_poly_each_elem(sp_RbVal a, mrb_int i) {
   }
 }
 /* poly_arr_get/set for PolyPolyHash with integer index key. */
+typedef struct sp_BoundMethod { void *self; mrb_int fn; const char *name; } sp_BoundMethod;
 static sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, mrb_int i) {
   if (a.tag == SP_TAG_INT) return sp_box_int((a.v.i >> i) & 1);
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_POLY_POLY_HASH)
@@ -4016,6 +4019,11 @@ static sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, mrb_int i) {
     return sp_SymPolyHash_get((sp_SymPolyHash*)a.v.p, (sp_sym)i);
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_STR_POLY_HASH)
     return sp_StrPolyHash_get((sp_StrPolyHash*)a.v.p, sp_sym_name_fn ? sp_sym_name_fn((sp_sym)i) : "");
+  /* bm[arg]: a boxed bound Method called with the (single) int argument. */
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) {
+    sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
+    return sp_box_int(((mrb_int (*)(void *, mrb_int))(uintptr_t)m->fn)((void *)m->self, i));
+  }
   return sp_poly_arr_get(a, i);
 }
 /* poly[poly_key]: dispatch on key tag at runtime. */
@@ -5038,7 +5046,6 @@ static sp_Proc *sp_proc_new(void *fn, void *cap, void (*cap_scan)(void *)) { ret
    bound receiver (NULL for a top-level method), `fn` the function address
    (cast to the right signature at the call site), `name` the method name
    (a string literal). Only `self` is GC-managed. */
-typedef struct sp_BoundMethod { void *self; mrb_int fn; const char *name; } sp_BoundMethod;
 static void sp_BoundMethod_scan(void *p) { sp_BoundMethod *m = (sp_BoundMethod *)p; if (m->self) sp_gc_mark(m->self); }
 static sp_BoundMethod *sp_bound_method_new(void *self, mrb_int fn, const char *name) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->fn = fn; m->name = name; return m; }
 static mrb_int sp_proc_arity(sp_Proc *p) { return p ? p->arity : 0; }

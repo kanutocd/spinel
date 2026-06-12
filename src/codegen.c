@@ -4009,13 +4009,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       int t = ++g_tmp;
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_RbVal _t%d = ", t); emit_expr(c, recv, g_pre); buf_puts(g_pre, ";\n");
-      buf_printf(b, "sp_proc_call((sp_Proc *)_t%d.v.p, (mrb_int[16]){", t);
+      /* the poly callable may be a Proc or a bound Method (different ABIs) */
+      buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? ((mrb_int (*)(void *", t);
+      for (int k = 0; k < argc; k++) buf_puts(b, ", mrb_int");
+      buf_printf(b, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)((void *)((sp_BoundMethod *)_t%d.v.p)->self", t, t);
+      for (int k = 0; k < argc; k++) {
+        buf_puts(b, ", ");
+        if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[k], b);
+      }
+      buf_printf(b, ") : sp_proc_call((sp_Proc *)_t%d.v.p, (mrb_int[16]){", t);
       for (int k = 0; k < argc; k++) {
         if (k) buf_puts(b, ", ");
         if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
         else emit_expr(c, argv[k], b);
       }
-      buf_puts(b, "})");
+      buf_puts(b, "}))");
       return;
     }
   }
@@ -16881,6 +16890,7 @@ static void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     case TY_SYMBOL: fn = "sp_box_sym"; break;     case TY_RANGE: fn = "sp_box_range"; break;
     case TY_TIME: fn = "sp_box_time"; break;
     case TY_PROC: fn = "sp_box_proc"; break;
+    case TY_METHOD: fn = "sp_box_method"; break;
     case TY_CLASS: fn = "sp_box_class"; break;
     case TY_INT_ARRAY: fn = "sp_box_int_array"; break;
     case TY_FLOAT_ARRAY: fn = "sp_box_float_array"; break;
@@ -16963,6 +16973,7 @@ static void emit_boxed(Compiler *c, int node, Buf *b) {
     case TY_RANGE:  fn = "sp_box_range"; break;
     case TY_TIME:   fn = "sp_box_time";  break;
     case TY_PROC:   fn = "sp_box_proc";  break;
+    case TY_METHOD: fn = "sp_box_method"; break;
     case TY_INT_ARRAY:   fn = "sp_box_int_array";   break;
     case TY_FLOAT_ARRAY: fn = "sp_box_float_array"; break;
     case TY_STR_ARRAY:   fn = "sp_box_str_array";   break;
