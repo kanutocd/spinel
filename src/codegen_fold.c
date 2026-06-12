@@ -639,9 +639,21 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
   }
   buf_printf(b, "; for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) { ", ti, ti, tn, ti);
   if (p0) buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, _t%d); ", p0, k, ta, ti);
-  buf_printf(b, "_t%d = ", tacc);
-  if (acct == TY_INT) { buf_printf(b, "sp_int_add(_t%d, ", tacc); emit_expr(c, bb[bn - 1], b); buf_puts(b, ")"); }
-  else { buf_printf(b, "_t%d + ", tacc); emit_expr(c, bb[bn - 1], b); }
+  /* The block's value expression may spill setup statements to g_pre (e.g.
+     a nested count loop). Those must run per iteration: redirect g_pre into
+     a local buffer while emitting the value, then splice it into the loop
+     body ahead of the accumulation. */
+  {
+    Buf inner; memset(&inner, 0, sizeof inner);
+    Buf valb; memset(&valb, 0, sizeof valb);
+    Buf *saved_pre = g_pre; g_pre = &inner;
+    if (acct == TY_INT) { buf_printf(&valb, "sp_int_add(_t%d, ", tacc); emit_expr(c, bb[bn - 1], &valb); buf_puts(&valb, ")"); }
+    else { buf_printf(&valb, "_t%d + ", tacc); emit_expr(c, bb[bn - 1], &valb); }
+    g_pre = saved_pre;
+    if (inner.p) buf_puts(b, inner.p);
+    buf_printf(b, "_t%d = %s", tacc, valb.p ? valb.p : "0");
+    free(inner.p); free(valb.p);
+  }
   buf_printf(b, "; } _t%d; })", tacc);
   return 1;
 }
