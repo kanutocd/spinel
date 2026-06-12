@@ -1602,6 +1602,25 @@ static TyKind infer_call(Compiler *c, int id) {
     }
   }
 
+  /* (range).lazy[.select/reject{blk}].first(n) / .first */
+  if ((!strcmp(name, "first") || !strcmp(name, "last")) &&
+      recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode")) {
+    const char *rname = nt_str(nt, recv, "name");
+    int lazy_src = -1;
+    if (rname && !strcmp(rname, "lazy")) {
+      lazy_src = nt_ref(nt, recv, "receiver");
+    }
+    else if (rname && (!strcmp(rname, "select") || !strcmp(rname, "reject") || !strcmp(rname, "filter"))) {
+      int inner = nt_ref(nt, recv, "receiver");
+      if (inner >= 0 && nt_type(nt, inner) && !strcmp(nt_type(nt, inner), "CallNode")) {
+        const char *iname = nt_str(nt, inner, "name");
+        if (iname && !strcmp(iname, "lazy")) lazy_src = nt_ref(nt, inner, "receiver");
+      }
+    }
+    if (lazy_src >= 0 && infer_type(c, lazy_src) == TY_RANGE)
+      return (argc == 1) ? TY_INT_ARRAY : TY_INT;
+  }
+
   /* hash receiver methods */
   if (recv >= 0 && !strcmp(name, "default") && argc == 0 &&
       nt_type(nt, recv) && (!strcmp(nt_type(nt, recv), "HashNode") ||
@@ -5569,6 +5588,14 @@ static int infer_block_params(Compiler *c) {
               !strcmp(name, "one?") || !strcmp(name, "sum") || !strcmp(name, "min_by") ||
               !strcmp(name, "max_by") || !strcmp(name, "bsearch")) && rt == TY_RANGE)
       pt = TY_INT;
+    /* (range).lazy.select/reject/filter { |x| } : x is an integer range element */
+    else if ((!strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter")) &&
+             rt == TY_UNKNOWN && recv >= 0 &&
+             nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+             nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "lazy")) {
+      int lsrc = nt_ref(nt, recv, "receiver");
+      if (lsrc >= 0 && infer_type(c, lsrc) == TY_RANGE) pt = TY_INT;
+    }
     else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||
               !strcmp(name, "find") || !strcmp(name, "detect") ||
