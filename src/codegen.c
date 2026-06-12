@@ -5137,25 +5137,49 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
-  if (recv >= 0 && !strcmp(name, "instance_eval")) {
+  if (recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec"))) {
     int blk = nt_ref(nt, id, "block");
     TyKind rtype = comp_ntype(c, recv);
     if (blk >= 0 && ty_is_object(rtype) &&
-        comp_method_in_chain(c, ty_object_class(rtype), "instance_eval", NULL) < 0) {
+        comp_method_in_chain(c, ty_object_class(rtype), name, NULL) < 0) {
       int blk_body = nt_ref(nt, blk, "body");
       int ie_bn = 0; const int *ie_bb = blk_body >= 0 ? nt_arr(nt, blk_body, "body", &ie_bn) : NULL;
       int cls_id = ty_object_class(rtype);
       TyKind body_ty = ie_bn > 0 ? comp_ntype(c, ie_bb[ie_bn - 1]) : TY_NIL;
+      int scalar_res = is_scalar_ret(body_ty) && body_ty != TY_VOID && body_ty != TY_NIL && body_ty != TY_UNKNOWN;
       int tr = ++g_tmp, tres = ++g_tmp;
       Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_%s *_t%d = %s;\n", c->classes[cls_id].name, tr, rb.p ? rb.p : "NULL");
       free(rb.p);
-      emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
-      buf_printf(g_pre, " _t%d;\n", tres);
+      if (scalar_res) {
+        emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
+        buf_printf(g_pre, " _t%d;\n", tres);
+      }
       char selfbuf[64]; snprintf(selfbuf, sizeof selfbuf, "_t%d", tr);
       const char *saved_self2 = g_self; g_self = selfbuf;
       int saved_ie = g_ie_class_id; g_ie_class_id = cls_id;
+      /* Bind the block params (interned in the enclosing scope, declared
+         there): instance_exec assigns the call-site args; instance_eval
+         yields the receiver to each param. */
+      {
+        int is_exec = !strcmp(name, "instance_exec");
+        int bp_node = nt_ref(nt, blk, "parameters");
+        int inner = bp_node >= 0 ? nt_ref(nt, bp_node, "parameters") : -1;
+        int pnode = inner >= 0 ? inner : bp_node;
+        int npar = 0; const int *reqs = pnode >= 0 ? nt_arr(nt, pnode, "requireds", &npar) : NULL;
+        int iargs = nt_ref(nt, id, "arguments");
+        int iac = 0; const int *iav = iargs >= 0 ? nt_arr(nt, iargs, "arguments", &iac) : NULL;
+        for (int p = 0; p < npar; p++) {
+          const char *pn = nt_str(nt, reqs[p], "name");
+          if (!pn) continue;
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "lv_%s = ", rename_local(pn));
+          if (is_exec) { if (p < iac) emit_expr(c, iav[p], g_pre); else buf_puts(g_pre, "0"); }
+          else buf_printf(g_pre, "_t%d", tr);  /* instance_eval yields self */
+          buf_puts(g_pre, ";\n");
+        }
+      }
       if (ie_bn > 0) {
         for (int j = 0; j < ie_bn - 1; j++) emit_stmt(c, ie_bb[j], g_pre, g_indent);
         Buf vb; memset(&vb, 0, sizeof vb);
@@ -5163,7 +5187,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         emit_expr(c, ie_bb[ie_bn - 1], &vb);
         g_indent = si2;
         emit_indent(g_pre, g_indent);
-        if (body_ty == TY_VOID || body_ty == TY_NIL || body_ty == TY_UNKNOWN) {
+        if (!scalar_res) {
           if (vb.p) buf_printf(g_pre, "%s;\n", vb.p);
         }
         else {
@@ -5173,7 +5197,8 @@ static void emit_call(Compiler *c, int id, Buf *b) {
       }
       g_ie_class_id = saved_ie;
       g_self = saved_self2;
-      buf_printf(b, "_t%d", tres);
+      if (scalar_res) buf_printf(b, "_t%d", tres);
+      else buf_printf(b, "_t%d", tr);  /* statement use: value is the receiver */
       return;
     }
   }
@@ -5182,8 +5207,10 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv < 0) {
     Scope *self = comp_scope_of(c, id);
     /* When emitting a scope transplanted by include (g_emitting_class_id is set),
-       dispatch through the emitting class so overrides are found correctly. */
-    int dispatch_cid = (g_emitting_class_id >= 0) ? g_emitting_class_id : self->class_id;
+       dispatch through the emitting class so overrides are found correctly.
+       Inside an instance_eval/exec block, g_ie_class_id is the receiver class. */
+    int dispatch_cid = (g_emitting_class_id >= 0) ? g_emitting_class_id
+                     : (g_ie_class_id >= 0) ? g_ie_class_id : self->class_id;
     if (dispatch_cid >= 0) {
       if (comp_reader_in_chain(c, dispatch_cid, name, NULL)) {
         const char *rn = comp_resolve_alias(c, dispatch_cid, name);

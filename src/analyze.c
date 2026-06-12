@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The receiver class for a node inside an instance_eval/exec block, or -1. */
+static int ie_class_of(Compiler *c, int node);
+
 /* Forward declarations for FFI helpers defined later in this file. */
 static const char *ffi_arg_str(const NodeTable *nt, int nid);
 static int ffi_arg_int(const NodeTable *nt, int nid);
@@ -527,6 +530,19 @@ static TyKind infer_call(Compiler *c, int id) {
       }
     }
     return result == TY_UNKNOWN ? TY_NIL : result;
+  }
+
+  /* recv.instance_eval/exec { ... } -> the block's last-expression type
+     (bare calls inside resolve via the ie node->class map). */
+  if (recv >= 0 && (!strcmp(name, "instance_eval") || !strcmp(name, "instance_exec")) &&
+      ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0) {
+    int blk = nt_ref(nt, id, "block");
+    if (blk >= 0) {
+      int body = nt_ref(nt, blk, "body");
+      int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+      if (bn > 0) { TyKind bt = infer_type(c, bb[bn - 1]); return bt == TY_VOID ? TY_NIL : bt; }
+      return TY_NIL;
+    }
   }
 
   /* method(:sym) / <recv>.method(:sym) -> a bound Method object */
@@ -1318,6 +1334,14 @@ static TyKind infer_call(Compiler *c, int id) {
   if (recv < 0 && g_cbody_class_id >= 0) {
     int smi = comp_cmethod_in_chain(c, g_cbody_class_id, name, NULL);
     if (smi >= 0) return method_call_ret(c, smi, id);
+  }
+  /* bare call inside an instance_eval/exec block: dispatch on receiver class */
+  if (recv < 0) {
+    int iec = ie_class_of(c, id);
+    if (iec >= 0) {
+      int imi = comp_method_in_chain(c, iec, name, NULL);
+      if (imi >= 0) return method_call_ret(c, imi, id);
+    }
   }
   /* user-defined free-function call (no receiver) */
   if (recv < 0) {
@@ -2365,6 +2389,7 @@ static TyKind infer_uncached(Compiler *c, int id) {
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
     int cls_id = (s->class_id >= 0) ? s->class_id : g_ie_class_id;
+    if (cls_id < 0) cls_id = ie_class_of(c, id);
     if (cls_id < 0) cls_id = comp_class_index(c, "Toplevel");
     if (cls_id < 0) return TY_UNKNOWN;
     ClassInfo *ci = &c->classes[cls_id];
@@ -5331,6 +5356,14 @@ static int infer_param_types(Compiler *c) {
     if (recv < 0) {
       int mi = comp_method_index(c, name);
       int caller_cid = -1;
+      /* bare call inside an instance_eval/exec block: dispatch on the
+         receiver's class so its params get the call-site arg types. */
+      int iec = ie_class_of(c, id);
+      if (mi < 0 && iec >= 0) {
+        int def_cid = -1;
+        mi = comp_method_in_chain(c, iec, name, &def_cid);
+        if (mi >= 0) caller_cid = def_cid >= 0 ? def_cid : iec;
+      }
       if (mi < 0) {
         Scope *self = comp_scope_of(c, id);
         if (self->class_id >= 0) {
@@ -5616,6 +5649,60 @@ static int infer_block_params(Compiler *c) {
       if (!p) continue;
       LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
       if (lv->type == TY_UNKNOWN) { lv->type = TY_INT; changed = 1; }
+    }
+  }
+
+  /* recv.instance_eval { |me| } : the block params all receive the receiver
+     (Ruby yields self), typed as the receiver's object type. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *cname = nt_str(nt, id, "name");
+    if (!cname || strcmp(cname, "instance_eval")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    TyKind rt = infer_type(c, recv);
+    if (!ty_is_object(rt)) continue;
+    int blk = nt_ref(nt, id, "block");
+    if (blk < 0) continue;
+    int pn = nt_ref(nt, blk, "parameters");
+    if (pn < 0) continue;
+    int inner = nt_ref(nt, pn, "parameters");
+    int pnode = inner >= 0 ? inner : pn;
+    int rnp = 0; const int *reqs = nt_arr(nt, pnode, "requireds", &rnp);
+    Scope *bs = comp_scope_of(c, blk);
+    for (int k = 0; k < rnp; k++) {
+      const char *p = nt_str(nt, reqs[k], "name");
+      if (!p) continue;
+      LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
+      if (lv->type != rt) { lv->type = rt; changed = 1; }
+    }
+  }
+
+  /* recv.instance_exec(args) { |params| } : block params take the call-site
+     arg types (strict arity). */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *cname = nt_str(nt, id, "name");
+    if (!cname || strcmp(cname, "instance_exec")) continue;
+    if (nt_ref(nt, id, "receiver") < 0) continue;
+    int blk = nt_ref(nt, id, "block");
+    if (blk < 0) continue;
+    int pn = nt_ref(nt, blk, "parameters");
+    if (pn < 0) continue;
+    int inner = nt_ref(nt, pn, "parameters");
+    int pnode = inner >= 0 ? inner : pn;
+    int rnp = 0; const int *reqs = nt_arr(nt, pnode, "requireds", &rnp);
+    int iargs = nt_ref(nt, id, "arguments");
+    int iac = 0; const int *iav = iargs >= 0 ? nt_arr(nt, iargs, "arguments", &iac) : NULL;
+    Scope *bs = comp_scope_of(c, blk);
+    for (int k = 0; k < rnp && k < iac; k++) {
+      const char *p = nt_str(nt, reqs[k], "name");
+      if (!p) continue;
+      TyKind at = infer_type(c, iav[k]);
+      LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
+      if (at != TY_UNKNOWN && lv->type != at) { lv->type = at; changed = 1; }
     }
   }
 
@@ -6807,6 +6894,51 @@ static void propagate_bigint_cascade(Compiler *c) {
   }
 }
 
+/* For nodes inside an instance_eval/exec block, the receiver's class id; -1
+   elsewhere. Lets bare calls/ivar refs in the block resolve against the
+   receiver's class during inference (codegen mirrors this via g_ie_class_id). */
+static int *g_ie_node_class = NULL;
+
+static void mark_ie_subtree(Compiler *c, int node, int cls) {
+  if (node < 0) return;
+  const char *ty = nt_type(c->nt, node);
+  if (!ty) return;
+  /* a nested def/class starts a fresh self; don't bleed the rebind into it */
+  if (!strcmp(ty, "DefNode") || !strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) return;
+  g_ie_node_class[node] = cls;
+  int nr = nt_num_refs(c->nt, node);
+  for (int i = 0; i < nr; i++) mark_ie_subtree(c, nt_ref_at(c->nt, node, i), cls);
+  int na = nt_num_arrs(c->nt, node);
+  for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(c->nt, node, i, &n); for (int k = 0; k < n; k++) mark_ie_subtree(c, ids[k], cls); }
+}
+
+/* (Re)build the instance_eval/exec node→class map from current receiver types. */
+static void build_ie_map(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (!g_ie_node_class) g_ie_node_class = malloc(sizeof(int) * (size_t)nt->count);
+  for (int i = 0; i < nt->count; i++) g_ie_node_class[i] = -1;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (strcmp(nm, "instance_eval") && strcmp(nm, "instance_exec"))) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    int blk = nt_ref(nt, id, "block");
+    if (recv < 0 || blk < 0) continue;
+    TyKind rt = infer_type(c, recv);
+    if (!ty_is_object(rt)) continue;
+    int cls = ty_object_class(rt);
+    int body = nt_ref(nt, blk, "body");
+    if (body >= 0) mark_ie_subtree(c, body, cls);
+  }
+}
+
+/* The receiver class for a node inside an instance_eval/exec block, or -1. */
+static int ie_class_of(Compiler *c, int node) {
+  (void)c;
+  return (g_ie_node_class && node >= 0) ? g_ie_node_class[node] : -1;
+}
+
 void analyze_program(Compiler *c) {
   /* scope 0 = top level */
   Scope *top = comp_scope_new(c, NULL, -1);
@@ -6976,6 +7108,7 @@ void analyze_program(Compiler *c) {
 
   for (int iter = 0; iter < 128; iter++) {
     int ch = 0;
+    build_ie_map(c);  /* refresh instance_exec receiver-class map each pass */
     ch |= infer_write_types(c);
     ch |= infer_param_types(c);
     ch |= propagate_prep_params(c);
