@@ -55,6 +55,8 @@ typedef struct {
   int kwrest_idx;   /* index in pnames[] of **kwrest param, -1 if none */
 
   TyKind ret;       /* inferred return type */
+  int ret_specialized; /* ret was set by specialization (inherited-cls-new copy);
+                          don't overwrite it from the shared body in the fixpoint */
   int ret_proc_ret; /* when ret==TY_PROC: the returned proc's body return type
                        (TyKind), so a caller's `m.call` knows the result type */
 
@@ -104,8 +106,9 @@ typedef struct {
 
 typedef struct {
   const NodeTable *nt;
-  TyKind *ntype;    /* [nt->count] node id -> inferred type */
-  int *nscope;      /* [nt->count] node id -> owning scope index */
+  TyKind *ntype;    /* [node_cap] node id -> inferred type */
+  int *nscope;      /* [node_cap] node id -> owning scope index */
+  int node_cap;     /* allocated length of ntype/nscope (>= nt->count) */
 
   Scope *scopes;    /* scope[0] = top level */
   int nscopes, cscopes;
@@ -164,6 +167,9 @@ typedef struct {
 
 Compiler *comp_new(const NodeTable *nt);
 void comp_free(Compiler *c);
+
+/* Resize per-node arrays (ntype/nscope) after the node table grew. */
+void comp_grow_node_arrays(Compiler *c);
 
 /* Scopes. */
 Scope *comp_scope_new(Compiler *c, const char *name, int def_node);

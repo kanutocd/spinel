@@ -4573,10 +4573,13 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   if (recv < 0) {
     Scope *encl = comp_scope_of(c, id);
     if (encl && encl->is_cmethod && encl->class_id >= 0) {
-      /* bare `new` inside a class method -> construct self's class */
+      /* bare `new` inside a class method -> construct the *emitting* class.
+         For an inherited cls method specialized into a subclass, the emitting
+         class is that subclass, so `new` resolves to the subclass constructor. */
+      int new_cls = (g_emitting_class_id >= 0) ? g_emitting_class_id : encl->class_id;
       if (!strcmp(name, "new")) {
-        buf_printf(b, "sp_%s_new(", c->classes[encl->class_id].name);
-        int initm = comp_method_in_chain(c, encl->class_id, "initialize", NULL);
+        buf_printf(b, "sp_%s_new(", c->classes[new_cls].name);
+        int initm = comp_method_in_chain(c, new_cls, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
         buf_puts(b, ")");
         return;

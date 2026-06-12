@@ -45,6 +45,11 @@ NodeTable *nt_load_text(const char *text);
 
 void nt_free(NodeTable *nt);
 
+/* Deep-clone the subtree rooted at `root`; returns the new root id (or -1).
+   Appends nodes and grows nt->count -- parallel per-node arrays must be
+   resized to match afterward. */
+int nt_clone_subtree(NodeTable *nt, int root);
+
 /* Accessors. id must be in [0, nt->count). Out-of-range ids return the
    given defaults so callers can walk freely without bounds checks. */
 const char *nt_type(const NodeTable *nt, int id);          /* NULL if unset */

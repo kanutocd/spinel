@@ -258,6 +258,80 @@ NodeTable *nt_load_text(const char *text) {
   return nt;
 }
 
+/* Collect the subtree node ids reachable from `id` via ref + array fields. */
+static void nt_clone_collect(NodeTable *nt, int id, char *seen, int *list, int *n) {
+  if (id < 0 || id >= nt->count || seen[id]) return;
+  seen[id] = 1; list[(*n)++] = id;
+  SpNode *nd = &nt->nodes[id];
+  for (int j = 0; j < nd->nr; j++) nt_clone_collect(nt, nd->r[j].ref, seen, list, n);
+  for (int j = 0; j < nd->na; j++)
+    for (int k = 0; k < nd->a[j].n; k++) nt_clone_collect(nt, nd->a[j].ids[k], seen, list, n);
+}
+
+/* Deep-clone the subtree rooted at `root`, appending fresh nodes to the
+   table and remapping internal child references. Refs/array elements that
+   point outside the subtree are kept verbatim. Returns the new root id, or
+   -1 on failure. Grows nt->count; callers must resize parallel per-node
+   arrays (Compiler.ntype / .nscope) to match afterward. */
+int nt_clone_subtree(NodeTable *nt, int root) {
+  if (root < 0 || root >= nt->count) return -1;
+  char *seen = calloc((size_t)nt->count, 1);
+  int *list = malloc(sizeof(int) * (size_t)nt->count);
+  if (!seen || !list) { free(seen); free(list); return -1; }
+  int sn = 0;
+  nt_clone_collect(nt, root, seen, list, &sn);
+  free(seen);
+  int base = nt->count;
+  int *map = malloc(sizeof(int) * (size_t)base);
+  if (!map) { free(list); return -1; }
+  for (int i = 0; i < base; i++) map[i] = -1;
+  for (int i = 0; i < sn; i++) map[list[i]] = base + i;
+  SpNode *grown = realloc(nt->nodes, sizeof(SpNode) * (size_t)(base + sn));
+  if (!grown) { free(list); free(map); return -1; }
+  nt->nodes = grown;
+  memset(&nt->nodes[base], 0, sizeof(SpNode) * (size_t)sn);
+  for (int i = 0; i < sn; i++) {
+    SpNode *src = &nt->nodes[list[i]];
+    SpNode *dst = &nt->nodes[base + i];
+    if (src->type)    dst->type    = dup_n(src->type, strlen(src->type));
+    if (src->content) dst->content = dup_n(src->content, strlen(src->content));
+    dst->ns = dst->cs = src->ns;
+    if (src->ns) { dst->s = malloc(sizeof(SpStrField) * (size_t)src->ns);
+      for (int j = 0; j < src->ns; j++) {
+        dst->s[j].key = dup_n(src->s[j].key, strlen(src->s[j].key));
+        dst->s[j].val_len = src->s[j].val_len;
+        dst->s[j].val = malloc(src->s[j].val_len + 1);
+        memcpy(dst->s[j].val, src->s[j].val, src->s[j].val_len);
+        dst->s[j].val[src->s[j].val_len] = 0;
+      } }
+    dst->ni = dst->ci = src->ni;
+    if (src->ni) { dst->i = malloc(sizeof(SpIntField) * (size_t)src->ni);
+      for (int j = 0; j < src->ni; j++) { dst->i[j].key = dup_n(src->i[j].key, strlen(src->i[j].key)); dst->i[j].val = src->i[j].val; } }
+    dst->nr = dst->cr = src->nr;
+    if (src->nr) { dst->r = malloc(sizeof(SpRefField) * (size_t)src->nr);
+      for (int j = 0; j < src->nr; j++) {
+        dst->r[j].key = dup_n(src->r[j].key, strlen(src->r[j].key));
+        int rf = src->r[j].ref;
+        dst->r[j].ref = (rf >= 0 && rf < base && map[rf] >= 0) ? map[rf] : rf;
+      } }
+    dst->na = dst->ca = src->na;
+    if (src->na) { dst->a = malloc(sizeof(SpArrField) * (size_t)src->na);
+      for (int j = 0; j < src->na; j++) {
+        dst->a[j].key = dup_n(src->a[j].key, strlen(src->a[j].key));
+        dst->a[j].n = src->a[j].n;
+        dst->a[j].ids = malloc(sizeof(int) * (size_t)src->a[j].n);
+        for (int k = 0; k < src->a[j].n; k++) {
+          int e = src->a[j].ids[k];
+          dst->a[j].ids[k] = (e >= 0 && e < base && map[e] >= 0) ? map[e] : e;
+        }
+      } }
+  }
+  int newroot = map[root];
+  nt->count = base + sn;
+  free(list); free(map);
+  return newroot;
+}
+
 void nt_free(NodeTable *nt) {
   if (!nt) return;
   for (int k = 0; k < nt->count; k++) {

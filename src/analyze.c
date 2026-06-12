@@ -3873,6 +3873,113 @@ static void register_extends(Compiler *c) {
   }
 }
 
+/* True if class method scope `mi`'s body contains a bare `new` call (which
+   must rebind to the calling subclass, not the defining class). */
+static int cmethod_has_bare_new(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    if (c->nscope[id] != mi) continue;
+    const char *ty = nt_type(nt, id);
+    if (ty && !strcmp(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&
+        nt_str(nt, id, "name") && !strcmp(nt_str(nt, id, "name"), "new"))
+      return 1;
+  }
+  return 0;
+}
+
+/* `Subclass.create` where `create` is an inherited class method whose body
+   does `new(...)`: Ruby's bare `new` constructs the *calling* class, so copy
+   the inherited cls method into each calling subclass (the copy's class_id
+   makes codegen's `new` resolve to that subclass). The defining-class source
+   is DCE'd unless it is itself called directly. Covers #224 / #229. */
+static void specialize_inherited_cls_new(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int snap = c->nscopes;
+  int node_count = nt->count;   /* don't scan nodes appended by cloning */
+  int did_clone = 0;
+  for (int id = 0; id < node_count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    const char *rty = nt_type(nt, recv);
+    if (!rty || (strcmp(rty, "ConstantReadNode") && strcmp(rty, "ConstantPathNode"))) continue;
+    const char *cn = nt_str(nt, recv, "name");
+    int ci = cn ? comp_class_index(c, cn) : -1;
+    if (ci < 0) continue;
+    const char *mname = nt_str(nt, id, "name");
+    if (!mname || !strcmp(mname, "new")) continue;
+    if (comp_cmethod_in_class(c, ci, mname) >= 0) continue;  /* defined on ci */
+    int def_cls = -1;
+    int mi = comp_cmethod_in_chain(c, ci, mname, &def_cls);
+    if (mi < 0 || def_cls == ci || mi >= snap) continue;     /* not inherited */
+    if (!cmethod_has_bare_new(c, mi)) continue;
+
+    /* Copy the inherited cls method scope, owned by ci, with its OWN clone of
+       the body AST so locals/dispatches inside resolve against ci (the bare
+       `new` constructs ci, and `instance = new` is typed obj_ci). */
+    int src_body = c->scopes[mi].body;
+    int new_body = src_body >= 0 ? nt_clone_subtree(nt, src_body) : -1;
+    if (src_body >= 0 && new_body < 0) continue;  /* clone failed: skip */
+    comp_grow_node_arrays(c);
+    did_clone = 1;
+    Scope *src = &c->scopes[mi];
+    Scope *dst = comp_scope_new(c, src->name, src->def_node);
+    src = &c->scopes[mi];  /* realloc-safe */
+    int dst_idx = c->nscopes - 1;
+    dst->body = new_body;
+    /* attribute the cloned subtree to the new scope */
+    if (new_body >= 0) walk_scope(c, new_body, dst_idx, ci);
+    dst->class_id = ci;
+    dst->is_cmethod = 1;
+    dst->yields = src->yields;
+    dst->nrequired = src->nrequired;
+    dst->rest_idx = src->rest_idx;
+    dst->kwrest_idx = src->kwrest_idx;
+    /* The bare `new` returns the specialized subclass, so a create-style
+       method that returns its instance is typed as that subclass. */
+    dst->ret = ty_object(ci);
+    dst->ret_specialized = 1;
+    if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+    dst->nparams = src->nparams;
+    if (src->nparams > 0) {
+      dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
+      dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
+      for (int p = 0; p < src->nparams; p++) {
+        dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
+        dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
+        if (dst->pnames[p]) { LocalVar *lv = scope_local_intern(dst, dst->pnames[p]); lv->is_param = 1; }
+      }
+    }
+  }
+  /* DCE the now-shadowed source cls methods that are never called on their
+     own defining class. */
+  for (int s = 0; s < snap; s++) {
+    Scope *src = &c->scopes[s];
+    if (!src->is_cmethod || !src->name || src->class_id < 0) continue;
+    /* did we specialize this one into a subclass? (a fresh cmethod copy with
+       the same name was appended) */
+    int specialized = 0;
+    for (int d = snap; d < c->nscopes; d++)
+      if (c->scopes[d].is_cmethod && c->scopes[d].name &&
+          !strcmp(c->scopes[d].name, src->name)) { specialized = 1; break; }
+    if (!specialized) continue;
+    /* keep it if called directly as <DefiningClass>.<name> */
+    int called_direct = 0;
+    for (int id = 0; id < nt->count && !called_direct; id++) {
+      if (!nt_type(nt, id) || strcmp(nt_type(nt, id), "CallNode")) continue;
+      if (!nt_str(nt, id, "name") || strcmp(nt_str(nt, id, "name"), src->name)) continue;
+      int r = nt_ref(nt, id, "receiver");
+      if (r < 0 || !nt_type(nt, r)) continue;
+      if (strcmp(nt_type(nt, r), "ConstantReadNode") && strcmp(nt_type(nt, r), "ConstantPathNode")) continue;
+      if (comp_class_index(c, nt_str(nt, r, "name")) == src->class_id) called_direct = 1;
+    }
+    if (!called_direct) src->is_transplanted_source = 1;
+  }
+  /* The cloned bodies introduced new local/ivar nodes; intern them. */
+  if (did_clone) register_locals(c);
+}
+
 /* For each class, find `prepend M` declarations and transplant M's instance
    methods into the class with shadow-chain renaming so `super` can route
    from M's body to the original (now renamed) class body. */
@@ -5357,6 +5464,17 @@ static int infer_param_types(Compiler *c) {
     }
 
     if (recv < 0) {
+      /* bare `new(args)` inside a class method constructs the enclosing
+         (possibly specialized) class -> bind args to that class's
+         initialize, so the subclass constructor's params get typed. */
+      if (name && !strcmp(name, "new")) {
+        Scope *s = comp_scope_of(c, id);
+        if (s && s->is_cmethod && s->class_id >= 0) {
+          int initmi = comp_method_in_chain(c, s->class_id, "initialize", NULL);
+          if (initmi >= 0) changed |= bind_call_params(c, id, initmi);
+        }
+        continue;
+      }
       int mi = comp_method_index(c, name);
       int caller_cid = -1;
       /* bare call inside an instance_eval/exec block: dispatch on the
@@ -6501,6 +6619,9 @@ static int infer_return_types(Compiler *c) {
   /* implicit return: the body's value */
   for (int s = 1; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
+    /* Specialized inherited-cls-new copies keep their fixed subclass return
+       type (the shared body's bare `new` would otherwise infer the base). */
+    if (sc->ret_specialized) continue;
     /* An empty method body returns nil; if its value is used at all it must
        be poly (a void C function yields nothing to read). */
     int empty_body = sc->body < 0;
@@ -7003,6 +7124,7 @@ void analyze_program(Compiler *c) {
   register_includes(c);
   register_extends(c);
   register_prepends(c);
+  specialize_inherited_cls_new(c);
 
   /* collect top-level `include <Mod>` calls so bare method calls can
      resolve to module_function methods in those modules. */
