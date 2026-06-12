@@ -166,6 +166,11 @@ typedef struct {
   char **ffi_lib_mods;
   char **ffi_lib_names;     /* semicolon-separated library names, or "" */
   int n_ffi_libs, c_ffi_libs;
+
+  /* FFI cflags per module (semicolon-separated) */
+  char **ffi_cflag_mods;
+  char **ffi_cflag_vals;    /* semicolon-separated cflag strings, or "" */
+  int n_ffi_cflags, c_ffi_cflags;
 } Compiler;
 
 Compiler *comp_new(const NodeTable *nt);

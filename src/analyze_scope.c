@@ -899,6 +899,35 @@ void register_ffi_decls(Compiler *c) {
         continue;
       }
 
+      if (!strcmp(dname, "ffi_cflags")) {
+        if (an < 1) continue;
+        const char *cflag = ffi_arg_str(nt, args[0]);
+        if (!cflag) continue;
+        /* find or create cflag entry, semicolon-merged per module */
+        int mi = -1;
+        for (int ci = 0; ci < c->n_ffi_cflags; ci++)
+          if (!strcmp(c->ffi_cflag_mods[ci], mname)) { mi = ci; break; }
+        if (mi < 0) {
+          if (c->n_ffi_cflags >= c->c_ffi_cflags) {
+            c->c_ffi_cflags = c->c_ffi_cflags ? c->c_ffi_cflags * 2 : 8;
+            c->ffi_cflag_mods = realloc(c->ffi_cflag_mods, sizeof(char*) * (size_t)c->c_ffi_cflags);
+            c->ffi_cflag_vals = realloc(c->ffi_cflag_vals, sizeof(char*) * (size_t)c->c_ffi_cflags);
+          }
+          c->ffi_cflag_mods[c->n_ffi_cflags] = strdup(mname);
+          c->ffi_cflag_vals[c->n_ffi_cflags] = strdup(cflag);
+          mi = c->n_ffi_cflags++;
+        }
+        else {
+          size_t old_len = strlen(c->ffi_cflag_vals[mi]);
+          size_t new_len = old_len + 1 + strlen(cflag) + 1;
+          char *merged = malloc(new_len);
+          snprintf(merged, new_len, "%s;%s", c->ffi_cflag_vals[mi], cflag);
+          free(c->ffi_cflag_vals[mi]);
+          c->ffi_cflag_vals[mi] = merged;
+        }
+        continue;
+      }
+
       if (!strcmp(dname, "ffi_func")) {
         if (an < 3) continue;
         const char *fname = ffi_arg_str(nt, args[0]);

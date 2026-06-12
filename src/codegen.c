@@ -1315,6 +1315,27 @@ char *codegen_program(const NodeTable *nt) {
   /* FFI extern declarations and buffer storage */
   {
     Compiler *cf = c;
+    /* Link/cflag markers: the spinel driver greps these out of the
+       generated C and appends them to the cc command line. One marker
+       per ';'-separated token, matching the legacy emitter's format. */
+    for (int li = 0; li < cf->n_ffi_libs; li++) {
+      for (const char *s = cf->ffi_lib_names[li]; ; ) {
+        const char *semi = strchr(s, ';');
+        int len = semi ? (int)(semi - s) : (int)strlen(s);
+        if (len > 0) buf_printf(&b, "/* SPINEL_LINK: -l%.*s */\n", len, s);
+        if (!semi) break;
+        s = semi + 1;
+      }
+    }
+    for (int ci = 0; ci < cf->n_ffi_cflags; ci++) {
+      for (const char *s = cf->ffi_cflag_vals[ci]; ; ) {
+        const char *semi = strchr(s, ';');
+        int len = semi ? (int)(semi - s) : (int)strlen(s);
+        if (len > 0) buf_printf(&b, "/* SPINEL_CFLAGS: %.*s */\n", len, s);
+        if (!semi) break;
+        s = semi + 1;
+      }
+    }
     for (int fi = 0; fi < cf->n_ffi_funcs; fi++) {
       const char *ret = cf->ffi_func_ret[fi];
       buf_puts(&b, "extern ");
