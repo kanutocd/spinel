@@ -1868,6 +1868,19 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
       free(canonical);
       content = read_file(lib_path);
       if (!content) {
+        /* the compiler binary may live one level below the repo root (e.g.
+           build/spinelc with the stdlib at ../lib): retry one level up */
+        char alt_path[1024];
+        int exe_len = (int)strlen(lib_dir) - 4;   /* strip the trailing "/lib" */
+        if (exe_len < 0) exe_len = 0;
+        snprintf(alt_path, sizeof(alt_path), "%.*s/../lib/%s", exe_len, lib_dir, lib_name);
+        size_t al = strlen(alt_path);
+        if (al < sizeof(alt_path) - 4 && (al < 3 || strcmp(alt_path + al - 3, ".rb") != 0))
+          strcat(alt_path, ".rb");
+        content = read_file(alt_path);
+        if (content) snprintf(lib_path, sizeof(lib_path), "%s", alt_path);
+      }
+      if (!content) {
         if (sp_lib_is_native(lib_name)) {
           /* Provided natively by the Spinel runtime; the require is a
              harmless no-op, so don't warn. */
