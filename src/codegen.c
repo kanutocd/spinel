@@ -9221,6 +9221,37 @@ static void emit_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "_t%d", tres); return;
         }
       }
+      /* find / detect { |x| cond } - returns element or nil */
+      if ((!strcmp(name, "find") || !strcmp(name, "detect")) && block >= 0) {
+        const char *bp = block_param_name(c, block, 0); if (bp) bp = rename_local(bp);
+        int body = nt_ref(nt, block, "body");
+        int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+        if (bn >= 1) {
+          TyKind et = ty_array_elem(rt);
+          int trecv = ++g_tmp, ti = ++g_tmp, tres = ++g_tmp;
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+          buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
+          emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre);
+          if (et == TY_STRING) buf_printf(g_pre, " _t%d = NULL;\n", tres);
+          else if (et == TY_INT) buf_printf(g_pre, " _t%d = SP_INT_NIL;\n", tres);
+          else buf_printf(g_pre, " _t%d = 0;\n", tres);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
+                     ti, ti, k, trecv, ti);
+          if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", bp, k, trecv, ti); }
+          for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
+          int sv = g_indent; g_indent++;
+          Buf cb; memset(&cb, 0, sizeof cb); emit_expr(c, bb[bn - 1], &cb); g_indent = sv;
+          emit_indent(g_pre, g_indent + 1);
+          if (bp) buf_printf(g_pre, "if (%s) { _t%d = lv_%s; break; }\n", cb.p ? cb.p : "0", tres, bp);
+          else buf_printf(g_pre, "if (%s) { _t%d = sp_%sArray_get(_t%d, _t%d); break; }\n",
+                          cb.p ? cb.p : "0", tres, k, trecv, ti);
+          free(cb.p);
+          emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+          buf_printf(b, "_t%d", tres); return;
+        }
+      }
       /* map! / collect! { |x| body } - in-place transform, returns receiver */
       if ((!strcmp(name, "map!") || !strcmp(name, "collect!")) && block >= 0) {
         const char *bp0 = block_param_name(c, block, 0);
