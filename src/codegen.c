@@ -81,6 +81,10 @@ static int g_dm_subst_node = -1;
 /* When inside an instance_eval block, the class id of the receiver (-1 outside).
    Used so InstanceVariableReadNode/WriteNode use g_self->iv_X instead of civ_Toplevel_X. */
 static int g_ie_class_id = -1;
+/* Set while emitting an instance_eval/exec splice in statement position: the
+   block's value is discarded, so the last statement emits as a statement
+   (not coerced to an expression, which would fail for e.g. a trailing puts). */
+static int g_ie_discard_value = 0;
 /* While emitting a rescue handler: the C var names holding the caught
    exception's class/message, so a bare `raise` can re-raise. */
 static const char *g_rescue_cls = NULL, *g_rescue_msg = NULL;
@@ -5221,19 +5225,27 @@ static void emit_call(Compiler *c, int id, Buf *b) {
         }
       }
       if (ie_bn > 0) {
-        for (int j = 0; j < ie_bn - 1; j++) emit_stmt(c, ie_bb[j], g_pre, g_indent);
-        Buf vb; memset(&vb, 0, sizeof vb);
-        int si2 = g_indent; g_indent = si2;
-        emit_expr(c, ie_bb[ie_bn - 1], &vb);
-        g_indent = si2;
-        emit_indent(g_pre, g_indent);
-        if (!scalar_res) {
-          if (vb.p) buf_printf(g_pre, "%s;\n", vb.p);
+        /* In statement position the value is discarded, so emit the whole body
+           as statements -- the last node may not be expressible (e.g. puts). */
+        int last_as_stmt = g_ie_discard_value && !scalar_res;
+        int upto = last_as_stmt ? ie_bn : ie_bn - 1;
+        int saved_discard = g_ie_discard_value; g_ie_discard_value = 0;
+        for (int j = 0; j < upto; j++) emit_stmt(c, ie_bb[j], g_pre, g_indent);
+        if (!last_as_stmt) {
+          Buf vb; memset(&vb, 0, sizeof vb);
+          int si2 = g_indent; g_indent = si2;
+          emit_expr(c, ie_bb[ie_bn - 1], &vb);
+          g_indent = si2;
+          emit_indent(g_pre, g_indent);
+          if (!scalar_res) {
+            if (vb.p) buf_printf(g_pre, "%s;\n", vb.p);
+          }
+          else {
+            buf_printf(g_pre, "_t%d = %s;\n", tres, vb.p ? vb.p : "0");
+          }
+          free(vb.p);
         }
-        else {
-          buf_printf(g_pre, "_t%d = %s;\n", tres, vb.p ? vb.p : "0");
-        }
-        free(vb.p);
+        g_ie_discard_value = saved_discard;
       }
       g_ie_class_id = saved_ie;
       g_self = saved_self2;
@@ -15680,6 +15692,28 @@ static void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       }
     }
     if (emit_array_mutate_stmt(c, id, b, indent)) return;
+    /* instance_eval/exec or trampoline call in statement position: its value
+       is discarded, so let the splice emit the block's last node as a
+       statement rather than coercing it to an expression. */
+    {
+      const char *snm = nt_str(nt, id, "name");
+      int srecv = nt_ref(nt, id, "receiver");
+      int sblk = nt_ref(nt, id, "block");
+      if (snm && srecv >= 0 && sblk >= 0) {
+        TyKind srt = comp_ntype(c, srecv);
+        int is_ie = !strcmp(snm, "instance_eval") || !strcmp(snm, "instance_exec");
+        int discard = (is_ie && ty_is_object(srt)) ||
+                      (ty_is_object(srt) && comp_trampoline_kind(c, ty_object_class(srt), snm, NULL));
+        if (discard) {
+          int sv = g_ie_discard_value; g_ie_discard_value = 1;
+          emit_indent(b, indent);
+          emit_expr(c, id, b);
+          buf_puts(b, ";\n");
+          g_ie_discard_value = sv;
+          return;
+        }
+      }
+    }
     emit_indent(b, indent);
     emit_expr(c, id, b);
     buf_puts(b, ";\n");

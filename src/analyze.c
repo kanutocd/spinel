@@ -4405,6 +4405,33 @@ static int infer_write_types(Compiler *c) {
     lv->type = ty_unify(lv->type, newt);
   }
 
+  /* Second targeted pass for `x = recv.instance_eval/exec { ... }` (and
+     trampoline calls): the call's value is the block's last expression, which
+     may read a block-body local defined at a higher node id than this write.
+     Those locals were just typed by the main loop above, so recompute here so
+     `x` is not stranded at UNKNOWN by within-pass node ordering. */
+  for (int id = 0; id < nt->count; id++) {
+    if (strcmp(nt_type(nt, id) ? nt_type(nt, id) : "", "LocalVariableWriteNode")) continue;
+    int val_id = nt_ref(nt, id, "value");
+    if (val_id < 0 || strcmp(nt_type(nt, val_id) ? nt_type(nt, val_id) : "", "CallNode")) continue;
+    if (nt_ref(nt, val_id, "block") < 0) continue;
+    const char *vnm = nt_str(nt, val_id, "name");
+    int vrecv = nt_ref(nt, val_id, "receiver");
+    if (!vnm || vrecv < 0) continue;
+    int is_ie = !strcmp(vnm, "instance_eval") || !strcmp(vnm, "instance_exec");
+    if (!is_ie) {
+      TyKind vrt = infer_type(c, vrecv);
+      if (!ty_is_object(vrt) || !comp_trampoline_kind(c, ty_object_class(vrt), vnm, NULL)) continue;
+    }
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+    if (!lv || lv->is_param || lv->is_block_param) continue;
+    TyKind newt = infer_type(c, val_id);
+    if (newt == TY_NIL) newt = TY_POLY;
+    TyKind m2 = ty_unify(lv->type, newt);
+    if (m2 != lv->type) { lv->type = m2; changed = 1; }
+  }
+
   /* Multiple assignment `a, b = e0, e1`: each target gets its element's
      type (the RHS ArrayNode is a tuple here, not an array value). */
   for (int id = 0; id < nt->count; id++) {
@@ -7675,13 +7702,17 @@ void analyze_program(Compiler *c) {
     const char *ty2 = nt_type(c->nt, id);
     if (!ty2 || strcmp(ty2, "CallNode")) continue;
     const char *nm2 = nt_str(c->nt, id, "name");
-    if (!nm2 || strcmp(nm2, "instance_eval")) continue;
+    if (!nm2) continue;
     int blk2 = nt_ref(c->nt, id, "block");
     int recv2 = nt_ref(c->nt, id, "receiver");
     if (blk2 < 0 || recv2 < 0) continue;
     TyKind rt2 = c->ntype[recv2];
     if (!ty_is_object(rt2)) continue;
-    if (comp_method_in_chain(c, ty_object_class(rt2), "instance_eval", NULL) >= 0) continue;
+    int is_ie2 = !strcmp(nm2, "instance_eval") || !strcmp(nm2, "instance_exec");
+    if (is_ie2) {
+      if (comp_method_in_chain(c, ty_object_class(rt2), nm2, NULL) >= 0) continue;
+    }
+    else if (!comp_trampoline_kind(c, ty_object_class(rt2), nm2, NULL)) continue;
     int bdy2 = nt_ref(c->nt, blk2, "body");
     if (bdy2 < 0) continue;
     int bn2 = 0; const int *bb2 = nt_arr(c->nt, bdy2, "body", &bn2);
