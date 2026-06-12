@@ -6364,6 +6364,22 @@ static void emit_call(Compiler *c, int id, Buf *b) {
     }
   }
 
+  /* `Module.accessor.cmethod(args)` folded to a constant (Stage-1): emit the
+     resolved constant's class method directly. */
+  if (recv >= 0) {
+    int fold_ci = comp_sg_reader_const(c, recv);
+    if (fold_ci >= 0) {
+      int defcls = -1;
+      int mi = comp_cmethod_in_chain(c, fold_ci, name, &defcls);
+      if (mi >= 0) {
+        buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].name, mc(c->scopes[mi].name));
+        emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
+        buf_puts(b, ")");
+        return;
+      }
+    }
+  }
+
   /* Class.cmethod(args) / M::Sub.cmethod(args) -> sp_<Class>_s_<method>(args) */
   if (recv >= 0) {
     const char *rty = nt_type(nt, recv);

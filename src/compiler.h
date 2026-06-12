@@ -211,6 +211,9 @@ int        comp_method_in_chain(Compiler *c, int class_id, const char *name, int
 /* Detect an instance_eval/exec trampoline (def m(args,&b); instance_eval/exec(args,&b); end).
    Returns 1 (eval) / 2 (exec) / 0; sets *def_class to the defining class. */
 int        comp_trampoline_kind(Compiler *c, int class_id, const char *name, int *def_class);
+/* Stage-1 fold for module singleton accessors holding a constant. */
+int        comp_sg_const_binding(Compiler *c, int class_id, const char *base);
+int        comp_sg_reader_const(Compiler *c, int call_id); /* const class idx for `Class.reader`, or -1 */
 /* Walk the chain for an attr reader/writer; returns 1 and the owning class. */
 int        comp_reader_in_chain(Compiler *c, int class_id, const char *name, int *def_class);
 int        comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_class);

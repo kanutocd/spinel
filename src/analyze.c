@@ -1086,6 +1086,16 @@ static TyKind infer_call(Compiler *c, int id) {
     return TY_INT;
   }
 
+  /* `Module.accessor.cmethod(...)` where the singleton accessor statically
+     folds to a constant (Stage-1): dispatch as that constant's class method. */
+  if (recv >= 0) {
+    int fold_ci = comp_sg_reader_const(c, recv);
+    if (fold_ci >= 0) {
+      int mi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
+      if (mi >= 0) return c->scopes[mi].ret;
+    }
+  }
+
   /* Class.cmethod(...) / M::Sub.cmethod(...) -> the class method's return type */
   if (recv >= 0) {
     const char *rty = nt_type(nt, recv);

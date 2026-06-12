@@ -262,6 +262,65 @@ int comp_trampoline_kind(Compiler *c, int class_id, const char *name, int *def_c
   return kind;
 }
 
+/* Stage-1 static fold for a module-level singleton accessor that holds a
+   constant: if `Class.base = SomeConst` appears exactly once program-wide and
+   every write is the same constant-resolvable class/module, return that
+   class's index; otherwise -1 (polymorphic / non-constant -> runtime path). */
+int comp_sg_const_binding(Compiler *c, int class_id, const char *base) {
+  const NodeTable *nt = c->nt;
+  const char *cls_name = c->classes[class_id].name;
+  size_t blen = strlen(base);
+  int found = -1, count = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    size_t nl = strlen(nm);
+    if (nl != blen + 1 || nm[nl - 1] != '=' || strncmp(nm, base, blen)) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    const char *rty = nt_type(nt, recv);
+    if (!rty || (strcmp(rty, "ConstantReadNode") && strcmp(rty, "ConstantPathNode"))) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn || strcmp(rn, cls_name)) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (an != 1) return -1;
+    const char *vty = nt_type(nt, av[0]);
+    if (!vty || (strcmp(vty, "ConstantReadNode") && strcmp(vty, "ConstantPathNode"))) return -1;
+    int rci = comp_class_index(c, nt_str(nt, av[0], "name"));
+    if (rci < 0) return -1;
+    count++;
+    if (found < 0) found = rci;
+    else if (found != rci) return -1;
+  }
+  return count == 1 ? found : -1;
+}
+
+/* If `call_id` reads a module singleton accessor (`Class.reader`) whose value
+   folds to a single constant via comp_sg_const_binding, return that constant's
+   class index; otherwise -1. */
+int comp_sg_reader_const(Compiler *c, int call_id) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, call_id);
+  if (!ty || strcmp(ty, "CallNode")) return -1;
+  if (nt_ref(nt, call_id, "block") >= 0) return -1;
+  if (nt_ref(nt, call_id, "arguments") >= 0) return -1;
+  const char *nm = nt_str(nt, call_id, "name");
+  if (!nm) return -1;
+  size_t nl = strlen(nm);
+  if (nl > 0 && nm[nl - 1] == '=') return -1;
+  int recv = nt_ref(nt, call_id, "receiver");
+  if (recv < 0) return -1;
+  const char *rty = nt_type(nt, recv);
+  if (!rty || (strcmp(rty, "ConstantReadNode") && strcmp(rty, "ConstantPathNode"))) return -1;
+  const char *rn = nt_str(nt, recv, "name");
+  int ci = rn ? comp_class_index(c, rn) : -1;
+  if (ci < 0 || !comp_is_sg_reader(&c->classes[ci], nm)) return -1;
+  return comp_sg_const_binding(c, ci, nm);
+}
+
 static int name_in(char **list, int n, const char *name) {
   for (int i = 0; i < n; i++) if (strcmp(list[i], name) == 0) return 1;
   return 0;
