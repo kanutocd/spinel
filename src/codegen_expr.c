@@ -1,0 +1,1284 @@
+#include "codegen_internal.h"
+
+void emit_interp(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  const int *parts = nt_arr(nt, id, "parts", &n);
+  Buf fmt; memset(&fmt, 0, sizeof fmt);
+  Buf argbuf; memset(&argbuf, 0, sizeof argbuf);
+  int nargs = 0;
+
+  for (int k = 0; k < n; k++) {
+    int pid = parts[k];
+    const char *pty = nt_type(nt, pid);
+    if (pty && !strcmp(pty, "StringNode")) {
+      const char *content = nt_str(nt, pid, "content");
+      for (const char *p = content ? content : ""; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (ch == '%') buf_puts(&fmt, "%%");
+        else if (ch == '\\') buf_puts(&fmt, "\\\\");
+        else if (ch == '"') buf_puts(&fmt, "\\\"");
+        else if (ch == '\n') buf_puts(&fmt, "\\n");
+        else if (ch == '\t') buf_puts(&fmt, "\\t");
+        else if (ch == '\r') buf_puts(&fmt, "\\r");
+        else if (ch >= 0x20 && ch < 0x7f) buf_printf(&fmt, "%c", ch);
+        else buf_printf(&fmt, "\\%03o", ch);
+      }
+    }
+    else if (pty && !strcmp(pty, "EmbeddedStatementsNode")) {
+      int s = nt_ref(nt, pid, "statements");
+      int bn = 0;
+      const int *body = s >= 0 ? nt_arr(nt, s, "body", &bn) : NULL;
+      int expr = bn > 0 ? body[bn - 1] : -1;
+      /* `#{ s1; s2; ...; sN }` evaluates every statement in order and uses sN's
+         value. Run the leading statements for side effects; if sN is itself an
+         assignment, perform it and read the assigned variable back as the value. */
+      char vexpr[48]; vexpr[0] = 0;
+      for (int si = 0; si + 1 < bn; si++) emit_stmt(c, body[si], g_pre, g_indent);
+      const char *ety = expr >= 0 ? nt_type(nt, expr) : NULL;
+      TyKind t = comp_ntype(c, expr);
+      if (ety && (!strcmp(ety, "LocalVariableWriteNode") || !strcmp(ety, "LocalVariableOperatorWriteNode") ||
+                  !strcmp(ety, "LocalVariableOrWriteNode") || !strcmp(ety, "LocalVariableAndWriteNode"))) {
+        emit_stmt(c, expr, g_pre, g_indent);
+        const char *vn = nt_str(nt, expr, "name");
+        LocalVar *lvp = vn ? scope_local(comp_scope_of(c, expr), vn) : NULL;
+        if (lvp) t = lvp->type;
+        int tv = ++g_tmp;
+        emit_indent(g_pre, g_indent); emit_ctype(c, t, g_pre);
+        buf_printf(g_pre, " _t%d = ", tv); emit_local_ref(c, expr, vn, g_pre); buf_puts(g_pre, ";\n");
+        snprintf(vexpr, sizeof vexpr, "_t%d", tv);
+      }
+      #define EMIT_IV() do { if (vexpr[0]) buf_puts(&argbuf, vexpr); else emit_expr(c, expr, &argbuf); } while (0)
+      buf_puts(&argbuf, ", ");
+      if (t == TY_INT) {
+        buf_puts(&fmt, "%lld"); buf_puts(&argbuf, "(long long)");
+        EMIT_IV();
+      }
+      else if (t == TY_STRING) {
+        /* a nullable string (NULL) interpolates as the empty string */
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "("); EMIT_IV(); buf_puts(&argbuf, " ?: \"\")");
+      }
+      else if (t == TY_FLOAT) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_float_to_s(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_BOOL) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "(");
+        EMIT_IV(); buf_puts(&argbuf, " ? \"true\" : \"false\")");
+      }
+      else if (t == TY_SYMBOL) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_sym_to_s(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_POLY) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_poly_to_s(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_EXCEPTION) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_exc_message(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_NIL) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "((void)(");
+        EMIT_IV(); buf_puts(&argbuf, "), \"\")");
+      }
+      else if (t == TY_POLY_ARRAY) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_PolyArray_inspect(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (ty_is_array(t) && array_kind(t)) {
+        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sArray_inspect(", array_kind(t));
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (ty_is_object(t) && comp_method_in_chain(c, ty_object_class(t), "to_s", NULL) >= 0) {
+        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%s_to_s(", c->classes[ty_object_class(t)].name);
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (ty_is_hash(t) && ty_hash_cname(t)) {
+        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sHash_inspect(", ty_hash_cname(t));
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (t == TY_CLASS) {
+        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_class_to_s(");
+        EMIT_IV(); buf_puts(&argbuf, ")");
+      }
+      else if (ty_is_object(t)) {
+        /* user object without to_s: fall back to poly_to_s of boxed value */
+        int cid2 = ty_object_class(t);
+        buf_puts(&fmt, "%s");
+        buf_printf(&argbuf, "sp_poly_to_s(sp_box_obj(");
+        EMIT_IV(); buf_printf(&argbuf, ", %d))", cid2);
+      }
+      else if (t == TY_UNKNOWN && ety && !strcmp(ety, "ArrayNode") &&
+               (nt_arr(nt, expr, "elements", (int[]){0}), 1)) {
+        /* a bare empty array literal interpolates as "[]" */
+        int en = 0; nt_arr(nt, expr, "elements", &en);
+        if (en == 0) { buf_puts(&fmt, "%s"); buf_puts(&argbuf, "\"[]\""); }
+        else { free(fmt.p); free(argbuf.p); unsupported(c, pid, "interpolation value"); }
+      }
+      else {
+        free(fmt.p); free(argbuf.p);
+        unsupported(c, pid, "interpolation value");
+      }
+      #undef EMIT_IV
+      nargs++;
+    }
+    else {
+      free(fmt.p); free(argbuf.p);
+      unsupported(c, pid, "interpolation part");
+    }
+  }
+
+  if (nargs == 0) {
+    buf_puts(b, "(&(\"\\xff\" \"");
+    for (const char *p = fmt.p ? fmt.p : ""; *p; p++) {
+      if (p[0] == '%' && p[1] == '%') { buf_puts(b, "%"); p++; }
+      else buf_printf(b, "%c", *p);
+    }
+    buf_puts(b, "\")[1])");
+  }
+  else {
+    buf_puts(b, "sp_sprintf(\"");
+    buf_puts(b, fmt.p ? fmt.p : "");
+    buf_puts(b, "\"");
+    buf_puts(b, argbuf.p ? argbuf.p : "");
+    buf_puts(b, ")");
+  }
+  free(fmt.p); free(argbuf.p);
+}
+
+/* ---- expression ---- */
+
+void emit_expr(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, id);
+  if (!ty) unsupported(c, id, "expression (no type)");
+
+  if (!strcmp(ty, "IntegerNode")) { buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return; }
+  if (!strcmp(ty, "FloatNode")) { const char *v = nt_content(nt, id); buf_puts(b, v ? v : "0.0"); return; }
+  if (!strcmp(ty, "ImaginaryNode")) {
+    int num = nt_ref(nt, id, "numeric");
+    buf_puts(b, "((sp_Complex){0.0, (mrb_float)(");
+    if (num >= 0) emit_expr(c, num, b);
+    else buf_puts(b, "0");
+    buf_puts(b, ")})");
+    return;
+  }
+  if (!strcmp(ty, "RationalNode")) {
+    const char *rn = nt_str(nt, id, "rat_num");
+    const char *rd = nt_str(nt, id, "rat_den");
+    buf_printf(b, "((sp_Rational){%sLL, %sLL})", rn ? rn : "0", rd ? rd : "1");
+    return;
+  }
+  if (!strcmp(ty, "StringNode")) {
+    const char *sc = nt_str(nt, id, "content");
+    emit_str_literal_n(b, sc ? sc : "", sc ? nt_str_len(nt, id, "content") : 0);
+    return;
+  }
+  if (!strcmp(ty, "SourceFileNode")) {
+    const char *sc = nt_str(nt, id, "content");
+    emit_str_literal_n(b, sc ? sc : "", sc ? strlen(sc) : 0);
+    return;
+  }
+  if (!strcmp(ty, "SourceLineNode")) {
+    buf_printf(b, "%lld", (long long)nt_int(nt, id, "start_line", 0));
+    return;
+  }
+  if (!strcmp(ty, "SourceEncodingNode")) {
+    buf_puts(b, "sp_box_encoding(sp_encoding_utf8())"); return;
+  }
+  if (!strcmp(ty, "RegularExpressionNode")) {
+    int ri = re_lit_index(c, id);
+    if (ri >= 0) buf_printf(b, "sp_re_pat_%d", ri);
+    else buf_puts(b, "NULL");
+    return;
+  }
+  if (!strcmp(ty, "InterpolatedStringNode")) { emit_interp(c, id, b); return; }
+  if (!strcmp(ty, "XStringNode")) {
+    const char *sc = nt_str(nt, id, "content");
+    buf_puts(b, "sp_backtick(");
+    emit_str_literal_n(b, sc ? sc : "", sc ? nt_str_len(nt, id, "content") : 0);
+    buf_puts(b, ")");
+    return;
+  }
+  if (!strcmp(ty, "InterpolatedXStringNode")) {
+    buf_puts(b, "sp_backtick(");
+    emit_interp(c, id, b);
+    buf_puts(b, ")");
+    return;
+  }
+  if (!strcmp(ty, "InterpolatedSymbolNode")) {
+    buf_puts(b, "sp_sym_intern("); emit_interp(c, id, b); buf_puts(b, ")");
+    return;
+  }
+  if (!strcmp(ty, "TrueNode"))  { buf_puts(b, "1"); return; }
+  if (!strcmp(ty, "FalseNode")) { buf_puts(b, "0"); return; }
+  if (!strcmp(ty, "NilNode"))   { buf_puts(b, "0"); return; }  /* default in numeric/bool context */
+  if (!strcmp(ty, "SymbolNode")) {
+    int sid = comp_sym_intern(c, nt_str(nt, id, "value"));
+    buf_printf(b, "((sp_sym)%d)", sid);
+    return;
+  }
+  if (!strcmp(ty, "LambdaNode")) { emit_proc_literal(c, id, b); return; }
+  if (!strcmp(ty, "CaseNode")) { emit_case_expr(c, id, b); return; }
+
+  if (!strcmp(ty, "RangeNode")) {
+    int left = nt_ref(nt, id, "left");
+    int right = nt_ref(nt, id, "right");
+    int excl = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
+    buf_puts(b, "sp_range_new(");
+    if (left >= 0) emit_expr(c, left, b); else buf_puts(b, "INTPTR_MIN");  /* beginless */
+    buf_puts(b, ", ");
+    if (right >= 0) emit_expr(c, right, b); else buf_puts(b, "INTPTR_MAX");  /* endless */
+    buf_printf(b, ", %d)", excl);
+    return;
+  }
+  if (!strcmp(ty, "LocalVariableReadNode")) {
+    const char *lrn = nt_str(nt, id, "name");
+    /* compile-time define_method substitution: the loop var IS the literal */
+    if (g_dm_subst_name && lrn && !strcmp(lrn, g_dm_subst_name) && g_dm_subst_node >= 0) {
+      emit_expr(c, g_dm_subst_node, b); return;
+    }
+    emit_local_ref(c, id, lrn, b); return;
+  }
+  if (!strcmp(ty, "LocalVariableWriteNode")) {
+    /* assignment used as expression: ({ lv = rhs; lv; }) */
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+    buf_puts(b, "({ ");
+    emit_local_ref(c, id, nm, b); buf_puts(b, " = ");
+    if (lv && lv->type == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else emit_expr(c, v, b);
+    buf_puts(b, "; "); emit_local_ref(c, id, nm, b); buf_puts(b, "; })");
+    return;
+  }
+  if (!strcmp(ty, "LocalVariableOperatorWriteNode")) {
+    /* c += 3 used as expression: ({ lv_c += 3; lv_c; }) */
+    const char *nm = nt_str(nt, id, "name");
+    const char *en = rename_local(nm);
+    buf_puts(b, "({ ");
+    emit_op_assign(c, id, b, 0);
+    buf_printf(b, "lv_%s; })", en);
+    return;
+  }
+  if (!strcmp(ty, "InstanceVariableWriteNode")) {
+    /* @ivar = rhs used as expression: ({ self->iv_x = rhs; self->iv_x; }) */
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *cws = comp_scope_of(c, id);
+    int cid2 = cws ? cws->class_id : -1;
+    if (cid2 < 0 && g_class_body_id >= 0) cid2 = g_class_body_id;
+    if (!nm || v < 0) { buf_puts(b, "0"); return; }
+    TyKind ivt2 = TY_UNKNOWN;
+    if (cid2 >= 0) {
+      int iv2 = comp_ivar_index(&c->classes[cid2], nm);
+      if (iv2 >= 0) ivt2 = c->classes[cid2].ivar_types[iv2];
+    }
+    const char *vty2 = nt_type(nt, v);
+    int ven2 = 0;
+    int v_empty_array2 = vty2 && !strcmp(vty2, "ArrayNode") && (nt_arr(nt, v, "elements", &ven2), ven2 == 0);
+    int v_empty_hash2 = 0;
+    if (!v_empty_array2 && vty2) {
+      int hen2 = 0;
+      if (!strcmp(vty2, "HashNode") || !strcmp(vty2, "KeywordHashNode"))
+        v_empty_hash2 = (nt_arr(nt, v, "elements", &hen2), hen2 == 0);
+    }
+    char ref2e[300];
+    if (cws && cws->is_cmethod && cid2 >= 0)
+      snprintf(ref2e, sizeof ref2e, "civ_%s_%s", c->classes[cid2].name, nm + 1);
+    else if (cid2 < 0 && g_ie_class_id >= 0)
+      snprintf(ref2e, sizeof ref2e, "%s->iv_%s", g_self, nm + 1);
+    else if (cid2 < 0 && comp_class_index(c, "Toplevel") >= 0)
+      snprintf(ref2e, sizeof ref2e, "civ_Toplevel_%s", nm + 1);
+    else
+      snprintf(ref2e, sizeof ref2e, "%s->iv_%s", g_self, nm + 1);
+    buf_puts(b, "({ ");
+    buf_printf(b, "%s = ", ref2e);
+    if (v_empty_array2 && ivt2 == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
+    else if (v_empty_array2 && array_kind(ivt2)) buf_printf(b, "sp_%sArray_new()", array_kind(ivt2));
+    else if (v_empty_hash2 && ty_is_hash(ivt2)) {
+      const char *hcn = ty_hash_cname(ivt2);
+      if (hcn) buf_printf(b, "sp_%sHash_new()", hcn);
+      else emit_expr(c, v, b);
+    }
+    else if (ivt2 == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, b);
+    else if (ivt2 != TY_POLY && ivt2 != TY_UNKNOWN && comp_ntype(c, v) == TY_POLY) {
+      /* poly rhs assigned to a typed ivar: unbox to the concrete type */
+      Buf _rb; memset(&_rb, 0, sizeof _rb);
+      emit_expr(c, v, &_rb);
+      emit_unbox_text(c, ivt2, _rb.p ? _rb.p : "sp_box_nil()", b);
+      free(_rb.p);
+    }
+    else emit_expr(c, v, b);
+    buf_printf(b, "; %s; })", ref2e);
+    return;
+  }
+  if (!strcmp(ty, "InstanceVariableOrWriteNode") || !strcmp(ty, "InstanceVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "InstanceVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *cws3 = comp_scope_of(c, id);
+    int cid3 = cws3 ? cws3->class_id : -1;
+    if (cid3 < 0 && g_class_body_id >= 0) cid3 = g_class_body_id;
+    TyKind ivt3 = TY_UNKNOWN;
+    if (cid3 >= 0) { int iv3 = comp_ivar_index(&c->classes[cid3], nm); if (iv3 >= 0) ivt3 = c->classes[cid3].ivar_types[iv3]; }
+    char ref3[300];
+    if (cws3 && cws3->is_cmethod && cid3 >= 0)
+      snprintf(ref3, sizeof ref3, "civ_%s_%s", c->classes[cid3].name, nm + 1);
+    else
+      snprintf(ref3, sizeof ref3, "%s->iv_%s", g_self, nm + 1);
+    if (ivt3 == TY_POLY) {
+      buf_printf(b, "({ if (%ssp_poly_truthy(%s)) %s = ", is_or ? "!" : "", ref3, ref3);
+      emit_boxed(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else if (ivt3 == TY_BOOL) {
+      buf_printf(b, "({ if (%s%s) %s = ", is_or ? "!" : "", ref3, ref3);
+      emit_expr(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else if (ivt3 == TY_INT) {
+      if (is_or) {
+        buf_printf(b, "({ if (%s == SP_INT_NIL) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+      else {
+        buf_printf(b, "({ if (%s != SP_INT_NIL) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+    }
+    else if (ivt3 == TY_STRING) {
+      if (is_or) {
+        buf_printf(b, "({ if (!%s) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+      else {
+        buf_printf(b, "({ if (%s) %s = ", ref3, ref3);
+        emit_expr(c, v, b);
+        buf_printf(b, "; %s; })", ref3);
+      }
+    }
+    else if (!is_or) {
+      buf_printf(b, "({ %s = ", ref3);
+      emit_expr(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
+    else buf_puts(b, ref3);
+    return;
+  }
+  if (!strcmp(ty, "LocalVariableOrWriteNode") || !strcmp(ty, "LocalVariableAndWriteNode")) {
+    int is_or = !strcmp(ty, "LocalVariableOrWriteNode");
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+    TyKind t = lv ? lv->type : TY_UNKNOWN;
+    const char *en = rename_local(nm);
+    if (t == TY_POLY) {
+      buf_printf(b, "({ if (%ssp_poly_truthy(lv_%s)) lv_%s = ", is_or ? "!" : "", en, en);
+      emit_boxed(c, v, b);
+      buf_printf(b, "; lv_%s; })", en);
+    }
+    else if (t == TY_BOOL) {
+      buf_printf(b, "({ if (%slv_%s) lv_%s = ", is_or ? "!" : "", en, en);
+      emit_expr(c, v, b);
+      buf_printf(b, "; lv_%s; })", en);
+    }
+    else if (!is_or) {
+      buf_printf(b, "({ lv_%s = ", en);
+      emit_expr(c, v, b);
+      buf_printf(b, "; lv_%s; })", en);
+    }
+    else {
+      buf_printf(b, "lv_%s", en);
+    }
+    return;
+  }
+  if (!strcmp(ty, "IndexOrWriteNode") || !strcmp(ty, "IndexAndWriteNode")) {
+    int is_or2 = !strcmp(ty, "IndexOrWriteNode");
+    int ir = nt_ref(nt, id, "receiver");
+    int ia = nt_ref(nt, id, "arguments");
+    int iv = nt_ref(nt, id, "value");
+    int iac = 0; const int *iav = ia >= 0 ? nt_arr(nt, ia, "arguments", &iac) : NULL;
+    if (iac != 1 || ir < 0 || iv < 0) { unsupported(c, id, "index-or/and-write (expr)"); return; }
+    TyKind irt = comp_ntype(c, ir);
+    int ta2 = ++g_tmp, tb2 = ++g_tmp, tc2 = ++g_tmp;
+    if (irt == TY_POLY_ARRAY) {
+      buf_printf(b, "({ sp_PolyArray *_t%d = ", ta2); emit_expr(c, ir, b);
+      buf_printf(b, "; mrb_int _t%d = ", tb2); emit_expr(c, iav[0], b);
+      buf_printf(b, "; sp_RbVal _t%d = sp_PolyArray_get(_t%d, _t%d);", tc2, ta2, tb2);
+      buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+      emit_boxed(c, iv, b);
+      buf_printf(b, "; sp_PolyArray_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+    }
+    else if (irt == TY_INT_ARRAY) {
+      buf_printf(b, "({ sp_IntArray *_t%d = ", ta2); emit_expr(c, ir, b);
+      buf_printf(b, "; mrb_int _t%d = ", tb2); emit_expr(c, iav[0], b);
+      buf_printf(b, "; mrb_int _t%d = sp_IntArray_get(_t%d, _t%d);", tc2, ta2, tb2);
+      buf_printf(b, " if (%s(_t%d == SP_INT_NIL)) { _t%d = ", is_or2 ? "" : "!", tc2, tc2);
+      emit_expr(c, iv, b);
+      buf_printf(b, "; sp_IntArray_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+    }
+    else if (irt == TY_STR_ARRAY) {
+      buf_printf(b, "({ sp_StrArray *_t%d = ", ta2); emit_expr(c, ir, b);
+      buf_printf(b, "; mrb_int _t%d = ", tb2); emit_expr(c, iav[0], b);
+      buf_printf(b, "; const char *_t%d = sp_StrArray_get(_t%d, _t%d);", tc2, ta2, tb2);
+      buf_printf(b, " if (%s_t%d) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+      emit_expr(c, iv, b);
+      buf_printf(b, "; sp_StrArray_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+    }
+    else if (ty_is_hash(irt)) {
+      const char *hn = ty_hash_cname(irt);
+      TyKind kt = ty_hash_key(irt);
+      TyKind vt = ty_hash_val(irt);
+      if (!hn) { unsupported(c, id, "index-or/and-write (expr, unknown hash)"); return; }
+      buf_printf(b, "({ %s _t%d = ", c_type_name(irt), ta2); emit_expr(c, ir, b);
+      buf_printf(b, "; %s _t%d = ", c_type_name(kt), tb2); emit_hash_key(c, iav[0], kt, b);
+      if (vt == TY_POLY) {
+        buf_printf(b, "; sp_RbVal _t%d = sp_%sHash_get(_t%d, _t%d);", tc2, hn, ta2, tb2);
+        buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+        emit_boxed(c, iv, b);
+        buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+      }
+      else {
+        buf_printf(b, "; %s _t%d = sp_%sHash_get(_t%d, _t%d);", c_type_name(vt), tc2, hn, ta2, tb2);
+        buf_printf(b, " if (%s_t%d) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+        emit_expr(c, iv, b);
+        buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+      }
+    }
+    else if (irt == TY_POLY) {
+      /* TY_POLY receiver: dispatch via sp_poly_get/set based on key type */
+      TyKind kt2 = comp_ntype(c, iav[0]);
+      buf_printf(b, "({ sp_RbVal _t%d = ", ta2); emit_expr(c, ir, b);
+      buf_puts(b, "; ");
+      if (kt2 == TY_INT) {
+        buf_printf(b, "mrb_int _t%d = ", tb2); emit_expr(c, iav[0], b); buf_puts(b, "; ");
+        buf_printf(b, "sp_RbVal _t%d = sp_poly_arr_get_hash(_t%d, _t%d);", tc2, ta2, tb2);
+        buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+        emit_boxed(c, iv, b);
+        buf_printf(b, "; sp_poly_arr_set_hash(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+      }
+      else if (kt2 == TY_STRING) {
+        buf_printf(b, "const char *_t%d = ", tb2); emit_expr(c, iav[0], b); buf_puts(b, "; ");
+        buf_printf(b, "sp_RbVal _t%d = sp_poly_get_str(_t%d, _t%d);", tc2, ta2, tb2);
+        buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+        emit_boxed(c, iv, b);
+        buf_printf(b, "; sp_poly_set_str(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+      }
+      else {
+        /* poly key fallback: box the key, look up polymorphically, set via poly */
+        buf_printf(b, "sp_RbVal _t%d = ", tb2); emit_boxed(c, iav[0], b); buf_puts(b, "; ");
+        buf_printf(b, "sp_RbVal _t%d = sp_poly_index_poly(_t%d, _t%d);", tc2, ta2, tb2);
+        buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { _t%d = ", is_or2 ? "!" : "", tc2, tc2);
+        emit_boxed(c, iv, b);
+        buf_printf(b, "; sp_poly_set_poly(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
+      }
+    }
+    else {
+      unsupported(c, id, "index-or/and-write (expr, unsupported recv type)");
+    }
+    return;
+  }
+  if (!strcmp(ty, "YieldNode")) {
+    /* Lowered self-recursive yield method: `yield` calls the synthetic __yblk__ proc. */
+    if (g_current_scope_is_lowered) {
+      int yargs = nt_ref(nt, id, "arguments");
+      int yargc = 0; const int *yargv = yargs >= 0 ? nt_arr(nt, yargs, "arguments", &yargc) : NULL;
+      /* Lowered yield method returns mrb_int (raw carrier for any type).
+         sp_proc_call already returns mrb_int; emit it directly with no cast. */
+      buf_puts(b, "sp_proc_call(");
+      emit_yblk_ref(b);
+      buf_puts(b, ", (mrb_int[]){");
+      for (int k = 0; k < yargc; k++) { if (k) buf_puts(b, ", "); emit_expr(c, yargv[k], b); }
+      if (yargc == 0) buf_puts(b, "0");
+      buf_puts(b, "})");
+      return;
+    }
+    if (g_block_id < 0) { buf_puts(b, "SP_INT_NIL"); return; }  /* no block: yield is nil */
+    emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
+    return;
+  }
+  if (is_block_call(c, id)) {           /* block.call used for its value */
+    emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
+    return;
+  }
+  if (!strcmp(ty, "SelfNode")) { buf_puts(b, g_self); return; }  /* self is the object reference (pointer) */
+  if (!strcmp(ty, "InstanceVariableReadNode")) {
+    const char *nm = nt_str(nt, id, "name");  /* "@x" */
+    Scope *cs = comp_scope_of(c, id);
+    if (cs && cs->is_cmethod && cs->class_id >= 0)
+      buf_printf(b, "civ_%s_%s", c->classes[cs->class_id].name, nm + 1);  /* module/class-level ivar */
+    else if (cs && cs->class_id < 0 && g_ie_class_id >= 0)
+      /* inside instance_eval block: access ivar via receiver pointer */
+      buf_printf(b, "%s->iv_%s", g_self, nm + 1);
+    else if (cs && cs->class_id < 0) {
+      /* top-level method: ivar stored as file-scope global in Toplevel pseudo-class */
+      int tl = comp_class_index(c, "Toplevel");
+      if (tl >= 0) buf_printf(b, "civ_Toplevel_%s", nm + 1);
+      else buf_printf(b, "%s->iv_%s", g_self, nm + 1);
+    }
+    else
+      buf_printf(b, "%s->iv_%s", g_self, nm + 1);
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableReadNode")) {
+    const char *nm = nt_str(nt, id, "name");  /* "@@x" */
+    Scope *s = comp_scope_of(c, id);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid >= 0) { buf_printf(b, "cvar_%s_%s", c->classes[cid].name, nm + 2); return; }
+    unsupported(c, id, "class variable read (no class scope)");
+  }
+  if (!strcmp(ty, "ClassVariableWriteNode")) {  /* in value position: yields the assigned value */
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable write (no class scope)"); return; }
+    TyKind ct = TY_INT;
+    int idx = comp_cvar_index(&c->classes[cid], nm);
+    if (idx >= 0) ct = c->classes[cid].cvar_types[idx];
+    buf_printf(b, "(cvar_%s_%s = ", c->classes[cid].name, nm + 2);
+    if (ct == TY_POLY) emit_boxed(c, v, b); else emit_expr(c, v, b);
+    buf_puts(b, ")");
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    const char *op = nt_str(nt, id, "binary_operator");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return; }
+    TyKind ct = TY_INT;
+    int idx = comp_cvar_index(&c->classes[cid], nm);
+    if (idx >= 0) ct = c->classes[cid].cvar_types[idx];
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
+    if (ct == TY_STRING && op && !strcmp(op, "+")) {
+      buf_printf(b, "(%s = sp_str_concat(%s, ", ref, ref);
+      emit_expr(c, v, b); buf_puts(b, "))");
+    }
+    else {
+      buf_printf(b, "(%s %s= ", ref, op ? op : "+");
+      emit_expr(c, v, b); buf_puts(b, ")");
+    }
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableOrWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
+    buf_printf(b, "(%s ? %s : (%s = ", ref, ref, ref);
+    emit_expr(c, v, b); buf_puts(b, "))");
+    return;
+  }
+  if (!strcmp(ty, "ClassVariableAndWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    Scope *s = comp_scope_of(c, id);
+    int cid = s->class_id >= 0 ? s->class_id : g_class_body_id;
+    if (cid < 0) cid = comp_class_index(c, "Toplevel");
+    if (cid < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
+    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
+    buf_printf(b, "(%s ? (%s = ", ref, ref);
+    emit_expr(c, v, b); buf_puts(b, ") : 0)");
+    return;
+  }
+  if (!strcmp(ty, "GlobalVariableReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    /* predefined punctuation globals: $/ is the record separator "\n"; $! / $; /
+       $, read nil (spinel doesn't honor the split/print-sep defaults) */
+    if (nm && !strcmp(nm, "$/")) { emit_str_literal(b, "\n"); return; }
+    if (nm && !strcmp(nm, "$?")) { buf_puts(b, "sp_last_status"); return; }
+    if (nm && (!strcmp(nm, "$PROGRAM_NAME") || !strcmp(nm, "$0"))) { buf_puts(b, "sp_program_name"); return; }
+    if (nm && (!strcmp(nm, "$!") || !strcmp(nm, "$;") || !strcmp(nm, "$,"))) { buf_puts(b, "0"); return; }
+    /* regex match globals that Prism may emit as GlobalVariableReadNode */
+    if (nm && (!strcmp(nm, "$~") || !strcmp(nm, "$&")))  { buf_puts(b, "sp_re_match_str");  return; }
+    if (nm && !strcmp(nm, "$`"))                          { buf_puts(b, "sp_re_match_pre");  return; }
+    if (nm && !strcmp(nm, "$'"))                          { buf_puts(b, "sp_re_match_post"); return; }
+    if (nm && !strcmp(nm, "$+")) {
+      buf_puts(b, "({ int _bri = 9; while (_bri > 0 && !sp_re_captures[_bri-1]) _bri--; _bri > 0 ? sp_re_captures[_bri-1] : NULL; })");
+      return;
+    }
+    if (nm && nm[0] == '$') {
+      const char *rn = comp_resolve_gvar(c, nm + 1);
+      if (comp_gvar(c, rn)) { buf_printf(b, "gv_%s", rn); return; }
+    }
+    unsupported(c, id, "global variable read");
+  }
+  if (!strcmp(ty, "NumberedReferenceReadNode")) {
+    /* $1..$9 -> the n-th capture of the last match (NULL when absent) */
+    long long n = nt_int(nt, id, "number", 0);
+    if (n >= 1 && n <= 9) buf_printf(b, "sp_re_captures[%lld]", n);
+    else buf_puts(b, "NULL");
+    return;
+  }
+  if (!strcmp(ty, "BackReferenceReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) { buf_puts(b, "NULL"); return; }
+    if (!strcmp(nm, "$&") || !strcmp(nm, "$~")) buf_puts(b, "sp_re_match_str");
+    else if (!strcmp(nm, "$`"))                 buf_puts(b, "sp_re_match_pre");
+    else if (!strcmp(nm, "$'"))                 buf_puts(b, "sp_re_match_post");
+    else if (!strcmp(nm, "$+")) {
+      /* last group that participated: scan captures[] backwards */
+      buf_puts(b, "({ int _bri = 9; while (_bri > 0 && !sp_re_captures[_bri-1]) _bri--; _bri > 0 ? sp_re_captures[_bri-1] : NULL; })");
+    }
+    else buf_puts(b, "NULL");
+    return;
+  }
+  if (!strcmp(ty, "ConstantReadNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+    if (cv && cv->type != TY_UNKNOWN) {
+      if (cv->init_guarded) {
+        /* a read during the const's own Class.new init raises NameError */
+        buf_printf(b, "(sp_init_in_progress_%s ? (sp_raise_cls(\"NameError\","
+                      " \"uninitialized constant %s\"), cst_%s) : cst_%s)", nm, nm, nm, nm);
+      }
+      else buf_printf(b, "cst_%s", nm);
+      return;
+    }
+    if (nm && !strcmp(nm, "RUBY_DESCRIPTION")) { buf_puts(b, "SPL(\"spinel\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_VERSION"))     { buf_puts(b, "SPL(\"3.2.0\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_ENGINE"))      { buf_puts(b, "SPL(\"ruby\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_ENGINE_VERSION")) { buf_puts(b, "SPL(\"3.2.0\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_PLATFORM"))    { buf_puts(b, "sp_ruby_platform_str()"); return; }
+    if (nm && !strcmp(nm, "RUBY_RELEASE_DATE")) { buf_puts(b, "SPL(\"2023-03-30\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_REVISION"))    { buf_puts(b, "SPL(\"0\")"); return; }
+    if (nm && !strcmp(nm, "RUBY_COPYRIGHT"))   { buf_puts(b, "SPL(\"ruby - Copyright (C) 1993-2023 Yukihiro Matsumoto\")"); return; }
+    if (nm && !strcmp(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
+    if (nm) {
+      int _cidx = comp_class_index(c, nm);
+      if (_cidx >= 0) {
+        buf_printf(b, "((sp_Class){%d})", _cidx);  /* user class as value: TY_CLASS unboxed */
+      }
+      else {
+        int _bcid = builtin_class_id(nm);
+        if (_bcid != 0)
+          buf_printf(b, "((sp_Class){%d})", _bcid);  /* builtin class as value */
+        else
+          buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), ((sp_Class){-1}))", nm);
+      }
+    }
+    else unsupported(c, id, "constant read");
+    return;
+  }
+  if (!strcmp(ty, "ConstantPathNode")) {
+    /* M::CONST -> the flat constant named by the final path component */
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *cpcv = nm ? comp_const(c, nm) : NULL;
+    if (cpcv && cpcv->type != TY_UNKNOWN) { buf_printf(b, "cst_%s", nm); return; }
+    if (nm && !strcmp(nm, "ARGV")) { buf_puts(b, "sp_get_ARGV()"); return; }
+    /* well-known module constants */
+    int par_idc = nt_ref(nt, id, "parent");
+    const char *par_tyc = par_idc >= 0 ? nt_type(nt, par_idc) : NULL;
+    const char *par_nmc = (par_tyc && !strcmp(par_tyc, "ConstantReadNode")) ? nt_str(nt, par_idc, "name") : NULL;
+    if (par_nmc && !strcmp(par_nmc, "Float") && nm) {
+      if (!strcmp(nm, "MAX"))      { buf_puts(b, "DBL_MAX"); return; }
+      if (!strcmp(nm, "MIN"))      { buf_puts(b, "DBL_MIN"); return; }
+      if (!strcmp(nm, "EPSILON"))  { buf_puts(b, "DBL_EPSILON"); return; }
+      if (!strcmp(nm, "INFINITY")) { buf_puts(b, "(1.0/0.0)"); return; }
+      if (!strcmp(nm, "NAN"))      { buf_puts(b, "(0.0/0.0)"); return; }
+      if (!strcmp(nm, "DIG"))      { buf_printf(b, "(double)DBL_DIG"); return; }
+      if (!strcmp(nm, "MANT_DIG")) { buf_printf(b, "(double)DBL_MANT_DIG"); return; }
+      if (!strcmp(nm, "RADIX"))    { buf_printf(b, "(double)FLT_RADIX"); return; }
+    }
+    if (par_nmc && !strcmp(par_nmc, "Math") && nm) {
+      if (!strcmp(nm, "PI")) { buf_puts(b, "M_PI"); return; }
+      if (!strcmp(nm, "E"))  { buf_puts(b, "M_E"); return; }
+    }
+    if (par_nmc && !strcmp(par_nmc, "File") && nm) {
+      if (!strcmp(nm, "SEPARATOR"))      { buf_puts(b, "\"/\""); return; }
+      if (!strcmp(nm, "PATH_SEPARATOR")) { buf_puts(b, "\":\""); return; }
+      if (!strcmp(nm, "ALT_SEPARATOR"))  { buf_puts(b, "(&(\"\\xff\")[1])"); return; }
+    }
+    if (par_nmc && !strcmp(par_nmc, "Process") && nm) {
+      if (!strcmp(nm, "CLOCK_MONOTONIC")) { buf_puts(b, "((mrb_int)1)"); return; }
+      if (!strcmp(nm, "CLOCK_REALTIME"))  { buf_puts(b, "((mrb_int)0)"); return; }
+    }
+    if (par_nmc && !strcmp(par_nmc, "Integer") && nm &&
+        (!strcmp(nm, "MAX") || !strcmp(nm, "MIN"))) {
+      /* Integer::MAX/MIN do not exist in Ruby — raise NameError at runtime */
+      buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant Integer::%s\"), 0)", nm);
+      return;
+    }
+    /* FFI const: Module::NAME -> integer literal */
+    if (par_nmc && nm) {
+      for (int fci = 0; fci < c->n_ffi_consts; fci++) {
+        if (!strcmp(c->ffi_const_mods[fci], par_nmc) &&
+            !strcmp(c->ffi_const_names[fci], nm)) {
+          buf_printf(b, "((mrb_int)%d)", c->ffi_const_vals[fci]);
+          return;
+        }
+      }
+    }
+    /* class/module constant as value */
+    if (nm) {
+      int _cpidx = comp_class_index(c, nm);
+      if (_cpidx >= 0) { buf_printf(b, "((sp_Class){%d})", _cpidx); return; }
+      int _bcpid = builtin_class_id(nm);
+      if (_bcpid != 0) { buf_printf(b, "((sp_Class){%d})", _bcpid); return; }
+    }
+    /* unresolved qualified constant: raise NameError at runtime */
+    {
+      char fullname[512];
+      if (par_nmc && nm) snprintf(fullname, sizeof fullname, "%s::%s", par_nmc, nm);
+      else if (nm) snprintf(fullname, sizeof fullname, "%s", nm);
+      else snprintf(fullname, sizeof fullname, "?");
+      buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), ((sp_Class){-1}))", fullname);
+    }
+    return;
+  }
+  if (!strcmp(ty, "DefinedNode")) {
+    /* compile-time defined? -> a label string, or nil (NULL) when undefined */
+    int v = nt_ref(nt, id, "value");
+    const char *vt = v >= 0 ? nt_type(nt, v) : NULL;
+    const char *res = NULL;
+    if (vt) {
+      if (!strcmp(vt, "LocalVariableReadNode")) res = "local-variable";
+      else if (!strcmp(vt, "InstanceVariableReadNode")) {
+        /* Return "instance-variable" only when the ivar is known to be assigned. */
+        const char *inm = nt_str(nt, v, "name");
+        for (int kk = 0; kk < nt->count && !res; kk++) {
+          const char *kt = nt_type(nt, kk);
+          if (kt && !strcmp(kt, "InstanceVariableWriteNode") &&
+              inm && nt_str(nt, kk, "name") && !strcmp(nt_str(nt, kk, "name"), inm))
+            res = "instance-variable";
+        }
+      }
+      else if (!strcmp(vt, "ClassVariableReadNode")) res = "class variable";
+      else if (!strcmp(vt, "SelfNode")) res = "self";
+      else if (!strcmp(vt, "NilNode")) res = "nil";
+      else if (!strcmp(vt, "TrueNode")) res = "true";
+      else if (!strcmp(vt, "FalseNode")) res = "false";
+      else if (!strcmp(vt, "IntegerNode") || !strcmp(vt, "FloatNode") ||
+               !strcmp(vt, "StringNode") || !strcmp(vt, "SymbolNode") || !strcmp(vt, "ArrayNode")) res = "expression";
+      else if (!strcmp(vt, "GlobalVariableReadNode")) {
+        const char *gn = nt_str(nt, v, "name");
+        for (int kk = 0; kk < nt->count && !res; kk++) {
+          const char *kt = nt_type(nt, kk);
+          if (kt && (!strcmp(kt, "GlobalVariableWriteNode") || !strcmp(kt, "GlobalVariableOperatorWriteNode")) &&
+              gn && nt_str(nt, kk, "name") && !strcmp(nt_str(nt, kk, "name"), gn))
+            res = "global-variable";
+        }
+      }
+      else if (!strcmp(vt, "ConstantReadNode")) {
+        const char *cn = nt_str(nt, v, "name");
+        static const char *const builtins[] = {
+          "Object", "BasicObject", "Kernel", "Module", "Class", "Array", "Hash",
+          "String", "Integer", "Float", "Symbol", "Regexp", "Range", "NilClass",
+          "TrueClass", "FalseClass", "Numeric", "Comparable", "Enumerable",
+          "IO", "File", "Dir", "Math", "GC", "Process", "ENV", "ARGV",
+          "STDOUT", "STDERR", "STDIN", NULL
+        };
+        if (cn) {
+          if (comp_const(c, cn) || comp_class_index(c, cn) >= 0) res = "constant";
+          if (!res) {
+            for (int bi = 0; builtins[bi]; bi++)
+              if (!strcmp(cn, builtins[bi])) { res = "constant"; break; }
+          }
+        }
+      }
+      else if (!strcmp(vt, "CallNode") && nt_ref(nt, v, "receiver") < 0) {
+        const char *cn = nt_str(nt, v, "name");
+        if (cn && comp_method_index(c, cn) >= 0) res = "method";
+      }
+    }
+    if (res) buf_printf(b, "SPL(\"%s\")", res);
+    else buf_puts(b, "NULL");
+    return;
+  }
+  if (!strcmp(ty, "ParenthesesNode")) {
+    int body = nt_ref(nt, id, "body");
+    int n = 0;
+    const int *bd = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    if (n == 0) { buf_puts(b, "sp_box_nil()"); return; }
+    if (n == 1) {
+      buf_puts(b, "("); emit_expr(c, bd[0], b); buf_puts(b, ")");
+      return;
+    }
+    /* Multi-stmt parens: `(s1; s2; expr)` — run leading stmts in prelude,
+       return value of last expression via GNU statement expression. */
+    buf_puts(b, "({ ");
+    for (int j = 0; j < n - 1; j++) {
+      emit_stmt(c, bd[j], b, 0);
+    }
+    emit_expr(c, bd[n - 1], b);
+    buf_puts(b, "; })");
+    return;
+  }
+  if (!strcmp(ty, "ArrayNode")) {
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    TyKind at = comp_ntype(c, id);
+    /* an empty `[]` literal carries no element type of its own; it is
+       emitted via the target's type in emit_assign. If we reach here for
+       an empty literal, use g_ret_type context (e.g. tail position in a
+       poly_array-returning method) before falling back to int array. */
+    if (n == 0 && at == TY_UNKNOWN && ty_is_array(g_ret_type)) at = g_ret_type;
+    const char *k = array_kind(at);
+    if (n == 0 && !k && at != TY_POLY_ARRAY) { buf_puts(b, "sp_IntArray_new()"); return; }
+    /* poly (mixed-element) array: build an sp_PolyArray of boxed elements */
+    if (at == TY_POLY_ARRAY) {
+      int t = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new();\n", t);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+      for (int j = 0; j < n; j++) {
+        const char *ety = nt_type(nt, els[j]);
+        if (ety && !strcmp(ety, "SplatNode")) {
+          /* [*arr] or [*range] — expand into poly */
+          int inner = nt_ref(nt, els[j], "expression");
+          TyKind it = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
+          Buf el; memset(&el, 0, sizeof el); emit_expr(c, inner, &el);
+          const char *ep = el.p ? el.p : "NULL";
+          emit_indent(g_pre, g_indent);
+          if (it == TY_RANGE) {
+            /* check if it's a string range (bounds are TY_STRING) */
+            int rn = nt_type(nt, inner) && !strcmp(nt_type(nt, inner), "RangeNode") ? inner : -1;
+            int rlo = rn >= 0 ? nt_ref(nt, rn, "left") : -1;
+            int rhi = rn >= 0 ? nt_ref(nt, rn, "right") : -1;
+            int rexcl = rn >= 0 ? (int)(nt_int(nt, rn, "flags", 0) & 4) : 0;
+            if (rlo >= 0 && comp_ntype(c, rlo) == TY_STRING) {
+              Buf lo_b; memset(&lo_b, 0, sizeof lo_b); emit_expr(c, rlo, &lo_b);
+              Buf hi_b; memset(&hi_b, 0, sizeof hi_b); emit_expr(c, rhi, &hi_b);
+              buf_printf(g_pre, "{ sp_StrArray *_sa = sp_StrArray_from_string_range(%s, %s, %d); if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_str(_sa->data[_si])); }\n",
+                         lo_b.p ? lo_b.p : "NULL", hi_b.p ? hi_b.p : "NULL", rexcl, t);
+              free(lo_b.p); free(hi_b.p);
+            }
+            else {
+              buf_printf(g_pre, "{ sp_Range _sr = %s; mrb_int _e = _sr.last+(_sr.excl?0:1); for (mrb_int _si = _sr.first; _si < _e; _si++) sp_PolyArray_push(_t%d, sp_box_int(_si)); }\n", ep, t);
+            }
+          }
+          else if (it == TY_INT_ARRAY)
+            buf_printf(g_pre, "{ sp_IntArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_int(_sa->data[_sa->start+_si])); }\n", ep, t);
+          else if (it == TY_STR_ARRAY)
+            buf_printf(g_pre, "{ sp_StrArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_str(_sa->data[_si])); }\n", ep, t);
+          else if (it == TY_FLOAT_ARRAY)
+            buf_printf(g_pre, "{ sp_FloatArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_float(_sa->data[_si])); }\n", ep, t);
+          else if (it == TY_POLY_ARRAY)
+            buf_printf(g_pre, "{ sp_PolyArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }\n", ep, t);
+          else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed(c, inner, &bx); buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", t, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
+          free(el.p);
+        } else {
+          Buf el; memset(&el, 0, sizeof el);
+          emit_boxed(c, els[j], &el);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", t);
+          buf_puts(g_pre, el.p ? el.p : "");
+          buf_puts(g_pre, ");\n");
+          free(el.p);
+        }
+      }
+      buf_printf(b, "_t%d", t);
+      return;
+    }
+    if (!k) unsupported(c, id, "array literal (element type)");
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, t, k);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+    for (int j = 0; j < n; j++) {
+      const char *ety = nt_type(nt, els[j]);
+      if (ety && !strcmp(ety, "SplatNode")) {
+        /* [*range] or [*arr] inside a typed array literal */
+        int inner = nt_ref(nt, els[j], "expression");
+        TyKind it = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
+        Buf el; memset(&el, 0, sizeof el); emit_expr(c, inner, &el);
+        const char *ep = el.p ? el.p : "NULL";
+        emit_indent(g_pre, g_indent);
+        if (it == TY_RANGE) {
+          int rn2 = nt_type(nt, inner) && !strcmp(nt_type(nt, inner), "RangeNode") ? inner : -1;
+          int rlo2 = rn2 >= 0 ? nt_ref(nt, rn2, "left") : -1;
+          int rexcl2 = rn2 >= 0 ? (int)(nt_int(nt, rn2, "flags", 0) & 4) : 0;
+          if (rlo2 >= 0 && comp_ntype(c, rlo2) == TY_STRING) {
+            int rhi2 = nt_ref(nt, rn2, "right");
+            Buf lo2; memset(&lo2, 0, sizeof lo2); emit_expr(c, rlo2, &lo2);
+            Buf hi2; memset(&hi2, 0, sizeof hi2); emit_expr(c, rhi2, &hi2);
+            buf_printf(g_pre, "{ sp_StrArray *_sa = sp_StrArray_from_string_range(%s, %s, %d); if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_%sArray_push(_t%d, _sa->data[_si]); }\n",
+                       lo2.p ? lo2.p : "NULL", hi2.p ? hi2.p : "NULL", rexcl2, k, t);
+            free(lo2.p); free(hi2.p);
+          }
+          else {
+            buf_printf(g_pre, "{ sp_Range _sr = %s; mrb_int _e = _sr.last+(_sr.excl?0:1); for (mrb_int _si = _sr.first; _si < _e; _si++) sp_%sArray_push(_t%d, _si); }\n", ep, k, t);
+          }
+        }
+        else if (it == TY_INT_ARRAY && !strcmp(k, "Int"))
+          buf_printf(g_pre, "{ sp_IntArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_%sArray_push(_t%d, _sa->data[_sa->start+_si]); }\n", ep, k, t);
+        else if (it == TY_STR_ARRAY && !strcmp(k, "Str"))
+          buf_printf(g_pre, "{ sp_StrArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_%sArray_push(_t%d, _sa->data[_si]); }\n", ep, k, t);
+        else {
+          /* Mismatched or unknown element type: emit_expr fallback */
+          buf_printf(g_pre, "sp_%sArray_push(_t%d, %s);\n", k, t, ep);
+        }
+        free(el.p);
+      } else {
+        Buf el; memset(&el, 0, sizeof el);
+        emit_expr(c, els[j], &el);   /* element preludes flow to g_pre first */
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_%sArray_push(_t%d, ", k, t);
+        buf_puts(g_pre, el.p ? el.p : "");
+        buf_puts(g_pre, ");\n");
+        free(el.p);
+      }
+    }
+    buf_printf(b, "_t%d", t);
+    return;
+  }
+  if (!strcmp(ty, "HashNode") || !strcmp(ty, "KeywordHashNode")) {
+    TyKind ht = comp_ntype(c, id);
+    const char *hn = ty_hash_cname(ht);
+    if (!hn) {
+      /* Empty `{}` with unknown type: fall back to StrPolyHash */
+      int ne2 = 0; nt_arr(nt, id, "elements", &ne2);
+      if (ne2 == 0) hn = "StrPoly";
+      else unsupported(c, id, "hash literal (key/value type)");
+    }
+    int n = 0;
+    const int *els = nt_arr(nt, id, "elements", &n);
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%sHash *_t%d = sp_%sHash_new();\n", hn, t, hn);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+    int sym_poly = (ht == TY_SYM_POLY_HASH || ht == TY_STR_POLY_HASH);
+    int poly_poly = (ht == TY_POLY_POLY_HASH);
+    for (int j = 0; j < n; j++) {
+      int key = nt_ref(nt, els[j], "key");
+      int val = nt_ref(nt, els[j], "value");
+      Buf kb; memset(&kb, 0, sizeof kb);
+      if (poly_poly) emit_boxed(c, key, &kb); else emit_expr(c, key, &kb);
+      Buf vb; memset(&vb, 0, sizeof vb);
+      if (sym_poly || poly_poly) emit_boxed(c, val, &vb); else emit_expr(c, val, &vb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_%sHash_set(_t%d, ", hn, t);
+      buf_puts(g_pre, kb.p ? kb.p : ""); buf_puts(g_pre, ", ");
+      buf_puts(g_pre, vb.p ? vb.p : ""); buf_puts(g_pre, ");\n");
+      free(kb.p); free(vb.p);
+    }
+    buf_printf(b, "_t%d", t);
+    return;
+  }
+  if (!strcmp(ty, "IfNode") || !strcmp(ty, "UnlessNode")) {
+    /* if/unless as a value: a ternary when both branches are single
+       value-expressions */
+    int pred = nt_ref(nt, id, "predicate");
+    int then_b = nt_ref(nt, id, "statements");
+    int is_unless = !strcmp(ty, "UnlessNode");
+    int sub = nt_ref(nt, id, is_unless ? "else_clause" : "subsequent");
+    int tn = 0;
+    const int *tb = then_b >= 0 ? nt_arr(nt, then_b, "body", &tn) : NULL;
+    int else_stmts = -1;
+    if (sub >= 0 && nt_type(nt, sub) && !strcmp(nt_type(nt, sub), "ElseNode"))
+      else_stmts = nt_ref(nt, sub, "statements");
+    int en = 0;
+    const int *eb = else_stmts >= 0 ? nt_arr(nt, else_stmts, "body", &en) : NULL;
+    if (tn == 1 && en == 1) {
+      TyKind res = comp_ntype(c, id);
+      buf_puts(b, "(");
+      if (is_unless) buf_puts(b, "!(");
+      emit_cond(c, pred, b);
+      if (is_unless) buf_puts(b, ")");
+      buf_puts(b, " ? ");
+      /* a poly result with concrete-typed branches boxes each branch;
+         for typed-array results, an empty [] literal uses the result type */
+      { int nd = tb[0]; const char *_bty = nt_type(nt, nd);
+        if (res == TY_POLY && comp_ntype(c, nd) != TY_POLY) emit_boxed(c, nd, b);
+        else if (ty_is_array(res) && _bty && !strcmp(_bty, "ArrayNode")) {
+          int _bn = 0; nt_arr(nt, nd, "elements", &_bn);
+          if (_bn == 0) { const char *_rk = (res == TY_POLY_ARRAY) ? "Poly" : array_kind(res);
+            buf_printf(b, "sp_%sArray_new()", _rk ? _rk : "Int"); }
+          else emit_expr(c, nd, b);
+        } else emit_expr(c, nd, b); }
+      buf_puts(b, " : ");
+      { int nd = eb[0]; const char *_bty = nt_type(nt, nd);
+        if (res == TY_POLY && comp_ntype(c, nd) != TY_POLY) emit_boxed(c, nd, b);
+        else if (ty_is_array(res) && _bty && !strcmp(_bty, "ArrayNode")) {
+          int _bn = 0; nt_arr(nt, nd, "elements", &_bn);
+          if (_bn == 0) { const char *_rk = (res == TY_POLY_ARRAY) ? "Poly" : array_kind(res);
+            buf_printf(b, "sp_%sArray_new()", _rk ? _rk : "Int"); }
+          else emit_expr(c, nd, b);
+        } else emit_expr(c, nd, b); }
+      buf_puts(b, ")");
+      return;
+    }
+    /* Multi-stmt branches or no-else: emit as if/else block with a result temp.
+       Preludes and the if structure go into g_pre; `b` receives only _t<N>. */
+    {
+      TyKind res = comp_ntype(c, id);
+      int tr = ++g_tmp;
+      /* Declare the temp and default-initialize it. */
+      emit_indent(g_pre, g_indent);
+      emit_ctype(c, res, g_pre);
+      buf_printf(g_pre, " _t%d = %s;\n", tr,
+                 res == TY_RANGE ? "(sp_Range){0}" : default_value(res));
+      /* Emit condition — any prolog from the condition expr also goes to g_pre. */
+      emit_indent(g_pre, g_indent);
+      buf_puts(g_pre, "if (");
+      if (is_unless) buf_puts(g_pre, "!(");
+      emit_cond(c, pred, g_pre);
+      if (is_unless) buf_puts(g_pre, ")");
+      buf_puts(g_pre, ") {\n");
+      /* Then branch: side-effect stmts, then assign last expr to temp. */
+      for (int i = 0; i < tn - 1; i++) emit_stmt(c, tb[i], g_pre, g_indent + 2);
+      if (tn > 0) {
+        int last_then = tb[tn - 1];
+        TyKind lt = comp_ntype(c, last_then);
+        if (lt == TY_NIL || lt == TY_UNKNOWN) {
+          emit_stmt(c, last_then, g_pre, g_indent + 2);
+        }
+        else {
+          int saved_gi = g_indent; g_indent = g_indent + 2;
+          Buf le; memset(&le, 0, sizeof le);
+          emit_expr(c, last_then, &le);
+          g_indent = saved_gi;
+          emit_indent(g_pre, g_indent + 2);
+          buf_printf(g_pre, "_t%d = ", tr);
+          if (res == TY_POLY && lt != TY_POLY) {
+            Buf bx; memset(&bx, 0, sizeof bx);
+            emit_boxed_text(c, lt, le.p ? le.p : default_value(lt), &bx);
+            buf_puts(g_pre, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+          }
+          else buf_puts(g_pre, le.p ? le.p : default_value(res));
+          buf_puts(g_pre, ";\n");
+          free(le.p);
+        }
+      }
+      emit_indent(g_pre, g_indent);
+      buf_puts(g_pre, "}\n");
+      /* Else / elsif branch. */
+      if (sub >= 0) {
+        const char *sub_ty = nt_type(nt, sub);
+        if (sub_ty && !strcmp(sub_ty, "ElseNode")) {
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "else {\n");
+          for (int i = 0; i < en - 1; i++) emit_stmt(c, eb[i], g_pre, g_indent + 2);
+          if (en > 0) {
+            int last_else = eb[en - 1];
+            TyKind lt2 = comp_ntype(c, last_else);
+            if (lt2 == TY_NIL || lt2 == TY_UNKNOWN) {
+              emit_stmt(c, last_else, g_pre, g_indent + 2);
+            }
+            else {
+              int saved_gi2 = g_indent; g_indent = g_indent + 2;
+              Buf le2; memset(&le2, 0, sizeof le2);
+              emit_expr(c, last_else, &le2);
+              g_indent = saved_gi2;
+              emit_indent(g_pre, g_indent + 2);
+              buf_printf(g_pre, "_t%d = ", tr);
+              if (res == TY_POLY && lt2 != TY_POLY) {
+                Buf bx2; memset(&bx2, 0, sizeof bx2);
+                emit_boxed_text(c, lt2, le2.p ? le2.p : default_value(lt2), &bx2);
+                buf_puts(g_pre, bx2.p ? bx2.p : "sp_box_nil()"); free(bx2.p);
+              }
+              else buf_puts(g_pre, le2.p ? le2.p : default_value(res));
+              buf_puts(g_pre, ";\n");
+              free(le2.p);
+            }
+          }
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "}\n");
+        }
+        else {
+          /* elsif (sub is IfNode) or other subsequent: recurse via emit_expr */
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "else {\n");
+          int saved_gi3 = g_indent; g_indent = g_indent + 2;
+          Buf sub_e; memset(&sub_e, 0, sizeof sub_e);
+          emit_expr(c, sub, &sub_e);
+          g_indent = saved_gi3;
+          emit_indent(g_pre, g_indent + 2);
+          buf_printf(g_pre, "_t%d = %s;\n", tr, sub_e.p ? sub_e.p : default_value(res));
+          free(sub_e.p);
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "}\n");
+        }
+      }
+      buf_printf(b, "_t%d", tr);
+      return;
+    }
+  }
+  if (!strcmp(ty, "CallNode")) { emit_call(c, id, b); return; }
+  if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) {
+    if (!emit_super_inline(c, id, b, 0, 1)) emit_super(c, id, b);
+    return;
+  }
+  if (!strcmp(ty, "AndNode") || !strcmp(ty, "OrNode")) {
+    int is_and = !strcmp(ty, "AndNode");
+    int left = nt_ref(nt, id, "left"), right = nt_ref(nt, id, "right");
+    TyKind lt = comp_ntype(c, left), res = comp_ntype(c, id);
+    if (lt == TY_BOOL && comp_ntype(c, right) == TY_BOOL) {
+      buf_puts(b, "(");
+      emit_expr(c, left, b);
+      buf_puts(b, is_and ? " && " : " || ");
+      emit_expr(c, right, b);
+      buf_puts(b, ")");
+      return;
+    }
+    /* value form: a || b  ->  truthy(a) ? a : b ;  a && b -> truthy(a) ? b : a.
+       Evaluate the left once into a temp; results widen to the unified type. */
+    int t = ++g_tmp;
+    int lt_falsy_const = (lt == TY_NIL || lt == TY_VOID);  /* a nil/void left has no C-typed value */
+    buf_puts(b, "({ ");
+    emit_ctype(c, (lt == TY_UNKNOWN || lt_falsy_const) ? res : lt, b);
+    buf_printf(b, " _t%d = ", t);
+    if (lt_falsy_const) {
+      buf_puts(b, "("); emit_expr(c, left, b); buf_puts(b, ", ");
+      buf_puts(b, res == TY_POLY ? "sp_box_nil()" : default_value(res == TY_UNKNOWN ? TY_INT : res));
+      buf_puts(b, ")");
+    }
+    else emit_expr(c, left, b);
+    buf_puts(b, "; ");
+    if (lt == TY_POLY)      buf_printf(b, "sp_poly_truthy(_t%d)", t);
+    else if (lt == TY_BOOL) buf_printf(b, "_t%d", t);
+    else if (lt_falsy_const) buf_puts(b, "0");
+    else if (lt == TY_INT)  buf_printf(b, "(_t%d != SP_INT_NIL)", t);  /* a nullable int reads falsy at the sentinel; a plain int is always truthy */
+    else if (lt == TY_FLOAT) buf_printf(b, "(!sp_float_is_nil(_t%d))", t);
+    else if (lt == TY_STRING || ty_is_array(lt) || ty_is_hash(lt) || ty_is_object(lt) ||
+             lt == TY_PROC || lt == TY_STRINGIO || lt == TY_STRINGSCANNER || lt == TY_MATCHDATA || lt == TY_EXCEPTION)
+      buf_printf(b, "(_t%d != 0)", t);  /* nullable pointer: NULL reads falsy */
+    else                    buf_puts(b, "1");  /* concrete value: always truthy */
+    buf_puts(b, " ? ");
+    /* the "kept-left" arm and the "right" arm, each widened to res */
+    #define EMIT_ARM(IS_RIGHT) do { \
+      if (IS_RIGHT) { if (res == TY_POLY && comp_ntype(c, right) != TY_POLY) emit_boxed(c, right, b); else emit_expr(c, right, b); } \
+      else { if (res == TY_POLY && lt != TY_POLY) { /* box temp */ \
+               Buf _vb; memset(&_vb,0,sizeof _vb); buf_printf(&_vb, "_t%d", t); \
+               /* reuse emit_boxed by faking: just box by left type */ \
+               if (lt==TY_INT) buf_printf(b, "sp_box_int(_t%d)", t); \
+               else if (lt==TY_STRING) buf_printf(b, "sp_box_nullable_str(_t%d)", t); \
+               else if (lt==TY_FLOAT) buf_printf(b, "sp_box_float(_t%d)", t); \
+               else if (lt==TY_BOOL) buf_printf(b, "sp_box_bool(_t%d)", t); \
+               else if (lt==TY_SYMBOL) buf_printf(b, "sp_box_sym(_t%d)", t); \
+               else buf_printf(b, "_t%d", t); free(_vb.p); } \
+             else buf_printf(b, "_t%d", t); } \
+    } while (0)
+    if (is_and) { EMIT_ARM(1); buf_puts(b, " : "); EMIT_ARM(0); }
+    else        { EMIT_ARM(0); buf_puts(b, " : "); EMIT_ARM(1); }
+    #undef EMIT_ARM
+    buf_printf(b, "; })");
+    return;
+  }
+
+  if (!strcmp(ty, "RescueModifierNode")) {
+    /* `expr rescue fallback` as an rvalue: evaluate expr under setjmp;
+       on exception, evaluate fallback instead. */
+    int e  = nt_ref(nt, id, "expression");
+    int r  = nt_ref(nt, id, "rescue_expression");
+    TyKind rt = comp_ntype(c, id);
+    int t = ++g_tmp;
+    buf_puts(b, "({ ");
+    emit_ctype(c, rt, b);
+    buf_printf(b, " _t%d = %s; sp_exc_top++;\n", t, default_value(rt));
+    buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
+    /* expression arm — assign result to temp (skip diverging exprs like raise) */
+    TyKind et = e >= 0 ? comp_ntype(c, e) : TY_UNKNOWN;
+    int e_diverges = (et == TY_UNKNOWN || et == TY_VOID);
+    buf_puts(b, "  ");
+    if (e >= 0 && !e_diverges) {
+      buf_printf(b, "_t%d = ", t);
+      if (rt == TY_POLY && et != TY_POLY) emit_boxed(c, e, b);
+      else emit_expr(c, e, b);
+      buf_puts(b, ";");
+    }
+    else if (e >= 0) {
+      /* diverging expression like raise: emit as stmt (no assignment) */
+      emit_expr(c, e, b); buf_puts(b, ";");
+    }
+    buf_puts(b, " sp_exc_top--;\n}\nelse {\n  sp_exc_top--;\n  ");
+    /* rescue arm */
+    if (r >= 0) {
+      buf_printf(b, "_t%d = ", t);
+      if (rt == TY_POLY && comp_ntype(c, r) != TY_POLY) emit_boxed(c, r, b);
+      else emit_expr(c, r, b);
+      buf_puts(b, ";");
+    }
+    buf_printf(b, "\n}\n_t%d; })", t);
+    return;
+  }
+
+  if (!strcmp(ty, "BeginNode")) {
+    /* begin/rescue as an rvalue: hoist the block into g_pre so the temp
+       is assigned before the surrounding expression reads it. */
+    TyKind rt = comp_ntype(c, id);
+    int t = ++g_tmp;
+    char rv[32]; snprintf(rv, sizeof rv, "_t%d", t);
+    int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
+    if (g_pre) {
+      emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+      buf_printf(g_pre, " _t%d = %s;\n", t, default_value(rt));
+      emit_begin(c, id, g_pre, g_indent, rv);
+    }
+    else {
+      /* No prelude available (e.g. inside another expression's prelude):
+         fall back to a GCC statement expression. */
+      buf_puts(b, "({ ");
+      emit_ctype(c, rt, b); buf_printf(b, " _t%d = %s;\n", t, default_value(rt));
+      emit_begin(c, id, b, 0, rv);
+      buf_printf(b, "_t%d; })", t);
+      g_result_poly = sp;
+      return;
+    }
+    g_result_poly = sp;
+    buf_printf(b, "_t%d", t);
+    return;
+  }
+
+  /* MultiWriteNode as expression: execute the destructuring (side effect),
+     then return the RHS value (Ruby semantics: value of `a, b = arr` is arr). */
+  if (!strcmp(ty, "MultiWriteNode")) {
+    int value = nt_ref(nt, id, "value");
+    /* emit the multi-write as a statement first (for its side effects) */
+    emit_stmt(c, id, g_pre, g_indent);
+    /* then yield the RHS value as the expression's result */
+    emit_expr(c, value, b);
+    return;
+  }
+
+  /* ivar OP= as expression: emit the mutation then read back the ivar. */
+  if (!strcmp(ty, "InstanceVariableOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int sc = comp_scope_of(c, id)->class_id;
+    char ref[300];
+    Scope *cs = comp_scope_of(c, id);
+    if (cs && cs->is_cmethod && cs->class_id >= 0)
+      snprintf(ref, sizeof ref, "civ_%s_%s", c->classes[cs->class_id].name, nm + 1);
+    else
+      snprintf(ref, sizeof ref, "%s->iv_%s", g_self, nm + 1);
+    if (g_pre) {
+      emit_stmt(c, id, g_pre, g_indent);
+      buf_puts(b, ref);
+    }
+    else {
+      TyKind vt = TY_UNKNOWN;
+      if (sc >= 0) { int iv = comp_ivar_index(&c->classes[sc], nm); if (iv >= 0) vt = c->classes[sc].ivar_types[iv]; }
+      int t = ++g_tmp;
+      buf_printf(b, "({ ");
+      emit_ctype(c, vt, b);
+      buf_printf(b, " _t%d; ", t);
+      /* inline the write */
+      const char *op = nt_str(nt, id, "binary_operator");
+      buf_printf(b, "%s %s= ", ref, op ? op : "+");
+      emit_expr(c, nt_ref(nt, id, "value"), b);
+      buf_printf(b, "; _t%d = %s; _t%d; })", t, ref, t);
+    }
+    return;
+  }
+
+  unsupported(c, id, "expression");
+}
+
+/* ---- output statements (puts/print/p) ---- */
+

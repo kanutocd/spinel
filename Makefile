@@ -127,9 +127,11 @@ spinel_parse$(EXE): $(PARSE_STAMP) $(PRISM_LIB)
 # The binary emits C; the test harness invokes cc to link libspinel_rt.a.
 
 SPINELC      = build/spinelc$(EXE)
-SPINELC_HDRS = src/node_table.h src/codegen.h src/types.h src/compiler.h src/analyze.h
+SPINELC_HDRS = src/node_table.h src/codegen.h src/codegen_internal.h src/types.h src/compiler.h src/analyze.h
 SPINELC_OBJ  = build/csrc/node_table.o build/csrc/types.o build/csrc/compiler.o \
-               build/csrc/analyze.o build/csrc/codegen.o build/csrc/main.o
+               build/csrc/analyze.o build/csrc/codegen.o build/csrc/codegen_util.o \
+               build/csrc/codegen_fold.o build/csrc/codegen_call.o \
+               build/csrc/codegen_expr.o build/csrc/codegen_stmt.o build/csrc/main.o
 
 build/csrc:
 	@mkdir -p build/csrc
