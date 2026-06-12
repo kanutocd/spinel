@@ -6176,7 +6176,11 @@ static int infer_block_params(Compiler *c) {
     const char *cname = nt_str(nt, id, "name");
     if (!cname || strcmp(cname, "new")) continue;
     int recv = nt_ref(nt, id, "receiver");
-    if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "ConstantReadNode")) continue;
+    if (recv < 0 || !nt_type(nt, recv)) continue;
+    const char *rrty = nt_type(nt, recv);
+    int is_const = !strcmp(rrty, "ConstantReadNode") ||
+                   (!strcmp(rrty, "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0);
+    if (!is_const) continue;
     const char *rn = nt_str(nt, recv, "name");
     if (!rn || strcmp(rn, "Fiber")) continue;
     int blk = nt_ref(nt, id, "block");
@@ -7544,11 +7548,221 @@ static int blkp_needs_rename(Compiler *c, int L) {
   for (int id = 0; id < nt->count; id++) {
     if (nt_ref(nt, id, "block") != L) continue;
     const char *cn = nt_str(nt, id, "name");
-    if (cn && (!strcmp(cn, "instance_eval") || !strcmp(cn, "instance_exec") ||
-               !strcmp(cn, "inject") || !strcmp(cn, "reduce"))) return 1;
+    if (!cn) return 0;
+    if (!strcmp(cn, "instance_eval") || !strcmp(cn, "instance_exec") ||
+        !strcmp(cn, "inject") || !strcmp(cn, "reduce")) return 1;
+    /* blocks lifted to standalone proc/fiber functions: proc {} / lambda {} /
+       Proc.new {} / Fiber.new {} / Thread.new {}. Their params are typed by a
+       dedicated pass, so renaming a shadowing param is safe. */
+    int rcv = nt_ref(nt, id, "receiver");
+    if (rcv < 0 && (!strcmp(cn, "proc") || !strcmp(cn, "lambda"))) return 1;
+    if (rcv >= 0 && !strcmp(cn, "new")) {
+      const char *rty = nt_type(nt, rcv);
+      int is_const = rty && (!strcmp(rty, "ConstantReadNode") ||
+                             (!strcmp(rty, "ConstantPathNode") && nt_ref(nt, rcv, "parent") < 0));
+      const char *rn = is_const ? nt_str(nt, rcv, "name") : NULL;
+      if (rn && (!strcmp(rn, "Proc") || !strcmp(rn, "Fiber") || !strcmp(rn, "Thread"))) return 1;
+    }
     return 0;
   }
   return 0;
+}
+
+/* ---- Colliding nested-constant qualification --------------------------
+ * Constants live in a flat cst_<NAME> namespace, so `RootNS::Mid::LEAF` and
+ * `Lex::RootNS::Mid::LEAF` collide. When the same constant name is written
+ * under 2+ distinct module paths, rename each nested write to a qualified
+ * `<Mod>__..__<NAME>` and rewrite every path read to whichever qualified
+ * constant it denotes (relative reads prefer the lexically enclosing module
+ * chain; `::`-anchored reads resolve from the root). Collision-gated: programs
+ * with unique constant names are untouched. */
+
+#define QC_MAXDEPTH 8
+typedef struct { int node; char path[QC_MAXDEPTH][64]; int depth; char name[128]; } QCWrite;
+
+static void qc_collect_writes(Compiler *c, int node, char (*path)[64], int depth,
+                              QCWrite **ws, int *n, int *cap) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return;
+  const char *ty = nt_type(nt, node);
+  if (!ty) return;
+  if ((!strcmp(ty, "ModuleNode") || !strcmp(ty, "ClassNode")) && depth < QC_MAXDEPTH) {
+    int cp = nt_ref(nt, node, "constant_path");
+    const char *mn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (mn) {
+      snprintf(path[depth], 64, "%s", mn);
+      depth++;
+    }
+  }
+  else if (!strcmp(ty, "ConstantWriteNode")) {
+    const char *nm = nt_str(nt, node, "name");
+    if (nm) {
+      if (*n >= *cap) { *cap = *cap ? *cap * 2 : 16; *ws = realloc(*ws, sizeof(QCWrite) * (size_t)*cap); }
+      QCWrite *w = &(*ws)[(*n)++];
+      w->node = node; w->depth = depth;
+      for (int i = 0; i < depth; i++) snprintf(w->path[i], 64, "%s", path[i]);
+      snprintf(w->name, sizeof w->name, "%s", nm);
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) qc_collect_writes(c, nt_ref_at(nt, node, i), path, depth, ws, n, cap);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) { int m = 0; const int *ids = nt_arr_at(nt, node, i, &m); for (int k = 0; k < m; k++) qc_collect_writes(c, ids[k], path, depth, ws, n, cap); }
+}
+
+/* Reconstruct a path read's chain (["RootNS","Mid","LEAF"]) and whether it is
+   root-anchored. Returns the chain length, or 0 if unsupported. */
+static int qc_read_chain(const NodeTable *nt, int node, char (*chain)[64], int *abs_anchor) {
+  char rev[QC_MAXDEPTH + 1][64];
+  int n = 0;
+  int cur = node;
+  *abs_anchor = 0;
+  while (cur >= 0 && n <= QC_MAXDEPTH) {
+    const char *ty = nt_type(nt, cur);
+    const char *nm = nt_str(nt, cur, "name");
+    if (!ty || !nm) return 0;
+    snprintf(rev[n++], 64, "%s", nm);
+    if (!strcmp(ty, "ConstantReadNode")) break;
+    if (strcmp(ty, "ConstantPathNode")) return 0;
+    int par = nt_ref(nt, cur, "parent");
+    if (par < 0) { *abs_anchor = 1; break; }
+    cur = par;
+  }
+  for (int i = 0; i < n; i++) snprintf(chain[i], 64, "%s", rev[n - 1 - i]);
+  return n;
+}
+
+static void qc_qualified_name(char *out, size_t cap, const QCWrite *w) {
+  out[0] = 0;
+  for (int i = 0; i < w->depth; i++) { strncat(out, w->path[i], cap - strlen(out) - 1); strncat(out, "__", cap - strlen(out) - 1); }
+  strncat(out, w->name, cap - strlen(out) - 1);
+}
+
+static void qc_rewrite_reads(Compiler *c, int node, char (*mods)[64], int mdepth,
+                             QCWrite *ws, int wn) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return;
+  const char *ty = nt_type(nt, node);
+  if (!ty) return;
+  int depth = mdepth;
+  char (*path)[64] = mods;
+  if ((!strcmp(ty, "ModuleNode") || !strcmp(ty, "ClassNode")) && depth < QC_MAXDEPTH) {
+    int cp = nt_ref(nt, node, "constant_path");
+    const char *mn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (mn) { snprintf(path[depth], 64, "%s", mn); depth++; }
+  }
+  else if (!strcmp(ty, "ConstantReadNode")) {
+    /* bare constant read inside a module body: resolve lexically innermost-
+       first against the colliding writes. Skip reads that are a path's parent
+       (handled via the chain) or a class/module definition name. */
+    const char *nm = nt_str(nt, node, "name");
+    int part_of_other = 0;
+    for (int q = 0; q < nt->count && !part_of_other; q++) {
+      const char *qt = nt_type(nt, q);
+      if (!qt) continue;
+      if (!strcmp(qt, "ConstantPathNode") && nt_ref(nt, q, "parent") == node) part_of_other = 1;
+      if ((!strcmp(qt, "ClassNode") || !strcmp(qt, "ModuleNode")) &&
+          nt_ref(nt, q, "constant_path") == node) part_of_other = 1;
+    }
+    if (nm && !part_of_other) {
+      int involved = 0;
+      for (int i = 0; i < wn; i++) if (!strcmp(ws[i].name, nm)) { involved = 1; break; }
+      if (involved) {
+        for (int pref = depth; pref >= 0; pref--) {
+          int matched = -1;
+          for (int i = 0; i < wn && matched < 0; i++) {
+            if (strcmp(ws[i].name, nm) || ws[i].depth != pref) continue;
+            int ok = 1;
+            for (int j = 0; j < pref && ok; j++) if (strcmp(ws[i].path[j], path[j])) ok = 0;
+            if (ok) matched = i;
+          }
+          if (matched >= 0) {
+            if (ws[matched].depth > 0) {
+              char qn[512]; qc_qualified_name(qn, sizeof qn, &ws[matched]);
+              nt_set_str((NodeTable *)nt, node, "name", qn);
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+  else if (!strcmp(ty, "ConstantPathNode")) {
+    /* only process path heads: skip if this node is some other path's parent */
+    int is_parent = 0;
+    for (int q = 0; q < nt->count && !is_parent; q++) {
+      const char *qt = nt_type(nt, q);
+      if (qt && !strcmp(qt, "ConstantPathNode") && nt_ref(nt, q, "parent") == node) is_parent = 1;
+    }
+    if (!is_parent) {
+      char chain[QC_MAXDEPTH + 1][64];
+      int abs_anchor = 0;
+      int cl = qc_read_chain(nt, node, chain, &abs_anchor);
+      if (cl >= 2) {
+        const char *cname = chain[cl - 1];
+        /* does this name participate in a collision? */
+        int involved = 0;
+        for (int i = 0; i < wn; i++) if (!strcmp(ws[i].name, cname)) { involved = 1; break; }
+        if (involved) {
+          /* try lexical prefixes innermost-first (relative), or only the root (::) */
+          int max_pref = abs_anchor ? 0 : depth;
+          for (int pref = max_pref; pref >= 0; pref--) {
+            int matched = -1;
+            for (int i = 0; i < wn && matched < 0; i++) {
+              if (strcmp(ws[i].name, cname)) continue;
+              if (ws[i].depth != pref + (cl - 1)) continue;
+              int ok = 1;
+              for (int j = 0; j < pref && ok; j++) if (strcmp(ws[i].path[j], path[j])) ok = 0;
+              for (int j = 0; j < cl - 1 && ok; j++) if (strcmp(ws[i].path[pref + j], chain[j])) ok = 0;
+              if (ok) matched = i;
+            }
+            if (matched >= 0) {
+              if (ws[matched].depth > 0) {
+                char qn[512]; qc_qualified_name(qn, sizeof qn, &ws[matched]);
+                nt_set_str((NodeTable *)nt, node, "name", qn);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) qc_rewrite_reads(c, nt_ref_at(nt, node, i), path, depth, ws, wn);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) { int m = 0; const int *ids = nt_arr_at(nt, node, i, &m); for (int k = 0; k < m; k++) qc_rewrite_reads(c, ids[k], path, depth, ws, wn); }
+}
+
+static void qualify_colliding_consts(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  QCWrite *ws = NULL; int wn = 0, wcap = 0;
+  char path[QC_MAXDEPTH][64];
+  qc_collect_writes(c, nt->root_id, path, 0, &ws, &wn, &wcap);
+  /* keep only names written under 2+ distinct module paths */
+  int any = 0;
+  for (int i = 0; i < wn; i++) {
+    int collide = 0;
+    for (int j = 0; j < wn && !collide; j++) {
+      if (i == j || strcmp(ws[i].name, ws[j].name)) continue;
+      if (ws[i].depth != ws[j].depth) { collide = 1; break; }
+      for (int k = 0; k < ws[i].depth; k++) if (strcmp(ws[i].path[k], ws[j].path[k])) { collide = 1; break; }
+    }
+    if (!collide) { ws[i] = ws[--wn]; i--; continue; }
+    any = 1;
+  }
+  if (any) {
+    /* rewrite reads first (they match against the original write names) */
+    char mods[QC_MAXDEPTH][64];
+    qc_rewrite_reads(c, nt->root_id, mods, 0, ws, wn);
+    /* then qualify the nested writes themselves */
+    for (int i = 0; i < wn; i++) {
+      if (ws[i].depth == 0) continue;
+      char qn[512]; qc_qualified_name(qn, sizeof qn, &ws[i]);
+      nt_set_str((NodeTable *)nt, ws[i].node, "name", qn);
+    }
+  }
+  free(ws);
 }
 
 static void rename_shadowing_block_params(Compiler *c) {
@@ -7609,6 +7823,7 @@ void analyze_program(Compiler *c) {
   top->body = nt_ref(c->nt, c->nt->root_id, "statements");
 
   rename_shadowing_block_params(c);
+  qualify_colliding_consts(c);
   walk_scope(c, c->nt->root_id, 0, -1);
   register_structs(c);
   fix_struct_block_scopes(c);

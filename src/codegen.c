@@ -3738,11 +3738,26 @@ static int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* True if `recv` names the constant `name` either as a bare ConstantReadNode
+   or as a root-anchored absolute path `::name` (ConstantPathNode, no parent). */
+static int recv_is_const(const NodeTable *nt, int recv, const char *name) {
+  if (recv < 0) return 0;
+  const char *rty = nt_type(nt, recv);
+  if (!rty) return 0;
+  if (!strcmp(rty, "ConstantReadNode") ||
+      (!strcmp(rty, "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0)) {
+    const char *n = nt_str(nt, recv, "name");
+    return n && !strcmp(n, name);
+  }
+  return 0;
+}
+
 static int sp_is_fiber_storage_recv(const NodeTable *nt, int recv) {
   if (recv < 0) return 0;
   const char *rty = nt_type(nt, recv);
   if (!rty) return 0;
-  if (!strcmp(rty, "ConstantReadNode")) {
+  if (!strcmp(rty, "ConstantReadNode") ||
+      (!strcmp(rty, "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0)) {
     const char *rn = nt_str(nt, recv, "name");
     return rn && !strcmp(rn, "Fiber");
   }
@@ -5931,8 +5946,7 @@ static void emit_call(Compiler *c, int id, Buf *b) {
   }
 
   /* Fiber class methods: Fiber.yield(val) and Fiber.current */
-  if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
-      nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Fiber")) {
+  if (recv_is_const(nt, recv, "Fiber")) {
     if (!strcmp(name, "yield")) {
       if (argc == 0) buf_puts(b, "sp_Fiber_yield(sp_box_nil())");
       else { buf_puts(b, "sp_Fiber_yield("); emit_boxed(c, argv[0], b); buf_puts(b, ")"); }
