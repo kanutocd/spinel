@@ -2873,6 +2873,16 @@ static void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
           int dm_new_idx = c->nscopes - 1;
           dm_s->body = nt_ref(c->nt, dm_blk, "body");
           dm_s->class_id = class_id;
+          /* the block's params are the defined method's params (e.g. the
+             `&:to_s`-rewritten `{ |_spx| _spx.to_s }`'s _spx). */
+          int dm_pn = nt_ref(c->nt, dm_blk, "parameters");
+          int dm_inner = dm_pn >= 0 ? nt_ref(c->nt, dm_pn, "parameters") : -1;
+          int dm_pnode = dm_inner >= 0 ? dm_inner : dm_pn;
+          int dm_rn = 0; const int *dm_reqs = dm_pnode >= 0 ? nt_arr(c->nt, dm_pnode, "requireds", &dm_rn) : NULL;
+          for (int p = 0; p < dm_rn; p++) {
+            const char *pnm = nt_str(c->nt, dm_reqs[p], "name");
+            if (pnm) scope_add_param(dm_s, pnm, -1);
+          }
           child = dm_new_idx;
         }
       }
