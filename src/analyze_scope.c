@@ -327,12 +327,14 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
     collect_def_params(c, id, s);
     child = new_idx;
   }
-  else if (ty && !strcmp(ty, "CallNode") && class_id >= 0) {
+  else if (ty && !strcmp(ty, "CallNode")) {
     /* [lits].each { |v| define_method("m_#{v}") { body } } -- unroll into one
        method per element. Handled wholesale; skip the generic recursion so
        the inner define_method isn't also processed as a normal call. */
-    if (collect_dm_each_unroll(c, id, class_id)) return;
-    /* define_method(:literal_name) { ... } at class scope: register as method scope */
+    if (class_id >= 0 && collect_dm_each_unroll(c, id, class_id)) return;
+    /* define_method(:literal_name) { ... }: register as a method scope.
+       At class scope it becomes an instance method; at top level a free
+       function (class_id stays -1), matching `def`. */
     const char *dm_cn = nt_str(c->nt, id, "name");
     int dm_recv = nt_ref(c->nt, id, "receiver");
     if (dm_cn && !strcmp(dm_cn, "define_method") && dm_recv < 0) {

@@ -571,9 +571,12 @@ int infer_write_types(Compiler *c) {
       else if (name && !strcmp(name, "[]=") && an == 2) {
         is_idx_write = 1; kt = infer_type(c, argv[0]); vt = infer_type(c, argv[1]);
       }
-      else if (name && (!strcmp(name, "fetch") || !strcmp(name, "[]")) && an >= 1) {
+      else if (name && (!strcmp(name, "fetch") ||
+                        (!strcmp(name, "[]") && an == 1)) && an >= 1) {
         /* hash.fetch(key,..) / hash[key]: promote TY_UNKNOWN local to a typed hash.
-           Only fires when the slot is currently TY_UNKNOWN (empty hash). */
+           Only fires when the slot is currently TY_UNKNOWN (empty hash).
+           A 2-arg [] is a string/array slice, never a hash read — only the
+           1-arg form is key-lookup evidence (fetch keeps >=1: (key, default)). */
         TyKind rslot = TY_UNKNOWN;
         const char *rrty = nt_type(nt, recv);
         const char *rnm2 = NULL;
@@ -587,6 +590,33 @@ int infer_write_types(Compiler *c) {
              a str_str_hash with the promotion's str_poly target would widen the
              slot to poly. Only an untyped (empty-{}) ivar promotes here. */
           rslot = infer_type(c, recv);
+          /* Fixpoint-ordering hazard: a param-fed ivar (`@s = s`) reads
+             UNKNOWN before the param's call-site type arrives, and a read
+             like `@s[i]` would mis-promote it to a hash. Promote from reads
+             only when every assignment to the ivar is an empty `{}` literal
+             (the actual empty-hash case) — a syntactic test that is stable
+             across fixpoint iterations. */
+          if (rslot == TY_UNKNOWN) {
+            const char *pin = nt_str(nt, recv, "name");
+            int blocked = 0;
+            for (int wi = 0; wi < nt->count && !blocked; wi++) {
+              const char *wty = nt_type(nt, wi);
+              if (!wty) continue;
+              if (strcmp(wty, "InstanceVariableWriteNode") &&
+                  strcmp(wty, "InstanceVariableOrWriteNode")) continue;
+              const char *wnm = nt_str(nt, wi, "name");
+              if (!wnm || !pin || strcmp(wnm, pin)) continue;
+              int wv = nt_ref(nt, wi, "value");
+              const char *wvty = wv >= 0 ? nt_type(nt, wv) : NULL;
+              int is_empty_hash = 0;
+              if (wvty && !strcmp(wvty, "HashNode")) {
+                int hn = 0; nt_arr(nt, wv, "elements", &hn);
+                if (hn == 0) is_empty_hash = 1;
+              }
+              if (!is_empty_hash) blocked = 1;
+            }
+            if (blocked) continue;
+          }
         }
         if (rslot != TY_UNKNOWN) continue;  /* already typed, skip */
         /* Only promote via [] read if the receiver local has at least one
