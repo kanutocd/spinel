@@ -3758,6 +3758,22 @@ static int infer_ivar_types(Compiler *c) {
       }
       TyKind merged = ty_unify(ci->ivar_types[iv], vt);
       if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
+      /* Propagate to transplanted copies (module included into a class).
+         Body nodes still point to the module scope, so cls_id2 is the module.
+         Any scope sharing the same def_node but with a different class_id is
+         a transplanted copy that must see the same ivar type. */
+      if (s->class_id >= 0 && s->def_node >= 0) {
+        int sdef = s->def_node;
+        int orig_cid = s->class_id;
+        for (int si = 0; si < c->nscopes; si++) {
+          Scope *ts = &c->scopes[si];
+          if (ts->def_node != sdef || ts->class_id == orig_cid || ts->class_id < 0) continue;
+          ClassInfo *tc = &c->classes[ts->class_id];
+          int tiv = comp_ivar_intern(tc, nm);
+          TyKind tmerged = ty_unify(tc->ivar_types[tiv], vt);
+          if (tmerged != tc->ivar_types[tiv]) { tc->ivar_types[tiv] = tmerged; changed = 1; }
+        }
+      }
     }
     else if (!strcmp(ty, "CallNode")) {
       /* attr-writer assignment: obj.x = v  (CallNode "x=") */
