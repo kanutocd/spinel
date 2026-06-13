@@ -1904,7 +1904,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     int has_sub = 0;
     for (int j = 0; cid >= 0 && j < c->nclasses; j++) if (c->classes[j].parent == cid) { has_sub = 1; break; }
     if (cid >= 0 && !has_sub) {
-      if (c->classes[cid].is_value_type) { emit_value_obj_new(c, cid, b); return; }
+      if (c->classes[cid].is_value_type) { emit_value_obj_new(c, cid, id, b); return; }
       buf_printf(b, "sp_%s_new(", c->classes[cid].name);
       for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
       buf_puts(b, ")");
@@ -1948,7 +1948,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       if (!c->classes[ci].is_struct) {
-        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, b); return; }
+        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, id, b); return; }
         buf_printf(b, "sp_%s_new(", c->classes[ci].name);
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
@@ -2023,7 +2023,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_puts(b, ")");
           return;
         }
-        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, b); return; }
+        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, id, b); return; }
         buf_printf(b, "sp_%s_new(", c->classes[ci].name);
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
@@ -8067,16 +8067,22 @@ else {
    is a block-scoped temp declared in g_pre; the expression yields its address.
    Safe because value-type instances never escape their enclosing scope (see
    detect_value_types). Stage 1 handles no-arg constructors only. */
-void emit_value_obj_new(Compiler *c, int ci, Buf *b) {
+void emit_value_obj_new(Compiler *c, int ci, int id, Buf *b) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_%s _t%d = {0}; _t%d.cls_id = %d;\n",
              c->classes[ci].name, t, t, ci);
-  int im = comp_method_in_chain(c, ci, "initialize", NULL);
+  int defcls = ci;
+  int im = comp_method_in_chain(c, ci, "initialize", &defcls);
   if (im >= 0 && c->scopes[im].reachable && !c->scopes[im].yields) {
-    int defcls = ci; comp_method_in_chain(c, ci, "initialize", &defcls);
+    /* arg expressions go to a local buf; any GC-hoist preludes flow to g_pre
+       (emitted before the initialize call, in the right order). */
+    Buf ab; memset(&ab, 0, sizeof ab);
+    emit_args_filled(c, im, nt_ref(c->nt, id, "arguments"), "", &ab);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "sp_%s_initialize(&_t%d);\n", c->classes[defcls].name, t);
+    buf_printf(g_pre, "sp_%s_initialize(&_t%d%s%s);\n",
+               c->classes[defcls].name, t, (ab.p && ab.p[0]) ? ", " : "", ab.p ? ab.p : "");
+    free(ab.p);
   }
   buf_printf(b, "&_t%d", t);
 }

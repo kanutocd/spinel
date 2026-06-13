@@ -1497,11 +1497,6 @@ void analyze_program(Compiler *c) {
     for (int j = 0; j < c->nclasses; j++)
       if (c->classes[j].parent == i) { has_sub = 1; break; }
     if (has_sub) continue;
-    /* Stage 1: only no-arg constructors. Then every `X.new` is 0-arg and can be
-       stack-allocated uniformly, so the (unrooted) instance pointer is always a
-       stack address — never a mix of stack and heap that would break GC rooting. */
-    int initm = comp_method_in_chain(c, i, "initialize", NULL);
-    if (initm >= 0 && c->scopes[initm].nparams > 0) continue;
     ci->is_value_type = 1;   /* tentative; disqualified below */
   }
   for (int id = 0; id < c->nt->count; id++) {
@@ -1558,6 +1553,36 @@ void analyze_program(Compiler *c) {
         }
       }
     }
+  }
+  /* A value-type instance returned from a method would be a pointer into that
+     method's frame -- it dangles once the method returns. Exclude any class
+     that is some method's return type. (Returning by value would need the
+     full value representation; that is a later stage.) */
+  for (int s = 0; s < c->nscopes; s++) {
+    TyKind rt = c->scopes[s].ret;
+    if (ty_is_object(rt)) { int q = ty_object_class(rt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+  }
+  /* An instance built inside a poly-returning method is liable to be boxed at
+     the (poly) return -- sp_box_obj would carry a stack pointer. And an
+     instance that is a block's result is collected (map/collect -> a boxed
+     array). Both box a value, so exclude such classes. */
+  for (int id = 0; id < c->nt->count; id++) {
+    TyKind t = comp_ntype(c, id);
+    if (!ty_is_object(t)) continue;
+    int q = ty_object_class(t);
+    if (q < 0 || q >= c->nclasses || !c->classes[q].is_value_type) continue;
+    Scope *s = comp_scope_of(c, id);
+    if (s && s->ret == TY_POLY) c->classes[q].is_value_type = 0;
+  }
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || strcmp(ty, "BlockNode")) continue;
+    int body = nt_ref(c->nt, id, "body");
+    if (body < 0) continue;
+    int n = 0; const int *st = nt_arr(c->nt, body, "body", &n);
+    if (n <= 0) continue;
+    TyKind lt = comp_ntype(c, st[n - 1]);
+    if (ty_is_object(lt)) { int q = ty_object_class(lt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
   }
 }
 
