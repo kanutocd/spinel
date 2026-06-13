@@ -1944,8 +1944,17 @@ TyKind infer_uncached(Compiler *c, int id) {
     return TY_RANGE;
   }
   if (!strcmp(ty, "LambdaNode"))              return TY_PROC;
-  /* an assignment expression evaluates to the assigned value */
-  if (!strcmp(ty, "LocalVariableWriteNode"))  return infer_type(c, nt_ref(nt, id, "value"));
+  /* an assignment expression evaluates to the assigned value -- but codegen
+     lowers `x = expr` to `({ lv_x = ...; lv_x; })`, so the chain value IS the
+     slot. Return the local's slot type (when known) so a chained `a = b = expr`
+     boxes consistently with the slot, mirroring the ivar-write rule below. */
+  if (!strcmp(ty, "LocalVariableWriteNode")) {
+    const char *lwn = nt_str(nt, id, "name");
+    Scope *lws = comp_scope_of(c, id);
+    LocalVar *lwv = lwn ? scope_local(lws, lwn) : NULL;
+    if (lwv && lwv->type != TY_UNKNOWN) return lwv->type;
+    return infer_type(c, nt_ref(nt, id, "value"));
+  }
   if (!strcmp(ty, "InstanceVariableWriteNode") ||
       !strcmp(ty, "InstanceVariableOrWriteNode") ||
       !strcmp(ty, "InstanceVariableAndWriteNode") ||

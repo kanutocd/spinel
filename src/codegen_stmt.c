@@ -548,7 +548,11 @@ else {
     }
   }
   if (t == TY_FLOAT && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "*") || !strcmp(op, "/"))) {
-    buf_printf(b, "lv_%s %s= ", en, op); emit_expr(c, v, b); buf_puts(b, ";\n");
+    TyKind vt = comp_ntype(c, v);
+    buf_printf(b, "lv_%s %s= ", en, op);
+    if (vt == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else emit_expr(c, v, b);
+    buf_puts(b, ";\n");
     return;
   }
   if (t == TY_COMPLEX && (!strcmp(op, "+") || !strcmp(op, "*"))) {

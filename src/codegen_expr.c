@@ -1170,6 +1170,10 @@ else {
       buf_puts(b, res == TY_POLY ? "sp_box_nil()" : default_value(res == TY_UNKNOWN ? TY_INT : res));
       buf_puts(b, ")");
     }
+    /* an unresolved (TY_UNKNOWN) left emits a poly fallback (sp_box_nil); coerce
+       it to the unified scalar result so the temp's declared type matches. */
+    else if (lt == TY_UNKNOWN && res == TY_INT) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, left, b); buf_puts(b, ")"); }
+    else if (lt == TY_UNKNOWN && res == TY_FLOAT) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, left, b); buf_puts(b, ")"); }
     else emit_expr(c, left, b);
     buf_puts(b, "; ");
     if (lt == TY_POLY)      buf_printf(b, "sp_poly_truthy(_t%d)", t);
