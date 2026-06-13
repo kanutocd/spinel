@@ -1316,14 +1316,27 @@ void analyze_program(Compiler *c) {
     if (!prop_changed) break;
   }
 
-  /* A block param that inference never resolved holds a yielded value of
-     unknown static type (e.g. an element of a poly receiver iterated by
-     uniq!/each): declare it boxed (poly) rather than failing codegen. Set
-     before the node-type cache is rebuilt so reads of the param see poly. */
+  /* The method-reference backstop and ivar up-propagation above changed param
+     and ivar types after the main fixpoint, so re-run local write-type inference:
+     a local like `xfine = 8 - (data & 0x7)` only becomes int once its method's
+     `data` param is pinned to int by the backstop. */
+  for (int iter = 0; iter < 8; iter++) if (!infer_write_types(c)) break;
+  /* infer_write_types resets non-param locals, undoing the earlier bigint
+     loop-variable promotion, so re-apply it. */
+  detect_bigint_loop_vars(c);
+  propagate_bigint_cascade(c);
+
+  /* A non-parameter local that inference never resolved holds a value of unknown
+     static type -- a block param bound to an element of a poly receiver, or a
+     local fed by a dynamically-dispatched call (e.g. optcarrot's memory-map
+     procs). Declare it boxed (poly) rather than failing codegen; reads then go
+     through the tag-dispatching poly paths. Method params are excluded: the
+     backstop above already pins or drops those. Set before the node-type cache
+     is rebuilt so reads of the local see poly. */
   for (int s = 0; s < c->nscopes; s++)
     for (int i = 0; i < c->scopes[s].nlocals; i++) {
       LocalVar *blv = &c->scopes[s].locals[i];
-      if (blv->is_block_param && blv->type == TY_UNKNOWN) blv->type = TY_POLY;
+      if (!blv->is_param && blv->type == TY_UNKNOWN) blv->type = TY_POLY;
     }
 
   /* finalize: gc-root needs + full node type cache */

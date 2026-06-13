@@ -539,6 +539,56 @@ int emit_minmax_by_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* poly `uniq`/`uniq!` with a block, as an expression: the receiver boxes an
+   array; keep the first element for each distinct block-key value (compared with
+   sp_poly_eq), and for the bang form write the survivors back in place. Yields
+   the (boxed) array. Returns 1 if handled. */
+int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || (strcmp(name, "uniq") && strcmp(name, "uniq!"))) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  int block = nt_ref(nt, id, "block");
+  if (recv < 0 || block < 0) return 0;
+  if (comp_ntype(c, recv) != TY_POLY) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0; if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+  if (argc != 0) return 0;
+  const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
+  int body = nt_ref(nt, block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (!p0 || bn < 1) return 0;
+  int bang = !strcmp(name, "uniq!");
+  int trecv = ++g_tmp, tarr = ++g_tmp, tseen = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp;
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", trecv, rb.p ? rb.p : "sp_box_nil()"); free(rb.p);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = (sp_PolyArray *)_t%d.v.p;\n", tarr, trecv);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tseen, tseen);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tres, tres);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tarr, ti);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = _t%d->data[_t%d];\n", p0, tarr, ti);
+  int save = g_indent; g_indent++;
+  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent);
+  int tkey = ++g_tmp, tdup = ++g_tmp, tj = ++g_tmp;
+  Buf kb; memset(&kb, 0, sizeof kb); emit_boxed(c, bb[bn - 1], &kb); g_indent = save;
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", tkey, kb.p ? kb.p : "sp_box_nil()"); free(kb.p);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "int _t%d = 0; for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (sp_poly_eq(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
+             tdup, tj, tj, tseen, tj, tseen, tj, tkey, tdup);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_PolyArray_push(_t%d, lv_%s); }\n", tdup, tseen, tkey, tres, p0);
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  if (bang) {
+    int tm = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "_t%d->len = 0; for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) sp_PolyArray_push(_t%d, _t%d->data[_t%d]);\n",
+               tarr, tm, tm, tres, tm, tarr, tres, tm);
+    buf_printf(b, "_t%d", trecv);
+  }
+  else buf_printf(b, "sp_box_poly_array(_t%d)", tres);
+  return 1;
+}
+
 /* "str".gsub(/re/) { |m| repl } / sub as an expression: iterate the matches
    of a regex literal, binding the block param to each matched substring and
    appending its return value as the replacement. sub replaces only the first

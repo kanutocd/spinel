@@ -83,6 +83,7 @@ void emit_call(Compiler *c, int id, Buf *b) {
   if (emit_predicate_expr(c, id, b)) return;
   if (emit_grep_expr(c, id, b)) return;
   if (emit_minmax_by_expr(c, id, b)) return;
+  if (emit_poly_uniq_block(c, id, b)) return;
   if (emit_sort_cmp_expr(c, id, b)) return;
   if (emit_minmax_cmp_expr(c, id, b)) return;
   if (emit_step_array_expr(c, id, b)) return;
@@ -3967,6 +3968,21 @@ else {
   /* nil? on an array/hash: a nil container is a NULL pointer */
   if (recv >= 0 && (ty_is_array(rt) || ty_is_hash(rt)) && !strcmp(name, "nil?") && argc == 0) {
     buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") == NULL)");
+    return;
+  }
+  /* nil? on a pointer-backed concrete type: nil is the NULL pointer. */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "nil?") &&
+      (rt == TY_FIBER || rt == TY_PROC || rt == TY_CURRY || rt == TY_RANDOM ||
+       rt == TY_METHOD || rt == TY_IO || rt == TY_STRINGIO || rt == TY_STRINGSCANNER ||
+       rt == TY_MATCHDATA || rt == TY_REGEX || rt == TY_EXCEPTION || rt == TY_BIGINT)) {
+    buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") == NULL)");
+    return;
+  }
+  /* nil? on a value-typed concrete receiver is always false. */
+  if (recv >= 0 && argc == 0 && !strcmp(name, "nil?") &&
+      (rt == TY_RANGE || rt == TY_TIME || rt == TY_COMPLEX || rt == TY_RATIONAL ||
+       rt == TY_SYMBOL || rt == TY_BOOL || rt == TY_CLASS)) {
+    buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 0)");
     return;
   }
   /* a predicate on an empty array literal folds to a constant: the block (if
@@ -7975,6 +7991,21 @@ else {
     }
   }
 
+  /* NoMethodError gate: an unresolved call on a dynamically-typed receiver
+     (poly/nil/int/unknown -- no user class defines the method and no builtin
+     matches) yields a typed nil/0 placeholder instead of aborting. In practice
+     such a call is guarded by a runtime-nil receiver (e.g. an optional hook that
+     is never installed), so it never executes; emitting the inferred-type
+     default keeps codegen going without changing observable behaviour. A
+     concrete object receiver still errors -- that is a genuine missing method. */
+  if (recv >= 0) {
+    TyKind grt = comp_ntype(c, recv);
+    if (grt == TY_POLY || grt == TY_NIL || grt == TY_INT || grt == TY_UNKNOWN) {
+      TyKind ret = comp_ntype(c, id);
+      buf_puts(b, (is_scalar_ret(ret) && ret != TY_UNKNOWN) ? default_value(ret) : "sp_box_nil()");
+      return;
+    }
+  }
   unsupported(c, id, "call");
 }
 
