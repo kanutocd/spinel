@@ -288,7 +288,8 @@ static const char *sp_complex_inspect(sp_Complex c) {
   if (c.im < 0) {
     if (c.im == (mrb_int)c.im) n += snprintf(buf + n, sizeof(buf) - n, "-%lldi)", -(long long)c.im);
     else n += snprintf(buf + n, sizeof(buf) - n, "%gi)", c.im);
-  } else {
+  }
+else {
     if (c.im == (mrb_int)c.im) n += snprintf(buf + n, sizeof(buf) - n, "+%lldi)", (long long)c.im);
     else n += snprintf(buf + n, sizeof(buf) - n, "+%gi)", c.im);
   }
@@ -663,7 +664,8 @@ static void sp_str_sweep(void) {
     if ((unsigned char)body[0] == 0xfc) {
       body[0] = (char)0xfe;
       pp = &h->next;
-    } else {
+    }
+else {
       *pp = h->next;
       /* String allocs no longer fold into sp_gc_bytes (see
          sp_str_alloc); the matching subtract here drops too. */
@@ -1464,7 +1466,8 @@ static const char *sp_str_chomp_sep(const char *s, const char *sep) {
       if (s[l-1] == '\n') { l--; continue; }
       break;
     }
-  } else {
+  }
+else {
     size_t sl = strlen(sep);
     if (sl <= l && memcmp(s + l - sl, sep, sl) == 0) l -= sl;
   }
@@ -1742,10 +1745,12 @@ static const char*sp_str_tr_s(const char*s,const char*from,const char*to){
       if(tn>0){
         emit_cp=negate?tcps[tn-1]:(mi<tn?tcps[mi]:tcps[tn-1]);
         translated=1;
-      } else {
+      }
+else {
         p+=cn; continue;
       }
-    } else {
+    }
+else {
       emit_cp=cp;
       translated=0;
     }
@@ -1753,7 +1758,8 @@ static const char*sp_str_tr_s(const char*s,const char*from,const char*to){
        translated, AND the emitted codepoints match. */
     if(has_last && last_was_translated && translated && last_emit==emit_cp){
       /* skip */
-    } else {
+    }
+else {
       n+=sp_utf8_encode(emit_cp,buf+n);
       last_emit=emit_cp;
       has_last=1;
@@ -1844,7 +1850,8 @@ static const char *sp_str_scrub(const char *s, const char *repl) {
     int valid = 1;
     if (expected == 1) {
       if (c >= 0x80) valid = 0;
-    } else {
+    }
+else {
       if (i + (size_t)expected > bl) valid = 0;
       else {
         for (int k = 1; k < expected; k++) {
@@ -1857,7 +1864,8 @@ static const char *sp_str_scrub(const char *s, const char *repl) {
       memcpy(out + olen, s + i, (size_t)expected);
       olen += (size_t)expected;
       i += (size_t)expected;
-    } else {
+    }
+else {
       if (olen + rlen + 1 >= cap) { cap = (olen + rlen) * 2 + 64; out = (char*)realloc(out, cap); }
       memcpy(out + olen, r, rlen);
       olen += rlen;
@@ -2480,7 +2488,8 @@ static void sp_re_expand_rep(char **out_io, size_t *olen_io, size_t *cap_io,
         }
         i += 2;
         continue;
-      } else if (d == '\\') {
+      }
+else if (d == '\\') {
         if (olen + 1 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); }
         out[olen++] = '\\';
         i += 2;
@@ -2520,7 +2529,8 @@ static const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const ch
         out[olen++] = str[caps[1]];
       }
       pos = caps[1] + 1;
-    } else {
+    }
+else {
       pos = caps[1];
     }
   }
@@ -2572,7 +2582,8 @@ static const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *
         out[olen++] = str[caps[1]];
       }
       pos = caps[1] + 1;
-    } else {
+    }
+else {
       pos = caps[1];
     }
   }
@@ -2689,7 +2700,8 @@ static sp_StrArray *sp_re_split(mrb_regexp_pattern *pat, const char *str) {
         char *gm = sp_str_alloc_raw(glen+1);
         memcpy(gm, str + caps[gi*2], glen); gm[glen] = 0;
         sp_StrArray_push(arr, gm);
-      } else {
+      }
+else {
         sp_StrArray_push(arr, sp_str_empty);
       }
     }
@@ -2824,7 +2836,8 @@ static const char *sp_re_escape(const char *src) {
         c == '-' || c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
         c == '\f' || c == '\v') {
       out_len += 2;
-    } else {
+    }
+else {
       out_len += 1;
     }
   }
@@ -2842,7 +2855,8 @@ static const char *sp_re_escape(const char *src) {
         c == '\f' || c == '\v') {
       buf[j++] = '\\';
       buf[j++] = (char)c;
-    } else {
+    }
+else {
       buf[j++] = (char)c;
     }
   }
@@ -2929,7 +2943,8 @@ static const char *sp_Time_inspect(sp_Time *t) {
   struct tm *tm_ = gmtime(&sec);
   if (tm_) {
     strftime(buf, 40, "%Y-%m-%d %H:%M:%S UTC", tm_);
-  } else {
+  }
+else {
     snprintf(buf, 40, "Time(%lld)", (long long)t->tv_sec);
   }
   return buf;
@@ -3125,7 +3140,8 @@ static sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
       memcpy(m, str + caps[0], len);
       m[len] = 0;
       sp_PolyArray_push(arr, sp_box_str(m));
-    } else {
+    }
+else {
       sp_PolyArray *row = sp_PolyArray_new();
       for (int gi = 1; gi < pairs; gi++) {
         if (caps[gi * 2] >= 0 && caps[gi * 2 + 1] >= 0) {
@@ -3134,7 +3150,8 @@ static sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
           memcpy(gm, str + caps[gi * 2], glen);
           gm[glen] = 0;
           sp_PolyArray_push(row, sp_box_str(gm));
-        } else {
+        }
+else {
           sp_PolyArray_push(row, sp_box_nil());
         }
       }
@@ -3169,7 +3186,8 @@ static sp_PolyArray *sp_re_match_data(mrb_regexp_pattern *pat, const char *str) 
       memcpy(buf, str + start, len);
       buf[len] = 0;
       sp_PolyArray_push(arr, sp_box_str(buf));
-    } else {
+    }
+else {
       sp_PolyArray_push(arr, sp_box_nil());
     }
   }
@@ -3497,7 +3515,8 @@ static const char *sp_str_format_polyarr(const char *fmt, sp_PolyArray *a) {
     if (conv == 'd' || conv == 'i' || conv == 'x' || conv == 'X' || conv == 'o') {
       memcpy(fmt_use, spec, sl - 1);
       fmt_use[sl - 1] = 'l'; fmt_use[sl] = 'l'; fmt_use[sl + 1] = conv; fmt_use[sl + 2] = 0;
-    } else {
+    }
+else {
       memcpy(fmt_use, spec, sl); fmt_use[sl] = 0;
     }
     char tmp[256]; int wn = 0;
@@ -3509,24 +3528,28 @@ static const char *sp_str_format_polyarr(const char *fmt, sp_PolyArray *a) {
       else if (v.tag == SP_TAG_FLT) lv = (long long)v.v.f;
       else if (v.tag == SP_TAG_STR && v.v.s) lv = strtoll(v.v.s, NULL, 10);
       wn = snprintf(tmp, sizeof(tmp), fmt_use, lv);
-    } else if (conv == 'f' || conv == 'e' || conv == 'E' || conv == 'g' || conv == 'G') {
+    }
+else if (conv == 'f' || conv == 'e' || conv == 'E' || conv == 'g' || conv == 'G') {
       double dv = 0;
       if (v.tag == SP_TAG_FLT) dv = v.v.f;
       else if (v.tag == SP_TAG_INT) dv = (double)v.v.i;
       wn = snprintf(tmp, sizeof(tmp), fmt_use, dv);
-    } else if (conv == 's') {
+    }
+else if (conv == 's') {
       const char *sv = "";
       char num_buf[32];
       if (v.tag == SP_TAG_STR) sv = v.v.s ? v.v.s : "";
       else if (v.tag == SP_TAG_INT) { snprintf(num_buf, sizeof(num_buf), "%lld", (long long)v.v.i); sv = num_buf; }
       else if (v.tag == SP_TAG_FLT) { snprintf(num_buf, sizeof(num_buf), "%g", v.v.f); sv = num_buf; }
       wn = snprintf(tmp, sizeof(tmp), fmt_use, sv);
-    } else if (conv == 'c') {
+    }
+else if (conv == 'c') {
       int cv = 0;
       if (v.tag == SP_TAG_INT) cv = (int)v.v.i;
       else if (v.tag == SP_TAG_STR && v.v.s && v.v.s[0]) cv = (unsigned char)v.v.s[0];
       wn = snprintf(tmp, sizeof(tmp), fmt_use, cv);
-    } else {
+    }
+else {
       memcpy(tmp, spec, sl); tmp[sl] = 0; wn = (int)sl; idx--;
     }
     if (wn < 0) continue;
@@ -3622,7 +3645,8 @@ static sp_PolyArray *sp_poly_array_transpose(sp_PolyArray *rows) {
         sp_IntArray_push(col, val);
       }
       cv.tag = SP_TAG_OBJ; cv.cls_id = SP_BUILTIN_INT_ARRAY; cv.v.p = col;
-    } else if (kind == SP_BUILTIN_FLT_ARRAY) {
+    }
+else if (kind == SP_BUILTIN_FLT_ARRAY) {
       sp_FloatArray *col = sp_FloatArray_new();
       SP_GC_ROOT(col);
       for (mrb_int r = 0; r < nrows; r++) {
@@ -3635,7 +3659,8 @@ static sp_PolyArray *sp_poly_array_transpose(sp_PolyArray *rows) {
         sp_FloatArray_push(col, val);
       }
       cv.tag = SP_TAG_OBJ; cv.cls_id = SP_BUILTIN_FLT_ARRAY; cv.v.p = col;
-    } else if (kind == SP_BUILTIN_STR_ARRAY) {
+    }
+else if (kind == SP_BUILTIN_STR_ARRAY) {
       sp_StrArray *col = sp_StrArray_new();
       SP_GC_ROOT(col);
       for (mrb_int r = 0; r < nrows; r++) {
@@ -4352,7 +4377,8 @@ static const char *sp_bt_symbol(const char *line) {
     size_t len = (size_t)(end - p);
     if (len == 0 || len > 250) return 0;          /* unresolved (static/stripped) */
     memcpy(sym, p, len); sym[len] = 0;
-  } else {                                        /* macOS: "<idx> <image> <addr> <symbol> + <off>" */
+  }
+else {                                        /* macOS: "<idx> <image> <addr> <symbol> + <off>" */
     /* The symbol is the token just before the " + <off>" delimiter. Parse
        backward from the last " + " rather than forward from "0x" — an image
        path containing "0x" (e.g. /path/0x_proj/bin) would otherwise misparse. */
@@ -4888,10 +4914,12 @@ static int sp_fnmatch1(const char *pat, const char *str) {
       if (!*pat) return 1;
       while (*str) { if (sp_fnmatch1(pat, str)) return 1; str++; }
       return sp_fnmatch1(pat, str);
-    } else if (*pat == '?') {
+    }
+else if (*pat == '?') {
       if (!*str) return 0;
       pat++; str++;
-    } else {
+    }
+else {
       if (*pat != *str) return 0;
       pat++; str++;
     }
@@ -4916,7 +4944,8 @@ static sp_StrArray *sp_dir_glob(const char *pattern) {
     dirbuf[dl] = 0;
     dirpath = (dl == 0) ? "/" : dirbuf;
     base_pat = slash + 1;
-  } else {
+  }
+else {
     dirpath = ".";
     base_pat = pattern;
   }
@@ -4960,23 +4989,28 @@ static const char *sp_file_expand_path(const char *path, const char *base) {
      never truncate. */
   if (path[0] == '~' && (path[1] == '\0' || path[1] == '/')) {
     snprintf(raw, sizeof(raw), "%.4000s%.4000s", home, path + 1);
-  } else if (path[0] == '/') {
+  }
+else if (path[0] == '/') {
     snprintf(raw, sizeof(raw), "%.4000s", path);
-  } else {
+  }
+else {
     char basebuf[8192];
     const char *b;
     if (base && base[0]) {
       if (base[0] == '~' && (base[1] == '\0' || base[1] == '/')) {
         snprintf(basebuf, sizeof(basebuf), "%.4000s%.4000s", home, base + 1);
         b = basebuf;
-      } else if (base[0] == '/') {
+      }
+else if (base[0] == '/') {
         b = base;
-      } else {
+      }
+else {
         if (!getcwd(cwd, sizeof(cwd))) cwd[0] = 0;
         snprintf(basebuf, sizeof(basebuf), "%.4000s/%.4000s", cwd, base);
         b = basebuf;
       }
-    } else {
+    }
+else {
       if (!getcwd(cwd, sizeof(cwd))) cwd[0] = 0;
       b = cwd;
     }
@@ -5000,9 +5034,11 @@ static const char *sp_file_expand_path(const char *path, const char *base) {
     size_t slen = (size_t)(q - p);
     if (slen == 1 && p[0] == '.') {
       /* current dir -- skip */
-    } else if (slen == 2 && p[0] == '.' && p[1] == '.') {
+    }
+else if (slen == 2 && p[0] == '.' && p[1] == '.') {
       if (nseg > 0) { nseg--; olen = seg_start[nseg]; }
-    } else {
+    }
+else {
       size_t mark = olen;
       if (olen > 1) out[olen++] = '/';
       memcpy(out + olen, p, slen);
@@ -5058,7 +5094,8 @@ static sp_IntArray *sp_IntArray_slice_bang(sp_IntArray *a, mrb_int from, mrb_int
   if (from == 0) {
     a->start += n;
     a->len -= n;
-  } else {
+  }
+else {
     for (mrb_int i = from; i + n < a->len; i++) a->data[a->start + i] = a->data[a->start + i + n];
     a->len -= n;
   }

@@ -301,7 +301,8 @@ static bool map_class_instance(rbs_parser_t *p, rbs_types_class_instance_t *ci,
         if (strncmp(elem.buf, "obj_", 4) == 0) {
             sbuf_set(out, elem.buf, elem.len);
             sbuf_append_cstr(out, "_ptr_array");
-        } else {
+        }
+else {
             const char *tag = array_tag_for_elem(elem.buf);
             if (tag == NULL) {
                 sbuf_free(&elem);
@@ -383,7 +384,8 @@ static bool map_class_instance(rbs_parser_t *p, rbs_types_class_instance_t *ci,
             sbuf_append(out, name.buf, name.len);
         }
         sbuf_free(&candidate);
-    } else {
+    }
+else {
         sbuf_append(out, name.buf, name.len);
     }
     sbuf_free(&name);
@@ -421,9 +423,11 @@ static bool map_type(rbs_parser_t *p, rbs_node_t *node,
             /* Avoid double-?: nil? → just nil; obj_Foo?? → obj_Foo? */
             if (inner.len > 0 && inner.buf[inner.len - 1] == '?') {
                 sbuf_set(out, inner.buf, inner.len);
-            } else if (inner.len == 3 && memcmp(inner.buf, "nil", 3) == 0) {
+            }
+else if (inner.len == 3 && memcmp(inner.buf, "nil", 3) == 0) {
                 sbuf_set(out, "nil", 3);
-            } else {
+            }
+else {
                 sbuf_set(out, inner.buf, inner.len);
                 sbuf_append_cstr(out, "?");
             }
@@ -708,11 +712,13 @@ static void collect_decl_names(rbs_parser_t *p, rbs_node_t *node,
         rbs_ast_declarations_class_t *c = (rbs_ast_declarations_class_t *) node;
         name_of_type_name(p, c->name, &leaf);
         members = c->members;
-    } else if (node->type == RBS_AST_DECLARATIONS_MODULE) {
+    }
+else if (node->type == RBS_AST_DECLARATIONS_MODULE) {
         rbs_ast_declarations_module_t *m = (rbs_ast_declarations_module_t *) node;
         name_of_type_name(p, m->name, &leaf);
         members = m->members;
-    } else {
+    }
+else {
         sbuf_free(&leaf);
         return;
     }
@@ -755,11 +761,13 @@ static void traverse_decl(rbs_parser_t *p, rbs_node_t *node,
         rbs_ast_declarations_class_t *c = (rbs_ast_declarations_class_t *) node;
         name_of_type_name(p, c->name, &leaf);
         members = c->members;
-    } else if (node->type == RBS_AST_DECLARATIONS_MODULE) {
+    }
+else if (node->type == RBS_AST_DECLARATIONS_MODULE) {
         rbs_ast_declarations_module_t *m = (rbs_ast_declarations_module_t *) node;
         name_of_type_name(p, m->name, &leaf);
         members = m->members;
-    } else {
+    }
+else {
         /* Skip Interface, Constant, Global, TypeAlias, ClassAlias,
          * ModuleAlias, Directives. */
         sbuf_free(&leaf);
@@ -853,7 +861,8 @@ static void process_file_phase(const char *path, FILE *out, process_phase_t phas
             collect_decl_names(p, pre->node, "");
             pre = pre->next;
         }
-    } else {
+    }
+else {
         rbs_node_list_node_t *cur = sig->declarations->head;
         while (cur != NULL) {
             traverse_decl(p, cur->node, "", out);

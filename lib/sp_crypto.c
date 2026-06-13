@@ -96,7 +96,8 @@ static void sp_crypto_sha256(const uint8_t *msg, size_t len, uint8_t out[32]) {
         for (i = rem + 1; i < 64; i++) buf[i] = 0;
         sp_crypto_sha256_block(H, buf);
         for (i = 0; i < 56; i++) buf[i] = 0;
-    } else {
+    }
+else {
         for (i = rem + 1; i < 56; i++) buf[i] = 0;
     }
     uint64_t bits = (uint64_t)len * 8;
@@ -154,7 +155,8 @@ static void sp_crypto_sha1(const uint8_t *msg, size_t len, uint8_t out[20]) {
         for (i = rem + 1; i < 64; i++) buf[i] = 0;
         sp_crypto_sha1_block(H, buf);
         for (i = 0; i < 56; i++) buf[i] = 0;
-    } else {
+    }
+else {
         for (i = rem + 1; i < 56; i++) buf[i] = 0;
     }
     uint64_t bits = (uint64_t)len * 8;
@@ -238,7 +240,8 @@ static void sp_crypto_hmac_sha256(const uint8_t *key, size_t klen,
     if (klen > 64) {
         sp_crypto_sha256(key, klen, kpad);
         for (i = 32; i < 64; i++) kpad[i] = 0;
-    } else {
+    }
+else {
         for (i = 0; i < klen; i++) kpad[i] = key[i];
         for (i = klen; i < 64; i++) kpad[i] = 0;
     }
@@ -264,7 +267,8 @@ static void sp_crypto_hmac_sha256(const uint8_t *key, size_t klen,
             for (i = rem + 1; i < 64; i++) buf[i] = 0;
             sp_crypto_sha256_block(H, buf);
             for (i = 0; i < 56; i++) buf[i] = 0;
-        } else {
+        }
+else {
             for (i = rem + 1; i < 56; i++) buf[i] = 0;
         }
         uint64_t bits = (uint64_t)(64 + mlen) * 8;
@@ -377,7 +381,8 @@ const char *sp_crypto_b64url_encode(const char *src) {
         uint32_t v = (uint32_t)(uint8_t)src[i] << 16;
         sp_crypto_b64url_buf[j++] = SPC_B64U[(v >> 18) & 0x3f];
         sp_crypto_b64url_buf[j++] = SPC_B64U[(v >> 12) & 0x3f];
-    } else if (rem == 2) {
+    }
+else if (rem == 2) {
         uint32_t v = ((uint32_t)(uint8_t)src[i]   << 16)
                    | ((uint32_t)(uint8_t)src[i+1] << 8);
         sp_crypto_b64url_buf[j++] = SPC_B64U[(v >> 18) & 0x3f];
@@ -429,7 +434,8 @@ const char *sp_crypto_b64url_decode(const char *src) {
         int b = sp_crypto_b64u_val(src[i+1]);
         if (a < 0 || b < 0) { sp_crypto_b64u_dec_buf[0] = '\0'; return sp_crypto_b64u_dec_buf; }
         sp_crypto_b64u_dec_buf[j++] = (a << 2) | (b >> 4);
-    } else if (rem == 3) {
+    }
+else if (rem == 3) {
         int a = sp_crypto_b64u_val(src[i]);
         int b = sp_crypto_b64u_val(src[i+1]);
         int c = sp_crypto_b64u_val(src[i+2]);
@@ -542,7 +548,8 @@ const char *sp_crypto_random_b64url(int nbytes) {
         size_t got = fread(r, 1, nbytes, f);
         (void)got;  /* short read is rare for urandom; fall through */
         fclose(f);
-    } else {
+    }
+else {
         /* Last-ditch: counter-mixed time -- NOT cryptographically
          * secure. Modern systems never reach this path. The
          * counter guarantees distinct outputs across calls within
@@ -571,7 +578,8 @@ const char *sp_crypto_random_b64url(int nbytes) {
         uint32_t v = (uint32_t)r[i] << 16;
         sp_crypto_random_b64url_buf[j++] = SPC_B64U[(v >> 18) & 0x3f];
         sp_crypto_random_b64url_buf[j++] = SPC_B64U[(v >> 12) & 0x3f];
-    } else if (rem == 2) {
+    }
+else if (rem == 2) {
         uint32_t v = ((uint32_t)r[i] << 16)
                    | ((uint32_t)r[i+1] << 8);
         sp_crypto_random_b64url_buf[j++] = SPC_B64U[(v >> 18) & 0x3f];

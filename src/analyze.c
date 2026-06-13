@@ -215,7 +215,8 @@ int a_block_is_lifted(Compiler *c, int id) {
   if (recv < 0) {
     mi = comp_method_index(c, name);
     if (mi < 0) { Scope *self = comp_scope_of(c, id); if (self && self->class_id >= 0) mi = comp_method_in_chain(c, self->class_id, name, NULL); }
-  } else {
+  }
+else {
     TyKind rt = infer_type(c, recv);
     if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), name, NULL);
   }

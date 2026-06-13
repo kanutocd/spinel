@@ -213,7 +213,8 @@ static long long pm_int_value(pm_integer_t *integer) {
 
   if (integer->values == NULL) {
     val = (uint64_t)integer->value;
-  } else {
+  }
+else {
     for (size_t i = 0; i < integer->length; i++) {
       if (i >= value_bits / limb_bits) {
         if (integer->values[i] != 0) overflow = 1;
@@ -333,7 +334,8 @@ static int flatten(pm_node_t *node) {
        too, so codegen reads "." instead of an unset field. */
     if (PM_NODE_FLAG_P(node, PM_CALL_NODE_FLAGS_SAFE_NAVIGATION)) {
       S("call_operator", escape_str((const uint8_t *)"&.", 2));
-    } else {
+    }
+else {
       S("call_operator", escape_str((const uint8_t *)".", 1));
     }
     break;
@@ -929,13 +931,15 @@ static int flatten(pm_node_t *node) {
           emit_ref(bpid, "parameters", (pm_node_t *)bp->parameters);
         }
         out_add("R %d %s %d", id, "parameters", bpid);
-      } else if (PM_NODE_TYPE(n->parameters) == PM_NUMBERED_PARAMETERS_NODE) {
+      }
+else if (PM_NODE_TYPE(n->parameters) == PM_NUMBERED_PARAMETERS_NODE) {
         pm_numbered_parameters_node_t *np = (pm_numbered_parameters_node_t *)n->parameters;
         int npid = node_counter++;
         out_add("N %d NumberedParametersNode", npid);
         emit_int(npid, "maximum", np->maximum);
         out_add("R %d %s %d", id, "parameters", npid);
-      } else {
+      }
+else {
         R("parameters", n->parameters);
       }
     }
@@ -1158,7 +1162,8 @@ static int flatten(pm_node_t *node) {
         if (bp->parameters) {
           R("parameters", bp->parameters);
         }
-      } else if (PM_NODE_TYPE(n->parameters) != PM_NUMBERED_PARAMETERS_NODE) {
+      }
+else if (PM_NODE_TYPE(n->parameters) != PM_NUMBERED_PARAMETERS_NODE) {
         R("parameters", n->parameters);
       }
     }
@@ -1223,7 +1228,8 @@ static int flatten(pm_node_t *node) {
       N("LocalVariableWriteNode");
       NAME("name", t->name);
       R("value", n->value);
-    } else {
+    }
+else {
       N("MatchRequiredNode");
       R("value", n->value);
       R("pattern", n->pattern);
@@ -1662,9 +1668,11 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
       stk_file[sp] = sp_intern_file(pathbuf);
       stk_next[sp] = 1;
       /* marker line maps to nothing meaningful */
-    } else if (strncmp(line, SP_POP_PREFIX, strlen(SP_POP_PREFIX)) == 0) {
+    }
+else if (strncmp(line, SP_POP_PREFIX, strlen(SP_POP_PREFIX)) == 0) {
       if (sp > 0) sp--;
-    } else {
+    }
+else {
       sp_line_file[bl] = stk_file[sp];
       sp_line_orig[bl] = stk_next[sp];
       stk_next[sp] += 1;
@@ -1716,10 +1724,12 @@ static char *resolve_requires(const char *source, const char *source_path) {
     if (q1 && q1 < line_end && (!q2 || q1 < q2)) {
       quote_char = '"';
       start = q1 + 1;
-    } else if (q2 && q2 < line_end) {
+    }
+else if (q2 && q2 < line_end) {
       quote_char = '\'';
       start = q2 + 1;
-    } else { scan_from = pos + 1; continue; }
+    }
+else { scan_from = pos + 1; continue; }
 
     char *end = strchr(start, quote_char);
     if (!end || end > line_end) { scan_from = pos + 1; continue; }
@@ -1747,7 +1757,8 @@ static char *resolve_requires(const char *source, const char *source_path) {
       /* Already inlined once -- replace require with empty content */
       content = strdup("# require_relative skipped (already included)");
       free(canonical);
-    } else {
+    }
+else {
       sp_mark_path_included(canonical);
       content = read_file(full_path);
       if (!content) {
@@ -1755,7 +1766,8 @@ static char *resolve_requires(const char *source, const char *source_path) {
                 "warning: require_relative \"%s\" from %s could not be resolved (no such file: %s); the call is ignored\n",
                 rel_path, source_path, full_path);
         content = strdup("# require_relative not found");
-      } else {
+      }
+else {
         /* Recursively resolve */
         char *resolved = resolve_requires(content, full_path);
         free(content);
@@ -1826,7 +1838,8 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
   for (;;) {
     if (strncmp(result, "require ", 8) == 0) {
       pos = result;
-    } else {
+    }
+else {
       pos = strstr(result, "\nrequire ");
       if (pos == NULL) break;
       pos++; /* skip the matched newline */
@@ -1863,7 +1876,8 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
     if (sp_path_already_included(canonical)) {
       content = strdup("# require skipped (already included)");
       free(canonical);
-    } else {
+    }
+else {
       sp_mark_path_included(canonical);
       free(canonical);
       content = read_file(lib_path);
@@ -1885,13 +1899,15 @@ static char *resolve_plain_requires(char *source, const char *exe_path) {
           /* Provided natively by the Spinel runtime; the require is a
              harmless no-op, so don't warn. */
           content = strdup("# require provided by Spinel runtime");
-        } else {
+        }
+else {
           fprintf(stderr,
                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
                   lib_name);
           content = strdup("# require not resolved");
         }
-      } else {
+      }
+else {
         char *resolved = resolve_requires(content, lib_path);
         free(content);
         content = resolved;
@@ -2147,7 +2163,8 @@ static char *rewrite_syntax_sugar(char *source) {
           OUT_STR(" { |_spx| _spx.");
           { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); }
           OUT_STR(" }");
-        } else {
+        }
+else {
           i = after_sym;
           OUT_STR(" do |_spx| _spx.");
           { size_t k; for (k = 0; k < name_len; k++) OUT_CHAR(source[ns + k]); }
@@ -2217,7 +2234,8 @@ static int sp_parse_emit(const char *source_file, const char *argv0, FILE *out) 
     for (const char *p = source; *p; p++) if (*p == '\n') lb++;
     if (la == lb) {
       sp_build_line_map(premap, source_file);
-    } else {
+    }
+else {
       /* Multi-file line attribution unavailable for this program; #line
          falls back to buffer lines. Only worth a word under an explicit
          --debug build (faithful stepping matters there); stay silent for

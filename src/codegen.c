@@ -754,7 +754,8 @@ void emit_proc_literal(Compiler *c, int create, Buf *b) {
       if (orecv < 0 && onm) {
         mi = comp_method_index(c, onm);
         if (mi < 0) { Scope *osc = comp_scope_of(c, owner); if (osc && osc->class_id >= 0) mi = comp_method_in_chain(c, osc->class_id, onm, NULL); }
-      } else if (orecv >= 0 && onm) {
+      }
+else if (orecv >= 0 && onm) {
         TyKind ort = comp_ntype(c, orecv);
         if (ty_is_object(ort)) mi = comp_method_in_chain(c, ty_object_class(ort), onm, NULL);
       }

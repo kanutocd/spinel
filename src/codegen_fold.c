@@ -1145,7 +1145,8 @@ int emit_sort_cmp_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = sp_%sArray_slice(_t%d, 0, sp_%sArray_length(_t%d));\n", tr, k, trv, k, trv);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
-  } else {
+  }
+else {
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = _t%d;\n", tr, trv);  /* sort! operates on self */
   }
@@ -1193,7 +1194,8 @@ void emit_block_param_assign(Compiler *c, int scope_id, const char *nm, int tidx
     else if (et == TY_FLOAT)  buf_printf(b, "lv_%s = sp_box_float(_t%d);", nm, tidx);
     else if (et == TY_BOOL)   buf_printf(b, "lv_%s = sp_box_bool(_t%d);", nm, tidx);
     else buf_printf(b, "lv_%s = _t%d;", nm, tidx);
-  } else {
+  }
+else {
     buf_printf(b, "lv_%s = _t%d;", nm, tidx);
   }
 }
@@ -1811,7 +1813,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, bodyIndent); buf_puts(g_pre, "{\n");
     emit_indent(g_pre, innerIndent); emit_ctype(c, et_elem, g_pre);
     buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
-  } else if (p0) {
+  }
+else if (p0) {
     emit_indent(g_pre, bodyIndent);
     buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
   }
@@ -2069,7 +2072,8 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
   const char *dty = dv >= 0 ? nt_type(c->nt, dv) : NULL;
   if (dv < 0) {
     buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
-  } else if (dty && !strcmp(dty, "NilNode")) {
+  }
+else if (dty && !strcmp(dty, "NilNode")) {
     /* nil default: emit the nil sentinel for the type */
     if (pt == TY_INT)    buf_puts(out, "SP_INT_NIL");
     else if (pt == TY_FLOAT) buf_puts(out, "sp_float_nil()");
@@ -2179,7 +2183,8 @@ void emit_rest_pack(Compiler *c, int from, int pos_argc, const int *argv, Buf *b
         free(el.p);
       }
       free(arr.p);
-    } else {
+    }
+else {
       Buf el; memset(&el, 0, sizeof el);
       emit_boxed(c, argv[i], &el);
       buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el.p ? el.p : "sp_box_nil()");
@@ -2231,7 +2236,8 @@ void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx,
         buf_printf(b, " { sp_PolyArray *_sa = %s; for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", ap2, t);
       else { Buf el2; memset(&el2, 0, sizeof el2); emit_boxed(c, inner2, &el2); buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el2.p ? el2.p : "sp_box_nil()"); free(el2.p); }
       free(arr2.p);
-    } else {
+    }
+else {
       Buf el; memset(&el, 0, sizeof el); emit_boxed(c, argv[j], &el);
       buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el.p ? el.p : "sp_box_nil()");
       free(el.p);
@@ -2337,7 +2343,8 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       if (at == TY_POLY) {
         buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
                    ht, hb.p ? hb.p : "sp_box_nil()", ht);
-      } else {
+      }
+else {
         emit_ctype(c, at, g_pre);
         buf_printf(g_pre, " _t%d = %s; SP_GC_ROOT(_t%d);\n",
                    ht, hb.p ? hb.p : "0", ht);
@@ -2356,10 +2363,12 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       if (splat_tmp >= 0) {
         emit_rest_from_splat_and_argv(splat_tmp, splat_at, i - splat_idx,
                                       c, splat_idx + 1, rest_end, argv, out);
-      } else {
+      }
+else {
         emit_rest_pack(c, i, rest_end, argv, out);
       }
-    } else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx) {
+    }
+else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx) {
       /* post-splat required param: take from the end of the call args */
       int post_j = i - m->rest_idx - 1;  /* 0-based index in posts */
       int argv_idx = pos_argc - m->npost_rest + post_j;
@@ -2367,10 +2376,12 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         emit_arg_or_default(c, m, i, argv[argv_idx], out);
       else
         emit_arg_or_default(c, m, i, -1, out);
-    } else if (splat_tmp >= 0 && i >= splat_idx) {
+    }
+else if (splat_tmp >= 0 && i >= splat_idx) {
       /* this param comes from the splatted array at offset (i - splat_idx) */
       emit_array_elem_at(splat_at, splat_tmp, i - splat_idx, out);
-    } else {
+    }
+else {
       /* Check if this param has a keyword match (lookup by param name in kwh). */
       int kv = kwh >= 0 ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
@@ -2514,7 +2525,8 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       emit_rest_pack(c, k, pos_argc_d, argv, &ab);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = %s;\n", atmp[k], ab.p ? ab.p : "sp_PolyArray_new()");
-    } else {
+    }
+else {
       int kv = (m && kwh_d >= 0) ? kwh_lookup(nt, kwh_d, m->pnames[k]) : -1;
       int provided = kv >= 0 ? kv : (k < pos_argc_d ? argv[k] : -1);
       /* Default expressions (e.g. `@ivar * 10`) reference the callee's self and

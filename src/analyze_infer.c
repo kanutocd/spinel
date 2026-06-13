@@ -276,7 +276,8 @@ TyKind infer_call(Compiler *c, int id) {
           memcpy(base, name, (size_t)blen); base[blen] = '\0';
           if (comp_is_sg_writer(cls, base)) return TY_VOID;
         }
-      } else {
+      }
+else {
         if (comp_is_sg_reader(cls, name)) return TY_POLY;
       }
     }

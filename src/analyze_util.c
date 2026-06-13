@@ -195,7 +195,8 @@ TyKind yield_value_type(Compiler *c, int mi) {
     if (crecv < 0) {
       rmi = comp_method_index(c, cn);
       if (rmi < 0) { Scope *cs = comp_scope_of(c, cid); if (cs->class_id >= 0) rmi = comp_method_in_chain(c, cs->class_id, cn, NULL); }
-    } else {
+    }
+else {
       TyKind crt = infer_type(c, crecv);
       if (ty_is_object(crt)) rmi = comp_method_in_chain(c, ty_object_class(crt), cn, NULL);
       /* `Klass.new { block }`: the block feeds the class's initialize. */
@@ -324,7 +325,8 @@ TyKind proc_ret_of(Compiler *c, int node) {
     if (recv < 0) {
       mi = comp_method_index(c, name);
       if (mi < 0) { Scope *self = comp_scope_of(c, node); if (self->class_id >= 0) mi = comp_method_in_chain(c, self->class_id, name, NULL); }
-    } else {
+    }
+else {
       TyKind rt = infer_type(c, recv);
       if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), name, NULL);
     }

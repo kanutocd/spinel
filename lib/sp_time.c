@@ -86,12 +86,15 @@ void sp_time_vtm(sp_Time t, struct tm *bd, int32_t *off, char *zbuf) {
   time_t s = (time_t)t.tv_sec;
   if (t.is_utc) {
     struct tm *g = gmtime(&s);
-    if (g) { *bd = *g; } else { memset(bd, 0, sizeof(*bd)); }
+    if (g) { *bd = *g; }
+else { memset(bd, 0, sizeof(*bd)); }
     if (off) *off = 0;
     if (zbuf) { zbuf[0]='U'; zbuf[1]='T'; zbuf[2]='C'; zbuf[3]=0; }
-  } else {
+  }
+else {
     struct tm *l = localtime(&s);
-    if (l) { *bd = *l; } else { memset(bd, 0, sizeof(*bd)); }
+    if (l) { *bd = *l; }
+else { memset(bd, 0, sizeof(*bd)); }
     if (off) {
       struct tm gm = *gmtime(&s);
       gm.tm_isdst = -1;
@@ -190,7 +193,8 @@ size_t sp_time_inspect_to(sp_Time t, char *buf, size_t cap) {
   if (n + 8 >= cap) return n;
   if (t.is_utc) {
     buf[n++]=' '; buf[n++]='U'; buf[n++]='T'; buf[n++]='C'; buf[n]=0;
-  } else {
+  }
+else {
     char sign = off >= 0 ? '+' : '-';
     long a = off < 0 ? -(long)off : (long)off;
     int oh = (int)(a / 3600);

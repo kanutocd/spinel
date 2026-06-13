@@ -50,9 +50,11 @@ mrb_int sp_str_to_i_cruby(const char *s) {
       }
       any = 1;
       p++;
-    } else if (*p == '_' && any && p[1] >= '0' && p[1] <= '9') {
+    }
+else if (*p == '_' && any && p[1] >= '0' && p[1] <= '9') {
       p++;
-    } else {
+    }
+else {
       break;
     }
   }
@@ -83,10 +85,12 @@ mrb_int sp_str_to_i_base(const char *s, mrb_int base) {
       else if (p[1] == 'd' || p[1] == 'D') { base = 10; p += 2; }
       else if (p[1] >= '0' && p[1] <= '7') { base = 8; p++; }
       else { base = 10; }
-    } else {
+    }
+else {
       base = 10;
     }
-  } else if (*p == '0' && p[1] != 0) {
+  }
+else if (*p == '0' && p[1] != 0) {
     /* Explicit base accepts the matching prefix. */
     if ((base == 16) && (p[1] == 'x' || p[1] == 'X')) p += 2;
     else if ((base == 2) && (p[1] == 'b' || p[1] == 'B')) p += 2;

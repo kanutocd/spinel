@@ -488,7 +488,8 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
     const char *kty = nt_type(c->nt, key);
     if (kty && !strcmp(kty, "SymbolNode")) {
       emit_str_literal(b, nt_str(c->nt, key, "value"));
-    } else {
+    }
+else {
       buf_puts(b, "sp_sym_to_s("); emit_expr(c, key, b); buf_puts(b, ")");
     }
     return;

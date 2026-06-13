@@ -859,7 +859,8 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
       int inner = nt_ref(nt, argv[k], "expression");
       TyKind arr = inner >= 0 ? infer_type(c, inner) : TY_UNKNOWN;
       at = ty_is_array(arr) ? ty_array_elem(arr) : TY_POLY;
-    } else {
+    }
+else {
       at = infer_type(c, argv[k]);
       /* nil is not a first-class param type; a nil arg widens the param to poly */
       if (at == TY_NIL) at = TY_POLY;
@@ -915,7 +916,8 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
         TyKind merged = ty_unify(p->type, at);
         if (merged != p->type) { p->type = merged; changed = 1; }
       }
-    } else {
+    }
+else {
       int any_kw_bound = 0;
       for (int e = 0; e < en; e++) {
         int key = nt_ref(nt, elems[e], "key");

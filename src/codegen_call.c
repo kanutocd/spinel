@@ -835,7 +835,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
   if (recv < 0 && !strcmp(name, "__dir__") && argc == 0) {
     const char *sf = nt->source_file;
     char dir[1024];
-    if (sf && strrchr(sf, '/')) { size_t n = (size_t)(strrchr(sf, '/') - sf); if (n >= sizeof dir) n = sizeof dir - 1; if (n == 0) { dir[0] = '/'; dir[1] = 0; } else { memcpy(dir, sf, n); dir[n] = 0; } }
+    if (sf && strrchr(sf, '/')) { size_t n = (size_t)(strrchr(sf, '/') - sf); if (n >= sizeof dir) n = sizeof dir - 1; if (n == 0) { dir[0] = '/'; dir[1] = 0; }
+else { memcpy(dir, sf, n); dir[n] = 0; } }
     else { dir[0] = '.'; dir[1] = 0; }
     emit_str_literal(b, dir);
     return;
@@ -3390,7 +3391,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "({ const char *_t%d = ", ta); emit_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb); emit_expr(c, argv[0], b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_str_concat(_t%d, _t%d); })", tb, ta, tb);
-      } else {
+      }
+else {
         buf_puts(b, "sp_str_concat(");
         emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
         buf_puts(b, ")");
@@ -4791,7 +4793,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
             char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
             if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &cb);
             else buf_puts(&cb, tn);
-          } else {
+          }
+else {
             g_self = selfpbuf2;
             emit_arg_or_default(c, &c->scopes[mi], a, -1, &cb);
             g_self = saved_self;
@@ -5217,7 +5220,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
             char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
             emit_boxed_text(c, vt, getexpr, b);
             buf_puts(b, " : ({ ");
-          } else {
+          }
+else {
             buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ({ ",
                        hn, th, tk, hn, th, tk);
           }
@@ -6002,7 +6006,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ sp_RbVal _t%d = ", t);
           emit_expr(c, argv[0], b);
           buf_printf(b, "; _t%d.v.i; })", t);
-        } else {
+        }
+else {
           emit_expr(c, argv[0], b);
         }
         buf_puts(b, ")");

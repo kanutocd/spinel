@@ -239,7 +239,8 @@ int64_t sp_StringIO_truncate(sp_StringIO *sio, int64_t length) {
   if (length < sio->len) {
     sio->len = length;
     sio->buf[length] = '\0';
-  } else if (length > sio->len) {
+  }
+else if (length > sio->len) {
     /* Issue #816: grow the buffer + NUL-fill the gap, matching
        CRuby's "truncate(N) where N > current length pads with NULs". */
     sio_grow(sio, length - sio->pos);

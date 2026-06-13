@@ -137,7 +137,8 @@ void emit_interp(Compiler *c, int id, Buf *b) {
         buf_printf(&decls, "const char *_t%d = %s; SP_GC_ROOT(_t%d); ",
                    tv, conv.p ? conv.p : "\"\"", tv);
         buf_printf(&argbuf, ", _t%d", tv);
-      } else {
+      }
+else {
         buf_printf(&argbuf, ", %s", conv.p ? conv.p : "0");
       }
       free(conv.p);
@@ -899,7 +900,8 @@ void emit_expr(Compiler *c, int id, Buf *b) {
             buf_printf(g_pre, "{ sp_PolyArray *_sa = %s; if (_sa) for (mrb_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }\n", ep, t);
           else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed(c, inner, &bx); buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", t, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); }
           free(el.p);
-        } else {
+        }
+else {
           Buf el; memset(&el, 0, sizeof el);
           emit_boxed(c, els[j], &el);
           emit_indent(g_pre, g_indent);
@@ -952,7 +954,8 @@ void emit_expr(Compiler *c, int id, Buf *b) {
           buf_printf(g_pre, "sp_%sArray_push(_t%d, %s);\n", k, t, ep);
         }
         free(el.p);
-      } else {
+      }
+else {
         Buf el; memset(&el, 0, sizeof el);
         emit_expr(c, els[j], &el);   /* element preludes flow to g_pre first */
         emit_indent(g_pre, g_indent);

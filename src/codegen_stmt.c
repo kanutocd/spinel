@@ -284,9 +284,11 @@ int emit_output_call(Compiler *c, int id, Buf *b, int indent) {
       int ts = ++g_tmp;
       buf_printf(b, "{ const char *_t%d = ", ts); emit_expr(c, argv[0], b);
       buf_printf(b, "; if (_t%d && *_t%d) putchar((unsigned char)_t%d[0]); }\n", ts, ts, ts);
-    } else if (at == TY_POLY) {
+    }
+else if (at == TY_POLY) {
       buf_puts(b, "putchar((int)(sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ") & 0xff));\n");
-    } else {
+    }
+else {
       buf_puts(b, "putchar((int)(("); emit_expr(c, argv[0], b); buf_puts(b, ") & 0xff));\n");
     }
     return 1;
@@ -507,7 +509,8 @@ void emit_op_assign(Compiler *c, int id, Buf *b, int indent) {
     TyKind vt = comp_ntype(c, v);
     if (vt == TY_POLY) {
       buf_printf(b, "lv_%s %s= sp_poly_to_i(", en, op); emit_expr(c, v, b); buf_puts(b, ");\n");
-    } else {
+    }
+else {
       buf_printf(b, "lv_%s %s= ", en, op); emit_expr(c, v, b); buf_puts(b, ";\n");
     }
     return;
@@ -1885,7 +1888,8 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
               buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
               if (nil_rhs) {
                 buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
-              } else {
+              }
+else {
                 emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
               }
               buf_printf(b, " switch (_t%d.cls_id) {", tv);

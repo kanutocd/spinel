@@ -580,7 +580,8 @@ void register_attr_call(Compiler *c, ClassInfo *cls, int s, int singleton) {
     if (singleton) {
       if (reader) comp_add_sg_reader(cls, base);
       if (writer) comp_add_sg_writer(cls, base);
-    } else {
+    }
+else {
       char ivname[256];
       snprintf(ivname, sizeof ivname, "@%s", base);
       comp_ivar_intern(cls, ivname);
@@ -1273,7 +1274,8 @@ void process_include_body(Compiler *c, int ci, int body_node) {
             walk_scope(c, nb, dst_idx, ci);
             g_inc_did_clone = 1;
           } else dst->body = src->body;
-        } else {
+        }
+else {
           dst->body = src->body;
         }
         dst->class_id = ci;

@@ -370,7 +370,8 @@ sp_PolyArray *sp_str_unpack(const char *str, const char *fmt) {
       size_t take;
       if (count < 0) {
         take = slen - off;
-      } else {
+      }
+else {
         take = (size_t)count;
         if (off + take > slen) take = slen - off;
       }
@@ -383,14 +384,16 @@ sp_PolyArray *sp_str_unpack(const char *str, const char *fmt) {
         sp_ext_poly_array_push_str(out, s);
         off += z;
         if (off < slen && str[off] == 0) off++;
-      } else {
+      }
+else {
         char *s = sp_ext_str_alloc(take);
         memcpy(s, src, take); s[take] = 0;
         size_t real = take;
         if (spec == 'A') {
           while (real > 0 && (s[real - 1] == ' ' || s[real - 1] == 0)) real--;
           s[real] = 0;
-        } else if (spec == 'Z') {
+        }
+else if (spec == 'Z') {
           size_t z = 0;
           while (z < take && s[z]) z++;
           s[z] = 0;
