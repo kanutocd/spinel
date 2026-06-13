@@ -1474,5 +1474,90 @@ void analyze_program(Compiler *c) {
     if (has_reassign_mutate) continue;
     lv->type = TY_STRBUF;
   }
+
+  /* Value-type object detection (Stage 1, conservative). A user class is
+     represented by value (sp_X, no heap/GC) when it is a small, immutable,
+     scalar-only leaf whose instances never need a heap pointer (never boxed,
+     stored, passed, or captured). See reference_legacy_value_type_logic. */
+  for (int i = 0; i < c->nclasses; i++) {
+    ClassInfo *ci = &c->classes[i];
+    if (ci->is_struct) continue;
+    if (ci->def_node < 0) continue;                /* synthetic / Toplevel */
+    if (!ci->name || !strcmp(ci->name, "Toplevel")) continue;
+    if (ci->nivars < 1 || ci->nivars > 8) continue;
+    if (ci->nwriters > 0) continue;
+    if (ci->parent >= 0) continue;                 /* explicit superclass */
+    int scalar = 1;
+    for (int j = 0; j < ci->nivars; j++) {
+      TyKind t = ci->ivar_types[j];
+      if (t != TY_INT && t != TY_FLOAT && t != TY_BOOL) { scalar = 0; break; }
+    }
+    if (!scalar) continue;
+    int has_sub = 0;
+    for (int j = 0; j < c->nclasses; j++)
+      if (c->classes[j].parent == i) { has_sub = 1; break; }
+    if (has_sub) continue;
+    /* Stage 1: only no-arg constructors. Then every `X.new` is 0-arg and can be
+       stack-allocated uniformly, so the (unrooted) instance pointer is always a
+       stack address — never a mix of stack and heap that would break GC rooting. */
+    int initm = comp_method_in_chain(c, i, "initialize", NULL);
+    if (initm >= 0 && c->scopes[initm].nparams > 0) continue;
+    ci->is_value_type = 1;   /* tentative; disqualified below */
+  }
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty) continue;
+    /* immutable check: an ivar write outside `initialize` defeats value type */
+    if (!strcmp(ty, "InstanceVariableWriteNode") ||
+        !strcmp(ty, "InstanceVariableOperatorWriteNode") ||
+        !strcmp(ty, "InstanceVariableTargetNode")) {
+      Scope *s = comp_scope_of(c, id);
+      if (s && s->class_id >= 0 && s->class_id < c->nclasses &&
+          c->classes[s->class_id].is_value_type &&
+          (!s->name || strcmp(s->name, "initialize")))
+        c->classes[s->class_id].is_value_type = 0;
+    }
+    /* unsafe uses that would need a heap pointer / boxing (void* slot) */
+    if (!strcmp(ty, "ArrayNode") || !strcmp(ty, "HashNode") ||
+        !strcmp(ty, "KeywordHashNode")) {
+      int n = 0; const int *els = nt_arr(c->nt, id, "elements", &n);
+      for (int k = 0; k < n; k++) {
+        TyKind et = comp_ntype(c, els[k]);
+        if (ty_is_object(et)) { int q = ty_object_class(et); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+      }
+    }
+    if (!strcmp(ty, "CallNode")) {
+      const char *nm = nt_str(c->nt, id, "name");
+      int recv = nt_ref(c->nt, id, "receiver");
+      if (nm && !strcmp(nm, "method") && recv >= 0) {
+        TyKind rt = comp_ntype(c, recv);
+        if (ty_is_object(rt)) { int q = ty_object_class(rt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+      }
+      int args = nt_ref(c->nt, id, "arguments"); int an = 0;
+      const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+      for (int k = 0; k < an; k++) {
+        TyKind at = comp_ntype(c, av[k]);
+        if (ty_is_object(at)) { int q = ty_object_class(at); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+      }
+    }
+    if (!strcmp(ty, "InstanceVariableWriteNode") || !strcmp(ty, "GlobalVariableWriteNode") ||
+        !strcmp(ty, "ConstantWriteNode")) {
+      int v = nt_ref(c->nt, id, "value");
+      if (v >= 0) { TyKind vt = comp_ntype(c, v); if (ty_is_object(vt)) { int q = ty_object_class(vt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; } }
+    }
+    /* a value-type instance written into a poly-typed local would be boxed */
+    if (!strcmp(ty, "LocalVariableWriteNode")) {
+      int v = nt_ref(c->nt, id, "value");
+      if (v >= 0) {
+        TyKind vt = comp_ntype(c, v);
+        if (ty_is_object(vt)) {
+          const char *vn = nt_str(c->nt, id, "name");
+          Scope *s = comp_scope_of(c, id);
+          LocalVar *lv = (vn && s) ? scope_local(s, vn) : NULL;
+          if (lv && lv->type != vt) { int q = ty_object_class(vt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+        }
+      }
+    }
+  }
 }
 

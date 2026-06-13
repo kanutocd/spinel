@@ -174,7 +174,7 @@ void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
   if (vol && ptr) buf_puts(b, "volatile ");  /* cty ends with "* "; -> "* volatile " */
   buf_printf(b, " lv_%s = %s;\n", lv->name, init);
   if (t == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name);
-  else if (root) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+  else if (root && !comp_ty_value_obj(c, t)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
   free(cty.p);
 }
 
@@ -224,7 +224,7 @@ void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
          RBVAL form so the collector reads the boxed pointer, not the
          struct's first word (the tag). */
       if (lv->type == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name);
-      else if (needs_root(lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+      else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
     }
     else {
       declare_local(c, b, lv, vol);
@@ -1230,7 +1230,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     emit_ctype(c, lv->type, b);
     buf_printf(b, " lv_%s = %s;\n", rn, lv->type == TY_RANGE ? "(sp_Range){0}" : default_value(lv->type));
     if (lv->type == TY_POLY) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT_RBVAL(lv_%s);\n", rn); }
-    else if (needs_root(lv->type)) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT(lv_%s);\n", rn); }
+    else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT(lv_%s);\n", rn); }
   }
 
   const char *ty = nt_type(c->nt, id);

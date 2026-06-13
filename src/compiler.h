@@ -100,6 +100,9 @@ typedef struct {
   int is_struct;       /* defined via Struct.new(:a, :b): readers[] are the
                           positional members; the constructor takes them in
                           order and there is no user `initialize`. */
+  int is_value_type;   /* small immutable scalar-ivar class represented by value
+                          (sp_X, not sp_X *): no heap alloc / GC. Set by
+                          detect_value_types after analysis. */
   /* Prepend shadow chain: when `prepend M` is called on this class,
      M's methods overwrite the active slot; the previous slot is
      renamed to a shadow `__prep_N_<m>`.  The chain maps each name
@@ -266,6 +269,14 @@ static inline TyKind comp_ntype(const Compiler *c, int id) {
      codegen consults the raw scope-local type where the distinction matters. */
   TyKind t = c->ntype[id];
   return t == TY_STRBUF ? TY_STRING : t;
+}
+
+/* 1 iff t is a user-object type whose class is represented by value (sp_X,
+   not a heap pointer). See detect_value_types / reference_legacy_value_type_logic. */
+static inline int comp_ty_value_obj(const Compiler *c, TyKind t) {
+  if (!ty_is_object(t)) return 0;
+  int cid = ty_object_class(t);
+  return cid >= 0 && cid < c->nclasses && c->classes[cid].is_value_type;
 }
 
 #endif

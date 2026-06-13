@@ -1904,6 +1904,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     int has_sub = 0;
     for (int j = 0; cid >= 0 && j < c->nclasses; j++) if (c->classes[j].parent == cid) { has_sub = 1; break; }
     if (cid >= 0 && !has_sub) {
+      if (c->classes[cid].is_value_type) { emit_value_obj_new(c, cid, b); return; }
       buf_printf(b, "sp_%s_new(", c->classes[cid].name);
       for (int a = 0; a < argc; a++) { if (a) buf_puts(b, ", "); emit_expr(c, argv[a], b); }
       buf_puts(b, ")");
@@ -1947,6 +1948,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         return;
       }
       if (!c->classes[ci].is_struct) {
+        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, b); return; }
         buf_printf(b, "sp_%s_new(", c->classes[ci].name);
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
@@ -2021,6 +2023,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_puts(b, ")");
           return;
         }
+        if (c->classes[ci].is_value_type) { emit_value_obj_new(c, ci, b); return; }
         buf_printf(b, "sp_%s_new(", c->classes[ci].name);
         int initm = comp_method_in_chain(c, ci, "initialize", NULL);
         if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
@@ -8060,6 +8063,24 @@ else {
 
 /* Array-mutating calls emitted as statements: a[i]=v, a.push(v), a<<v.
    Returns 1 if handled. */
+/* Construct a value-type object on the stack (no heap alloc / GC). The storage
+   is a block-scoped temp declared in g_pre; the expression yields its address.
+   Safe because value-type instances never escape their enclosing scope (see
+   detect_value_types). Stage 1 handles no-arg constructors only. */
+void emit_value_obj_new(Compiler *c, int ci, Buf *b) {
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_%s _t%d = {0}; _t%d.cls_id = %d;\n",
+             c->classes[ci].name, t, t, ci);
+  int im = comp_method_in_chain(c, ci, "initialize", NULL);
+  if (im >= 0 && c->scopes[im].reachable && !c->scopes[im].yields) {
+    int defcls = ci; comp_method_in_chain(c, ci, "initialize", &defcls);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_%s_initialize(&_t%d);\n", c->classes[defcls].name, t);
+  }
+  buf_printf(b, "&_t%d", t);
+}
+
 int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
