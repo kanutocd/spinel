@@ -16,6 +16,9 @@ typedef enum {
   TY_BIGINT,       /* arbitrary-precision integer (sp_Bigint *) */
   TY_FLOAT,
   TY_STRING,
+  TY_STRBUF,       /* a mutable string (sp_String *); a storage refinement of
+                      TY_STRING used for locals repeatedly appended via `<<`.
+                      Demoted to TY_STRING on read, so it never escapes. */
   TY_SYMBOL,
   TY_BOOL,
   TY_RANGE,

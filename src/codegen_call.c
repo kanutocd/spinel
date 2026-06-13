@@ -8063,6 +8063,50 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   const int *argv = NULL;
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
 
+  /* mutable-string append: a STRBUF-typed local appends in place (amortized
+     O(1)) via sp_String_append. Chains (`s << a << b`) all target the same
+     buffer. recv is emitted raw (the sp_String*), not via emit_expr (which
+     would hand out a copy). */
+  if ((!strcmp(name, "<<") || !strcmp(name, "concat")) && argc == 1) {
+    int chain[64]; int nchain = 0; int cur = id;
+    while (nchain < 64) {
+      while (nt_type(nt, cur) && !strcmp(nt_type(nt, cur), "ParenthesesNode")) {
+        int pb = nt_ref(nt, cur, "body");
+        if (pb < 0) break;
+        int bn = 0; const int *bb = nt_arr(nt, pb, "body", &bn);
+        if (bn != 1) break;
+        cur = bb[0];
+      }
+      const char *cty = nt_type(nt, cur);
+      if (!cty || strcmp(cty, "CallNode")) break;
+      const char *cnm = nt_str(nt, cur, "name");
+      int crecv = nt_ref(nt, cur, "receiver");
+      if (!cnm || (strcmp(cnm, "<<") && strcmp(cnm, "concat")) || crecv < 0) break;
+      int cargs = nt_ref(nt, cur, "arguments");
+      int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
+      if (cac != 1) break;
+      chain[nchain++] = cav[0];
+      cur = crecv;
+    }
+    const char *bty = nt_type(nt, cur);
+    LocalVar *blv = (bty && !strcmp(bty, "LocalVariableReadNode"))
+                    ? scope_local(comp_scope_of(c, cur), nt_str(nt, cur, "name")) : NULL;
+    if (nchain > 0 && blv && blv->type == TY_STRBUF) {
+      const char *bn2 = rename_local(nt_str(nt, cur, "name"));
+      for (int j = nchain - 1; j >= 0; j--) {
+        int arg = chain[j];
+        TyKind at = comp_ntype(c, arg);
+        emit_indent(b, indent);
+        buf_printf(b, "sp_String_append(lv_%s, ", bn2);
+        if (at == TY_INT) { buf_puts(b, "sp_int_codepoint_to_str("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+        else if (at == TY_POLY) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+        else emit_expr(c, arg, b);
+        buf_puts(b, ");\n");
+      }
+      return 1;
+    }
+  }
+
   /* string append: s << x  ->  s = sp_str_concat(s, x) (value semantics).
      recv must be an assignable lvalue (local or ivar). A chained append
      `s << a << b << c` bottoms out at the same lvalue, so unroll it into

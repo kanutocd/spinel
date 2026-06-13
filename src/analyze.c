@@ -1415,5 +1415,64 @@ void analyze_program(Compiler *c) {
     for (int k2 = 0; k2 < bn2; k2++) infer_type(c, bb2[k2]);
     an_ie_class_id = saved2;
   }
+
+  /* Promote `<<`-appended string locals to mutable strings (TY_STRBUF) so the
+     append is amortized O(1) instead of an O(n) copy-concat (which makes a
+     build-in-a-loop O(n^2)). This is a storage-only refinement: comp_ntype
+     demotes it to TY_STRING, and every read hands out an immutable copy, so a
+     STRBUF never escapes its sp_String wrapper. Parameters are excluded (their
+     type is part of the function signature). Runs last, after the node-type
+     cache is finalized, so reads keep their TY_STRING cache entry. */
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *nm = nt_str(c->nt, id, "name");
+    if (!nm || strcmp(nm, "<<")) continue;
+    int recv = nt_ref(c->nt, id, "receiver");
+    if (recv < 0 || !nt_type(c->nt, recv) ||
+        strcmp(nt_type(c->nt, recv), "LocalVariableReadNode")) continue;
+    if (c->ntype[recv] != TY_STRING) continue;   /* string append only */
+    const char *vn = nt_str(c->nt, recv, "name");
+    Scope *s = vn ? comp_scope_of(c, recv) : NULL;
+    LocalVar *lv = s ? scope_local(s, vn) : NULL;
+    if (!lv || lv->is_param || lv->type != TY_STRING) continue;
+    /* Only promote when every write to this local is a bare string literal:
+       such a value is a fresh mutable string. A `.freeze`/`.dup`/method-result
+       write may carry runtime frozen state that sp_String_new would discard,
+       so `<<` would fail to raise FrozenError. Conservative but sound. */
+    int all_literal_writes = 1, saw_write = 0;
+    for (int w = 0; w < c->nt->count; w++) {
+      const char *wty = nt_type(c->nt, w);
+      if (!wty || strcmp(wty, "LocalVariableWriteNode")) continue;
+      const char *wn = nt_str(c->nt, w, "name");
+      if (!wn || strcmp(wn, vn) || comp_scope_of(c, w) != s) continue;
+      saw_write = 1;
+      int wv = nt_ref(c->nt, w, "value");
+      const char *wvty = wv >= 0 ? nt_type(c->nt, wv) : NULL;
+      if (!wvty || strcmp(wvty, "StringNode")) { all_literal_writes = 0; break; }
+    }
+    if (!saw_write || !all_literal_writes) continue;
+    /* Exclude vars used with a reassigning string mutator (replace/prepend/
+       insert/clear or a bang method): codegen emits those as `recv = ...`,
+       which needs a plain lvalue, not the copy a STRBUF read produces. */
+    int has_reassign_mutate = 0;
+    for (int u = 0; u < c->nt->count && !has_reassign_mutate; u++) {
+      const char *uty = nt_type(c->nt, u);
+      if (!uty || strcmp(uty, "CallNode")) continue;
+      int urecv = nt_ref(c->nt, u, "receiver");
+      if (urecv < 0 || !nt_type(c->nt, urecv) ||
+          strcmp(nt_type(c->nt, urecv), "LocalVariableReadNode")) continue;
+      const char *urn = nt_str(c->nt, urecv, "name");
+      if (!urn || strcmp(urn, vn) || comp_scope_of(c, urecv) != s) continue;
+      const char *un = nt_str(c->nt, u, "name");
+      if (!un) continue;
+      size_t ul = strlen(un);
+      if (!strcmp(un, "replace") || !strcmp(un, "prepend") || !strcmp(un, "insert") ||
+          !strcmp(un, "clear") || (ul > 0 && un[ul - 1] == '!'))
+        has_reassign_mutate = 1;
+    }
+    if (has_reassign_mutate) continue;
+    lv->type = TY_STRBUF;
+  }
 }
 

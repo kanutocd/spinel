@@ -10,6 +10,7 @@ const char *ty_name(TyKind t) {
     case TY_BIGINT:  return "bigint";
     case TY_FLOAT:   return "float";
     case TY_STRING:  return "string";
+    case TY_STRBUF:  return "strbuf";
     case TY_SYMBOL:  return "symbol";
     case TY_BOOL:    return "bool";
     case TY_RANGE:   return "range";

@@ -268,6 +268,15 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (g_dm_subst_name && lrn && !strcmp(lrn, g_dm_subst_name) && g_dm_subst_node >= 0) {
       emit_expr(c, g_dm_subst_node, b); return;
     }
+    LocalVar *slv = lrn ? scope_local(comp_scope_of(c, id), lrn) : NULL;
+    if (slv && slv->type == TY_STRBUF) {
+      /* A mutable-string local read yields an independent GC string copy: its
+         sp_String buffer is not itself a GC object, so a bare cstr pointer
+         would dangle once the wrapper is unreachable (e.g. after `return`).
+         Transient append/length use the raw sp_String via dedicated paths. */
+      buf_printf(b, "sp_str_concat(sp_String_cstr(lv_%s), (&(\"\\xff\")[1]))", rename_local(lrn));
+      return;
+    }
     emit_local_ref(c, id, lrn, b); return;
   }
   if (!strcmp(ty, "LocalVariableWriteNode")) {

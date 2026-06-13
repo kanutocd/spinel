@@ -322,6 +322,7 @@ const char *c_type_name(TyKind t) {
     case TY_MATCHDATA:   return "sp_MatchData *";
     case TY_REGEX:       return "mrb_regexp_pattern *";
     case TY_EXCEPTION:   return "sp_Exception *";
+    case TY_STRBUF:      return "sp_String *";
     case TY_INT_ARRAY:   return "sp_IntArray *";
     case TY_FLOAT_ARRAY: return "sp_FloatArray *";
     case TY_STR_ARRAY:   return "sp_StrArray *";
@@ -348,6 +349,7 @@ int is_scalar_ret(TyKind t) {
   return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
          t == TY_SYMBOL || t == TY_RANGE || t == TY_TIME || t == TY_COMPLEX || t == TY_RATIONAL || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_MATCHDATA || t == TY_REGEX || t == TY_EXCEPTION ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
+         t == TY_STRBUF ||
          t == TY_POLY || t == TY_POLY_ARRAY || t == TY_PROC || t == TY_CURRY || t == TY_FIBER || t == TY_RANDOM || t == TY_METHOD || t == TY_IO || t == TY_CLASS ||
          ty_is_hash(t) || ty_is_object(t);
 }
@@ -389,6 +391,7 @@ const char *default_value(TyKind t) {
     case TY_MATCHDATA:  return "NULL";
     case TY_REGEX:      return "NULL";
     case TY_EXCEPTION: return "NULL";
+    case TY_STRBUF:    return "NULL";
     case TY_INT_ARRAY:
     case TY_FLOAT_ARRAY:
     case TY_STR_ARRAY:

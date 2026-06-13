@@ -261,7 +261,11 @@ const char *comp_resolve_alias(Compiler *c, int class_id, const char *name);
 /* Node type cache. */
 static inline TyKind comp_ntype(const Compiler *c, int id) {
   if (id < 0 || id >= c->nt->count) return TY_UNKNOWN;
-  return c->ntype[id];
+  /* TY_STRBUF is a codegen-only storage refinement (mutable sp_String for a
+     `<<`-appended local). All type-directed logic treats it as a string;
+     codegen consults the raw scope-local type where the distinction matters. */
+  TyKind t = c->ntype[id];
+  return t == TY_STRBUF ? TY_STRING : t;
 }
 
 #endif

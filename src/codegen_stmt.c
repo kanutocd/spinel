@@ -423,6 +423,11 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
     else buf_puts(b, default_value(lv->type));
   }
+  else if (lv && lv->type == TY_STRBUF) {
+    /* a mutable-string local: wrap the (const char*) RHS in a fresh sp_String
+       so later `<<` appends are amortized O(1). */
+    buf_puts(b, "sp_String_new("); emit_expr(c, v, b); buf_puts(b, ")");
+  }
   else if (is_empty_array && lv && array_kind(lv->type)) {
     /* `a = []` -> a new array of the variable's resolved element type */
     buf_printf(b, "sp_%sArray_new()", array_kind(lv->type));
@@ -3399,7 +3404,7 @@ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-int needs_root(TyKind t) { return t == TY_STRING || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD || t == TY_IO || t == TY_FIBER || t == TY_RANDOM || t == TY_MATCHDATA; }
+int needs_root(TyKind t) { return t == TY_STRING || t == TY_STRBUF || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD || t == TY_IO || t == TY_FIBER || t == TY_RANDOM || t == TY_MATCHDATA; }
 
 /* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
    passed through unboxed (double-boxing is a classic silent-corruption bug). */
