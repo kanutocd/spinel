@@ -1497,7 +1497,12 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
   }
   else if (n > 0) {
     buf_puts(b, "return ");
-    if (g_ret_type == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
+    TyKind r0 = comp_ntype(c, a[0]);
+    if (g_ret_type == TY_POLY && r0 != TY_POLY) emit_boxed(c, a[0], b);
+    /* a poly return value feeding a scalar return slot (e.g. a method(:sym)
+       target pinned to mrb_int that returns a poly @ivar) needs coercing. */
+    else if (g_ret_type == TY_INT && r0 == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, a[0], b); buf_puts(b, ")"); }
+    else if (g_ret_type == TY_FLOAT && r0 == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, a[0], b); buf_puts(b, ")"); }
     else emit_expr(c, a[0], b);
     buf_puts(b, ";\n");
   }
@@ -3313,6 +3318,10 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   emit_tail_lead(b);
   int want_poly = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
   if (want_poly && comp_ntype(c, id) != TY_POLY) emit_boxed(c, id, b);
+  /* a poly tail value feeding a scalar return slot (e.g. a method(:sym) target
+     pinned to mrb_int returning a poly @ivar) needs coercing. */
+  else if (!g_result_var && g_ret_type == TY_INT && comp_ntype(c, id) == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, id, b); buf_puts(b, ")"); }
+  else if (!g_result_var && g_ret_type == TY_FLOAT && comp_ntype(c, id) == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, id, b); buf_puts(b, ")"); }
   else emit_expr(c, id, b);
   buf_puts(b, ";\n");
 }

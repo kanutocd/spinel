@@ -1260,13 +1260,7 @@ void analyze_program(Compiler *c) {
      entry typed here flows into `@pads[0].poke(data)` -> Pad#poke). */
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
-    if (!sc->reachable || sc->nparams == 0 || !sc->name) continue;
-    int has_unknown = 0;
-    for (int i = 0; i < sc->nparams; i++) {
-      LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
-      if (p && p->type == TY_UNKNOWN) { has_unknown = 1; break; }
-    }
-    if (!has_unknown) continue;
+    if (!sc->reachable || !sc->name) continue;
     int taken = 0;
     for (int id = 0; id < c->nt->count && !taken; id++) {
       const char *nty = nt_type(c->nt, id);
@@ -1277,11 +1271,18 @@ void analyze_program(Compiler *c) {
       if (msym && !strcmp(msym, sc->name)) taken = 1;
     }
     if (taken) {
+      /* The bound-Method ABI is `mrb_int (*)(void *, mrb_int...)`: the dispatch
+         site (sp_poly_arr_get_hash / sp_poly_slice) reads the return as mrb_int
+         and passes int args. So a method(:sym) target MUST return int and take
+         int params -- a poly return (e.g. PPU#peek_2002 returning the poly
+         @io_latch) would be misread as a struct through the int cast and yield
+         garbage. Pin unknown params to int and a poly/unknown return to int
+         (codegen coerces the body's poly return via sp_poly_to_i). */
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
         if (p && p->type == TY_UNKNOWN) p->type = TY_INT;
       }
-      if (sc->ret == TY_UNKNOWN) sc->ret = TY_INT;
+      if (sc->ret == TY_UNKNOWN || sc->ret == TY_POLY) sc->ret = TY_INT;
     }
   }
 
