@@ -1137,6 +1137,45 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
     buf_puts(b, ";\n");
   }
 
+  /* Fast path: `case <int/poly> when <integer literals>` lowers to a C switch
+     (jump table) instead of an O(n) sp_poly_eq / int-compare if-chain. This is
+     the optcarrot CPU opcode dispatch (~256 whens); the poly if-chain made
+     sp_poly_eq ~50% of runtime. */
+  if (pred >= 0 && (pt == TY_POLY || pt == TY_INT) && nw > 0) {
+    int all_int = 1;
+    for (int w = 0; w < nw && all_int; w++) {
+      int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+      if (wc == 0) { all_int = 0; break; }
+      for (int j = 0; j < wc; j++) {
+        const char *cty = nt_type(nt, conds[j]);
+        if (!cty || strcmp(cty, "IntegerNode")) { all_int = 0; break; }
+      }
+    }
+    if (all_int) {
+      emit_indent(b, indent);
+      if (pt == TY_POLY) buf_printf(b, "switch (sp_poly_to_i(_t%d)) {\n", t);
+      else buf_printf(b, "switch (_t%d) {\n", t);
+      for (int w = 0; w < nw; w++) {
+        int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+        for (int j = 0; j < wc; j++) {
+          emit_indent(b, indent);
+          buf_printf(b, "case %lldLL:\n", (long long)nt_int(nt, conds[j], "value", 0));
+        }
+        emit_indent(b, indent); buf_puts(b, "{\n");
+        emit_stmts(c, nt_ref(nt, whens[w], "statements"), b, indent + 1);
+        emit_indent(b, indent + 1); buf_puts(b, "break;\n");
+        emit_indent(b, indent); buf_puts(b, "}\n");
+      }
+      if (else_clause >= 0) {
+        emit_indent(b, indent); buf_puts(b, "default: {\n");
+        emit_stmts(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
+        emit_indent(b, indent); buf_puts(b, "}\n");
+      }
+      emit_indent(b, indent); buf_puts(b, "}\n");
+      return;
+    }
+  }
+
   for (int w = 0; w < nw; w++) {
     int wn = whens[w];
     int wc = 0;
