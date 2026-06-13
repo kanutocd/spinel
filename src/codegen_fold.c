@@ -2298,6 +2298,51 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       break;
     }
   }
+  /* GC hazard: with several positional args, evaluating arg N+1 can trigger
+     a collection while arg N's freshly built object sits in an unrooted C
+     temporary (Node.new(make_tree(d), make_tree(d)) loses the first subtree).
+     Pre-evaluate heap-typed args into rooted temps, left to right, whenever
+     a LATER argument's evaluation may allocate; emit_expr then substitutes
+     the temp via g_argov. Plain positional calls only — the splat/kwarg
+     machinery has its own evaluation order. */
+  int argov_saved = g_n_argov;
+  if (splat_idx < 0 && kwh < 0 && pos_argc >= 2 && argv) {
+    for (int k = 0; k < pos_argc && k < m->nparams; k++) {
+      if (g_n_argov >= MAX_ARG_OVERRIDE) break;
+      TyKind at = comp_ntype(c, argv[k]);
+      if (at != TY_POLY && !needs_root(at)) continue;
+      const char *aty = nt_type(nt, argv[k]);
+      /* a bare read is already rooted where it lives */
+      if (aty && (!strcmp(aty, "LocalVariableReadNode") ||
+                  !strcmp(aty, "InstanceVariableReadNode") ||
+                  !strcmp(aty, "ConstantReadNode") ||
+                  !strcmp(aty, "SelfNode") || !strcmp(aty, "NilNode") ||
+                  !strcmp(aty, "StringNode"))) continue;
+      int later_alloc = 0;
+      for (int j = k + 1; j < pos_argc && !later_alloc; j++)
+        later_alloc = subtree_may_allocate(nt, argv[j]);
+      if (!later_alloc) continue;
+      int ht = ++g_tmp;
+      /* Evaluate into a side buffer first: the expression may push its own
+         setup into g_pre, which must be fully flushed before this temp's
+         declaration line is written. */
+      Buf hb; memset(&hb, 0, sizeof hb);
+      emit_expr(c, argv[k], &hb);
+      emit_indent(g_pre, g_indent);
+      if (at == TY_POLY) {
+        buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
+                   ht, hb.p ? hb.p : "sp_box_nil()", ht);
+      } else {
+        emit_ctype(c, at, g_pre);
+        buf_printf(g_pre, " _t%d = %s; SP_GC_ROOT(_t%d);\n",
+                   ht, hb.p ? hb.p : "0", ht);
+      }
+      free(hb.p);
+      g_argov_node[g_n_argov] = argv[k];
+      snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ht);
+      g_n_argov++;
+    }
+  }
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
     if (m->rest_idx >= 0 && i == m->rest_idx) {
@@ -2397,6 +2442,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       }
     }
   }
+  g_n_argov = argov_saved;  /* drop this call's hoisted-arg overrides */
 }
 
 int is_descendant(Compiler *c, int k, int anc) {
@@ -2476,10 +2522,15 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       emit_arg_or_default(c, m, k, provided, &ab);
       g_self = saved_self;
       g_emitting_class_id = saved_emcls2;
+      TyKind att = p ? p->type : comp_ntype(c, k < argc ? argv[k] : -1);
       emit_indent(g_pre, g_indent);
-      emit_ctype(c, p ? p->type : comp_ntype(c, k < argc ? argv[k] : -1), g_pre);
+      emit_ctype(c, att, g_pre);
       buf_printf(g_pre, " _t%d = ", atmp[k]);
       buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
+      /* Root heap-typed arg temps: evaluating a later argument may allocate
+         and collect an earlier one still sitting in its temp. */
+      if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
+      else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
     }
     free(ab.p);
   }

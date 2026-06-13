@@ -2540,6 +2540,10 @@ void emit_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_File *_t%d = sp_File_open(", tf); emit_expr(c, argv[0], b); buf_puts(b, ", ");
       if (argc >= 2) emit_expr(c, argv[1], b); else buf_puts(b, "\"r\"");
       buf_puts(b, "); ");
+      /* Root the handle for the block's duration: the body may allocate and
+         trigger a GC, and an unrooted sp_File would be swept (its finalizer
+         fcloses mid-iteration, silently truncating each_line loops). */
+      buf_printf(b, "SP_GC_ROOT(_t%d); ", tf);
       if (frn) {
         /* Declare the file param as a local: look it up in the enclosing scope.
            Since it's the block param, just use the sp_File * type directly. */
@@ -4473,6 +4477,10 @@ void emit_call(Compiler *c, int id, Buf *b) {
         emit_ctype(c, rt, g_pre);
         buf_printf(g_pre, " _t%d = ", t);
         buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+        /* Root the hoisted receiver: a freshly constructed object (e.g.
+           Scene.new.render(...)) must survive any GC the call triggers. */
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
         snprintf(selfptr, sizeof selfptr, "_t%d", t);
       }
       emit_dispatch(c, cid, name, selfptr, nt_ref(nt, id, "arguments"), nt_ref(nt, id, "block"), b);

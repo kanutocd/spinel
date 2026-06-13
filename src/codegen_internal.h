@@ -42,6 +42,13 @@ extern char g_ren_from[MAX_RENAME][96];
 extern char g_ren_to[MAX_RENAME][112];
 extern int  g_nren;
 extern int  g_block_id;
+/* Argument-hoist overrides (see emit_args_filled): node id -> rooted temp
+   name substituted by emit_expr. */
+#define MAX_ARG_OVERRIDE 64
+extern int  g_argov_node[MAX_ARG_OVERRIDE];
+extern char g_argov_text[MAX_ARG_OVERRIDE][16];
+extern int  g_n_argov;
+int subtree_may_allocate(const NodeTable *nt, int id);
 /* When a yielding method is inlined, g_yield_block_fallback holds the block
    that was active in the CALLER's context so nested `yield`s inside the
    passed block can chain back to the outermost caller's block. */

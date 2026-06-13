@@ -199,7 +199,11 @@ void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
       continue;
     }
     if (lv->is_param) {
-      if (needs_root(lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+      /* A poly param is an sp_RbVal by value: root through the tagged
+         RBVAL form so the collector reads the boxed pointer, not the
+         struct's first word (the tag). */
+      if (lv->type == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name);
+      else if (needs_root(lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
     }
     else {
       declare_local(c, b, lv, vol);
@@ -1007,13 +1011,15 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
 /* A class needs a GC scan iff any ivar holds a heap reference. */
 int class_needs_scan(ClassInfo *ci) {
   for (int i = 0; i < ci->nivars; i++) {
-    TyKind t = ci->ivar_types[i];
-    if (t == TY_STRING || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t)) return 1;
+    if (needs_root(ci->ivar_types[i])) return 1;
   }
   return 0;
 }
 
-/* Emit the GC scan function (marks heap ivars) for a class that needs one. */
+/* Emit the GC scan function (marks heap ivars) for a class that needs one.
+   Covers the same type set as needs_root: a heap reference reachable only
+   through an unscanned ivar would be swept out from under the object
+   (poly ivars holding tree children were the canonical case). */
 void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
   (void)c;
   if (!class_needs_scan(ci)) return;
@@ -1023,8 +1029,9 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
     TyKind t = ci->ivar_types[i];
     const char *iv = ci->ivars[i] + 1;
     if (t == TY_STRING) buf_printf(b, "  sp_mark_string(o->iv_%s);\n", iv);
-    else if (ty_is_array(t) || ty_is_hash(t) || ty_is_object(t))
-      buf_printf(b, "  if (o->iv_%s) sp_gc_mark(o->iv_%s);\n", iv, iv);
+    else if (t == TY_POLY) buf_printf(b, "  sp_mark_rbval(o->iv_%s);\n", iv);
+    else if (needs_root(t))
+      buf_printf(b, "  if (o->iv_%s) sp_gc_mark((void *)o->iv_%s);\n", iv, iv);
   }
   buf_puts(b, "}\n");
 }
@@ -1145,7 +1152,8 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     emit_indent(b, din);
     emit_ctype(c, lv->type, b);
     buf_printf(b, " lv_%s = %s;\n", rn, lv->type == TY_RANGE ? "(sp_Range){0}" : default_value(lv->type));
-    if (needs_root(lv->type)) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT(lv_%s);\n", rn); }
+    if (lv->type == TY_POLY) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT_RBVAL(lv_%s);\n", rn); }
+    else if (needs_root(lv->type)) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT(lv_%s);\n", rn); }
   }
 
   const char *ty = nt_type(c->nt, id);

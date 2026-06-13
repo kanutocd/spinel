@@ -3196,7 +3196,7 @@ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-int needs_root(TyKind t) { return t == TY_STRING || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD; }
+int needs_root(TyKind t) { return t == TY_STRING || t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD || t == TY_IO || t == TY_FIBER || t == TY_RANDOM || t == TY_MATCHDATA; }
 
 /* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
    passed through unboxed (double-boxing is a classic silent-corruption bug). */

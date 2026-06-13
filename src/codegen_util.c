@@ -26,6 +26,35 @@ void buf_printf(Buf *b, const char *fmt, ...) {
   buf_putn(b, big, (size_t)n); free(big);
 }
 int  g_indent = 0;
+/* Argument-hoist overrides: emit_args_filled pre-evaluates GC-hazardous
+   call arguments into rooted temps; emit_expr then substitutes the temp
+   name when it reaches the overridden node. */
+int  g_argov_node[MAX_ARG_OVERRIDE];
+char g_argov_text[MAX_ARG_OVERRIDE][16];
+int  g_n_argov = 0;
+/* True if evaluating the subtree at `id` may allocate (and so may trigger
+   a GC): any call, container literal, or string interpolation qualifies. */
+int subtree_may_allocate(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  if (!strcmp(ty, "CallNode") || !strcmp(ty, "ArrayNode") ||
+      !strcmp(ty, "HashNode") || !strcmp(ty, "KeywordHashNode") ||
+      !strcmp(ty, "InterpolatedStringNode") || !strcmp(ty, "SuperNode") ||
+      !strcmp(ty, "ForwardingSuperNode") || !strcmp(ty, "YieldNode"))
+    return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_may_allocate(nt, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_may_allocate(nt, ids[j])) return 1;
+  }
+  return 0;
+}
 int  g_tmp = 0;
 char g_ren_from[MAX_RENAME][96];
 char g_ren_to[MAX_RENAME][112];

@@ -154,6 +154,10 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   const char *ty = nt_type(nt, id);
   if (!ty) unsupported(c, id, "expression (no type)");
 
+  /* Hoisted call argument: substitute the rooted temp (see emit_args_filled). */
+  for (int i = g_n_argov - 1; i >= 0; i--)
+    if (g_argov_node[i] == id) { buf_puts(b, g_argov_text[i]); return; }
+
   if (!strcmp(ty, "IntegerNode")) { buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return; }
   if (!strcmp(ty, "FloatNode")) { const char *v = nt_content(nt, id); buf_puts(b, v ? v : "0.0"); return; }
   if (!strcmp(ty, "ImaginaryNode")) {
