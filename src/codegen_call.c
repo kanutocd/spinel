@@ -3827,8 +3827,11 @@ else {
   /* poly receiver: [] with symbol or string key -> runtime dispatch */
   /* poly receiver: arr[start, len] -> sp_poly_slice (string or typed array) */
   if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 2) {
+    /* The runtime dispatches on the receiver's tag: a string/array does a
+       two-arg slice, a bound Method (optcarrot's poke handlers) is called with
+       both int args. Both operands are raw integers. */
     buf_puts(b, "sp_poly_slice("); emit_expr(c, recv, b); buf_puts(b, ", ");
-    emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+    emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
     return;
   }
   if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 1) {

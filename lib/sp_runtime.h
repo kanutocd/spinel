@@ -3377,9 +3377,16 @@ static sp_RbVal sp_poly_arr_get(sp_RbVal a, mrb_int i) {
 static void sp_PolyArray_set(sp_PolyArray *a, mrb_int i, sp_RbVal v) { if (!a) return; if (a->frozen) { sp_raise_frozen_array(); return; } mrb_int orig=i; if (i < 0) i += a->len; if (i < 0) sp_raise_cls("IndexError", sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len)); if (i >= a->len) return; a->data[i] = v; }
 static sp_PolyArray *sp_PolyArray_slice(sp_PolyArray *a, mrb_int start, mrb_int len) { if (start < 0) start += a->len; if (start < 0) start = 0; sp_PolyArray *b = sp_PolyArray_new(); if (start >= a->len || len <= 0) return b; if (start + len > a->len) len = a->len - start; for (mrb_int i = 0; i < len; i++) sp_PolyArray_push(b, a->data[start + i]); return b; }
 /* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
+typedef struct sp_BoundMethod { void *self; mrb_int fn; const char *name; } sp_BoundMethod;
 static sp_RbVal sp_poly_slice(sp_RbVal a, mrb_int start, mrb_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* bm[a, b]: a boxed bound Method called with two int arguments (optcarrot's
+     store dispatch table: `@store[addr][addr, value]`). */
+  if (a.cls_id == SP_BUILTIN_METHOD) {
+    sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
+    return sp_box_int(((mrb_int (*)(void *, mrb_int, mrb_int))(uintptr_t)m->fn)((void *)m->self, start, len));
+  }
   switch (a.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  return sp_box_int_array(sp_IntArray_slice((sp_IntArray*)a.v.p, start, len));
     case SP_BUILTIN_FLT_ARRAY:  return sp_box_float_array(sp_FloatArray_slice((sp_FloatArray*)a.v.p, start, len));
@@ -3971,7 +3978,6 @@ typedef mrb_int  (*sp_obj_hash_fn)(int cls_id, void *p);
 typedef mrb_bool (*sp_obj_eql_fn)(int cls_id, void *a, void *b);
 static sp_obj_hash_fn sp_obj_hash_hook = NULL;
 static sp_obj_eql_fn  sp_obj_eql_hook  = NULL;
-typedef struct sp_BoundMethod { void *self; mrb_int fn; const char *name; } sp_BoundMethod;
 static mrb_int sp_rbval_hash_key(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT: case SP_TAG_BOOL: case SP_TAG_NIL: case SP_TAG_SYM:
