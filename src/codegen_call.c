@@ -2289,8 +2289,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
   /* GC module methods */
   if (recv >= 0 && nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "GC")) {
-    if (!strcmp(name, "start") && argc == 0) { buf_puts(b, "0LL"); return; }
-    if (!strcmp(name, "compact") && argc == 0) { buf_puts(b, "0LL"); return; }
+    if (!strcmp(name, "start") && argc == 0) { buf_puts(b, "(sp_gc_collect(), (mrb_int)0)"); return; }
+    if (!strcmp(name, "compact") && argc == 0) { buf_puts(b, "(sp_gc_collect(), (mrb_int)0)"); return; }
     if (!strcmp(name, "stat") && argc == 0) { buf_puts(b, "sp_gc_stat()"); return; }
   }
 
@@ -3379,9 +3379,22 @@ void emit_call(Compiler *c, int id, Buf *b) {
 
   if (recv >= 0 && argc == 1 && int_arith_fn(name) && !ty_is_object(rt) && !ty_is_array(rt)) {
     if (rt == TY_STRING && !strcmp(name, "+")) {
-      buf_puts(b, "sp_str_concat(");
-      emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
-      buf_puts(b, ")");
+      /* Root both operands when either may allocate: `a + b` evaluates both,
+         and a fresh heap string from one can be swept while the other
+         allocates or forces a GC (chained `a + b + c` with side-effecting
+         operands — concat_chain_operand_gc_root). Recurses naturally: a
+         chain's left operand is itself a `+` and gets its own rooted block.
+         Pure literal / bare-read operands need no rooting. */
+      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0])) {
+        int ta = ++g_tmp, tb = ++g_tmp;
+        buf_printf(b, "({ const char *_t%d = ", ta); emit_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb); emit_expr(c, argv[0], b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); sp_str_concat(_t%d, _t%d); })", tb, ta, tb);
+      } else {
+        buf_puts(b, "sp_str_concat(");
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
+      }
       return;
     }
     if (rt == TY_STRING && !strcmp(name, "*")) {

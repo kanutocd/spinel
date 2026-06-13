@@ -6,6 +6,7 @@ void emit_interp(Compiler *c, int id, Buf *b) {
   const int *parts = nt_arr(nt, id, "parts", &n);
   Buf fmt; memset(&fmt, 0, sizeof fmt);
   Buf argbuf; memset(&argbuf, 0, sizeof argbuf);
+  Buf decls; memset(&decls, 0, sizeof decls);  /* rooted %s-arg temp decls */
   int nargs = 0;
 
   for (int k = 0; k < n; k++) {
@@ -48,79 +49,98 @@ void emit_interp(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, " _t%d = ", tv); emit_local_ref(c, expr, vn, g_pre); buf_puts(g_pre, ";\n");
         snprintf(vexpr, sizeof vexpr, "_t%d", tv);
       }
-      #define EMIT_IV() do { if (vexpr[0]) buf_puts(&argbuf, vexpr); else emit_expr(c, expr, &argbuf); } while (0)
-      buf_puts(&argbuf, ", ");
+      /* Build this part's conversion into its own buffer; a %s arg that
+         allocates a fresh string (sp_poly_to_s / sp_*_to_s / *_inspect …)
+         is then hoisted into a rooted temp so a sibling arg's allocation
+         (or sp_sprintf's own) cannot free it mid-call. */
+      Buf conv; memset(&conv, 0, sizeof conv);
+      int is_str_arg = 1;
+      #define EMIT_IV() do { if (vexpr[0]) buf_puts(&conv, vexpr); else emit_expr(c, expr, &conv); } while (0)
       if (t == TY_INT) {
-        buf_puts(&fmt, "%lld"); buf_puts(&argbuf, "(long long)");
+        is_str_arg = 0;  /* a plain long long value: nothing to root */
+        buf_puts(&fmt, "%lld"); buf_puts(&conv, "(long long)");
         EMIT_IV();
       }
       else if (t == TY_STRING) {
         /* a nullable string (NULL) interpolates as the empty string */
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "("); EMIT_IV(); buf_puts(&argbuf, " ?: \"\")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "("); EMIT_IV(); buf_puts(&conv, " ?: \"\")");
       }
       else if (t == TY_FLOAT) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_float_to_s(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_float_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_BOOL) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "(");
-        EMIT_IV(); buf_puts(&argbuf, " ? \"true\" : \"false\")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "(");
+        EMIT_IV(); buf_puts(&conv, " ? \"true\" : \"false\")");
       }
       else if (t == TY_SYMBOL) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_sym_to_s(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_sym_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_POLY) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_poly_to_s(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_poly_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_EXCEPTION) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_exc_message(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_exc_message(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_NIL) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "((void)(");
-        EMIT_IV(); buf_puts(&argbuf, "), \"\")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "((void)(");
+        EMIT_IV(); buf_puts(&conv, "), \"\")");
       }
       else if (t == TY_POLY_ARRAY) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_PolyArray_inspect(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_PolyArray_inspect(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (ty_is_array(t) && array_kind(t)) {
-        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sArray_inspect(", array_kind(t));
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_printf(&conv, "sp_%sArray_inspect(", array_kind(t));
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (ty_is_object(t) && comp_method_in_chain(c, ty_object_class(t), "to_s", NULL) >= 0) {
-        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%s_to_s(", c->classes[ty_object_class(t)].name);
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_printf(&conv, "sp_%s_to_s(", c->classes[ty_object_class(t)].name);
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (ty_is_hash(t) && ty_hash_cname(t)) {
-        buf_puts(&fmt, "%s"); buf_printf(&argbuf, "sp_%sHash_inspect(", ty_hash_cname(t));
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_printf(&conv, "sp_%sHash_inspect(", ty_hash_cname(t));
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (t == TY_CLASS) {
-        buf_puts(&fmt, "%s"); buf_puts(&argbuf, "sp_class_to_s(");
-        EMIT_IV(); buf_puts(&argbuf, ")");
+        buf_puts(&fmt, "%s"); buf_puts(&conv, "sp_class_to_s(");
+        EMIT_IV(); buf_puts(&conv, ")");
       }
       else if (ty_is_object(t)) {
         /* user object without to_s: fall back to poly_to_s of boxed value */
         int cid2 = ty_object_class(t);
         buf_puts(&fmt, "%s");
-        buf_printf(&argbuf, "sp_poly_to_s(sp_box_obj(");
-        EMIT_IV(); buf_printf(&argbuf, ", %d))", cid2);
+        buf_printf(&conv, "sp_poly_to_s(sp_box_obj(");
+        EMIT_IV(); buf_printf(&conv, ", %d))", cid2);
       }
       else if (t == TY_UNKNOWN && ety && !strcmp(ety, "ArrayNode") &&
                (nt_arr(nt, expr, "elements", (int[]){0}), 1)) {
         /* a bare empty array literal interpolates as "[]" */
         int en = 0; nt_arr(nt, expr, "elements", &en);
-        if (en == 0) { buf_puts(&fmt, "%s"); buf_puts(&argbuf, "\"[]\""); }
-        else { free(fmt.p); free(argbuf.p); unsupported(c, pid, "interpolation value"); }
+        if (en == 0) { buf_puts(&fmt, "%s"); buf_puts(&conv, "\"[]\""); }
+        else { free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p); unsupported(c, pid, "interpolation value"); }
       }
       else {
-        free(fmt.p); free(argbuf.p);
+        free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p);
         unsupported(c, pid, "interpolation value");
       }
       #undef EMIT_IV
+      /* Hoist a %s arg's (possibly freshly-allocated) string into a rooted
+         temp. Collected into `decls` and emitted as a leading sequence of a
+         statement-expression below — NOT into g_pre, since emit_interp may
+         run while g_pre holds a half-written enclosing statement. */
+      if (is_str_arg) {
+        int tv = ++g_tmp;
+        buf_printf(&decls, "const char *_t%d = %s; SP_GC_ROOT(_t%d); ",
+                   tv, conv.p ? conv.p : "\"\"", tv);
+        buf_printf(&argbuf, ", _t%d", tv);
+      } else {
+        buf_printf(&argbuf, ", %s", conv.p ? conv.p : "0");
+      }
+      free(conv.p);
       nargs++;
     }
     else {
@@ -137,14 +157,18 @@ void emit_interp(Compiler *c, int id, Buf *b) {
     }
     buf_puts(b, "\")[1])");
   }
-  else {
-    buf_puts(b, "sp_sprintf(\"");
-    buf_puts(b, fmt.p ? fmt.p : "");
-    buf_puts(b, "\"");
-    buf_puts(b, argbuf.p ? argbuf.p : "");
-    buf_puts(b, ")");
+  else if (!decls.p) {
+    /* all args are plain int values — no rooting needed, emit directly */
+    buf_printf(b, "sp_sprintf(\"%s\"%s)", fmt.p ? fmt.p : "", argbuf.p ? argbuf.p : "");
   }
-  free(fmt.p); free(argbuf.p);
+  else {
+    /* at least one %s arg was hoisted into a rooted temp: wrap the whole
+       thing in a statement-expression so the temps (and their roots) are
+       self-contained and valid in any expression position. */
+    buf_printf(b, "({ %ssp_sprintf(\"%s\"%s); })",
+               decls.p, fmt.p ? fmt.p : "", argbuf.p ? argbuf.p : "");
+  }
+  free(fmt.p); free(argbuf.p); free(decls.p);
 }
 
 /* ---- expression ---- */
