@@ -111,6 +111,99 @@ static int poly_double_index_int(Compiler *c, int id) {
   return ivar_array_elems_int_returning(c, cid, ivname);
 }
 
+/* Whether every element stored into poly-array ivar `@<ivname>` is an int
+   array (a nested array of int arrays, e.g. @chr_banks / @nmt_mem). Element
+   reads then yield an int array rather than a boxed poly. */
+static int ivar_array_elems_all_int_array(Compiler *c, int cid, const char *ivname) {
+  const NodeTable *nt = c->nt;
+  int saw = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) continue;
+    if (!strcmp(ty, "CallNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || strcmp(nm, "[]=")) continue;
+      int recv = nt_ref(nt, id, "receiver");
+      if (recv < 0 || strcmp(nt_type(nt, recv) ? nt_type(nt, recv) : "", "InstanceVariableReadNode")) continue;
+      const char *rn = nt_str(nt, recv, "name");
+      if (!rn || strcmp(rn, ivname)) continue;
+      Scope *s = comp_scope_of(c, id);
+      if (!s || s->class_id != cid) continue;
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an < 2) continue;
+      TyKind vt = comp_ntype(c, av[1]);
+      if (vt == TY_INT_ARRAY) { saw = 1; continue; }
+      if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
+      return 0;
+    }
+    if (!strcmp(ty, "InstanceVariableWriteNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || strcmp(nm, ivname)) continue;
+      Scope *s = comp_scope_of(c, id);
+      if (!s || s->class_id != cid) continue;
+      int v = nt_ref(nt, id, "value");
+      if (v < 0) continue;
+      const char *vty = nt_type(nt, v);
+      int arr = -1;
+      if (vty && !strcmp(vty, "ArrayNode")) arr = v;
+      else if (vty && !strcmp(vty, "CallNode") && nt_str(nt, v, "name") &&
+               !strcmp(nt_str(nt, v, "name"), "*")) {
+        int ar = nt_ref(nt, v, "receiver");
+        if (ar >= 0 && nt_type(nt, ar) && !strcmp(nt_type(nt, ar), "ArrayNode")) arr = ar;
+      }
+      else if (vty && !strcmp(vty, "CallNode") && nt_str(nt, v, "name") &&
+               (!strcmp(nt_str(nt, v, "name"), "map") || !strcmp(nt_str(nt, v, "name"), "collect"))) {
+        /* `@x = src.map { ... }`: elements are the block's result type. */
+        int blk = nt_ref(nt, v, "block");
+        int body = blk >= 0 ? nt_ref(nt, blk, "body") : -1;
+        int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+        if (bn <= 0) return 0;
+        TyKind et = comp_ntype(c, bb[bn - 1]);
+        if (et == TY_INT_ARRAY) { saw = 1; continue; }
+        if (et == TY_NIL || et == TY_UNKNOWN) continue;
+        return 0;
+      }
+      if (arr < 0) return 0;
+      int en = 0;
+      const int *els = nt_arr(nt, arr, "elements", &en);
+      for (int e = 0; e < en; e++) {
+        TyKind et = comp_ntype(c, els[e]);
+        if (et == TY_INT_ARRAY) { saw = 1; continue; }
+        if (et == TY_NIL || et == TY_UNKNOWN) continue;
+        return 0;
+      }
+      continue;
+    }
+  }
+  return saw;
+}
+
+/* `@nested[i]` (single index) where @nested is a poly array whose every
+   element is an int array yields an int array (not a boxed poly). Returns the
+   ivar name via *out_iv for codegen, or NULL. */
+static int poly_index_int_array(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm || strcmp(nm, "[]")) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an != 1) return 0;
+  const char *aty = nt_type(nt, av[0]);
+  if (aty && !strcmp(aty, "RangeNode")) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || strcmp(nt_type(nt, recv) ? nt_type(nt, recv) : "", "InstanceVariableReadNode")) return 0;
+  const char *ivname = nt_str(nt, recv, "name");
+  Scope *s = comp_scope_of(c, id);
+  int cid = s ? s->class_id : -1;
+  if (cid < 0 || cid >= c->nclasses || !ivname) return 0;
+  int iv = comp_ivar_index(&c->classes[cid], ivname);
+  if (iv < 0 || c->classes[cid].ivar_types[iv] != TY_POLY_ARRAY) return 0;
+  return ivar_array_elems_all_int_array(c, cid, ivname);
+}
+
 TyKind infer_call(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -129,6 +222,11 @@ TyKind infer_call(Compiler *c, int id) {
      fetch/peek/store, which would otherwise run boxed-poly. */
   if (recv >= 0 && !strcmp(name, "[]") && argc == 1 && poly_double_index_int(c, id))
     return TY_INT;
+  /* `@nested[i]` on a poly array of int arrays yields an int array (nested
+     array of int arrays -- @chr_banks / @nmt_mem). Without this the element
+     read is a boxed poly and cascades poly through the PPU. */
+  if (recv >= 0 && !strcmp(name, "[]") && argc == 1 && poly_index_int_array(c, id))
+    return TY_INT_ARRAY;
 
   /* Complex / Rational value types. */
   if (recv < 0 && !strcmp(name, "Complex")) return TY_COMPLEX;

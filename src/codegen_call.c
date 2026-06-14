@@ -162,6 +162,16 @@ void emit_call(Compiler *c, int id, Buf *b) {
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
   if (!name) unsupported(c, id, "call (no name)");
 
+  /* `@nested[i]` inferred as an int array (poly array of int arrays): unbox
+     the poly element to sp_IntArray* so the surrounding code stays typed. */
+  if (recv >= 0 && !strcmp(name, "[]") && argc == 1 &&
+      comp_ntype(c, recv) == TY_POLY_ARRAY && comp_ntype(c, id) == TY_INT_ARRAY) {
+    buf_puts(b, "((sp_IntArray *)((sp_PolyArray_get(");
+    emit_expr(c, recv, b); buf_puts(b, ", "); emit_int_expr(c, argv[0], b);
+    buf_puts(b, ")).v.p))");
+    return;
+  }
+
   /* ---- Complex / Rational value types ---- */
   /* Kernel#Complex(re[, im]) */
   if (recv < 0 && !strcmp(name, "Complex") && argc >= 1) {
