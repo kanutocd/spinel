@@ -37,6 +37,49 @@ static int recv_has_scalar_numeric_write(Compiler *c, int recv) {
   return 0;
 }
 
+/* Unified value type of `recv[k] = v` writes that target the same ivar/local
+   as `recv`. Lets a hash promoted via a string-key READ inherit the value type
+   its `[]=` writes establish (e.g. `@h[s] = int` -> str_int_hash) instead of
+   defaulting to a str_poly slot that can never narrow. TY_UNKNOWN if there is
+   no such write (caller falls back to poly). */
+static TyKind aset_value_type(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  const char *rty = nt_type(nt, recv);
+  if (!rty) return TY_UNKNOWN;
+  int is_ivar = !strcmp(rty, "InstanceVariableReadNode");
+  int is_local = !strcmp(rty, "LocalVariableReadNode");
+  if (!is_ivar && !is_local) return TY_UNKNOWN;
+  const char *rnm = nt_str(nt, recv, "name");
+  if (!rnm) return TY_UNKNOWN;
+  Scope *rsc = comp_scope_of(c, recv);
+  int rcls = rsc ? rsc->class_id : -1;
+  TyKind acc = TY_UNKNOWN;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || strcmp(nm, "[]=")) continue;
+    int wrecv = nt_ref(nt, id, "receiver");
+    if (wrecv < 0) continue;
+    const char *wn = nt_str(nt, wrecv, "name");
+    if (!wn || strcmp(wn, rnm)) continue;
+    if (is_ivar) {
+      if (nt_kind(nt, wrecv) != NK_InstanceVariableReadNode) continue;
+      Scope *ws = comp_scope_of(c, wrecv);
+      if ((ws ? ws->class_id : -1) != rcls) continue;
+    }
+    else {
+      if (nt_kind(nt, wrecv) != NK_LocalVariableReadNode) continue;
+      if (comp_scope_of(c, wrecv) != rsc) continue;
+    }
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (an < 2) continue;
+    acc = ty_unify(acc, infer_type(c, av[1]));
+  }
+  return acc;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -686,7 +729,13 @@ int infer_write_types(Compiler *c) {
         }
         kt = infer_type(c, argv[0]);
         if (kt == TY_SYMBOL) { vt = TY_INT; /* dummy: sym hash val is always poly */ }
-        else if (kt == TY_STRING) { vt = TY_POLY; /* will map to STR_POLY */ }
+        else if (kt == TY_STRING) {
+          /* Seed the value type from the hash's `[]=` writes so an int-valued
+             string-keyed hash filled by `@h[s] = int` stays str_int_hash
+             instead of widening to str_poly (which never narrows back). */
+          TyKind wv = aset_value_type(c, recv);
+          vt = (wv == TY_INT || wv == TY_STRING) ? wv : TY_POLY;
+        }
         /* An int-key bare read (`x[i]`) is NOT strong hash evidence: arrays
            index by int too, and an array-returning method assigned to `x` may
            not have settled its element type yet, so promoting here would lock
