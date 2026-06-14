@@ -3940,6 +3940,13 @@ else {
     return;
   }
   if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 1) {
+    /* `@table[i][j]` dispatch table narrowed to int (poly_double_index_int):
+       call the entry (bound method / int array) for an unboxed int result. */
+    if (comp_ntype(c, id) == TY_INT) {
+      buf_puts(b, "sp_poly_index_int("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      return;
+    }
     TyKind at = comp_ntype(c, argv[0]);
     /* Only use the fast single-call path when no user class defines [].
        If any user class has its own [] method, fall through to the per-class

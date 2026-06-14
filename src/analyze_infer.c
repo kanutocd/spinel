@@ -1,5 +1,80 @@
 #include "analyze_internal.h"
 
+/* Whether every element written into the poly-array ivar `@<ivname>` of class
+   `cid` is an int-returning kind: a bound method (a dispatch-table entry, called
+   with an int arg returns int), an int array, an int, or nil filler. Mirrors
+   legacy's cls_ivar_observed_types check in poly_index_narrow_int. */
+static int ivar_array_elems_int_returning(Compiler *c, int cid, const char *ivname) {
+  const NodeTable *nt = c->nt;
+  int saw = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || strcmp(nm, "[]=")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    const char *rty = nt_type(nt, recv);
+    if (!rty || strcmp(rty, "InstanceVariableReadNode")) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn || strcmp(rn, ivname)) continue;
+    Scope *s = comp_scope_of(c, id);
+    if (!s || s->class_id != cid) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (an < 2) continue;
+    TyKind vt = comp_ntype(c, av[1]);
+    /* int-returning element kinds: int (bit extraction), int array (get), a
+       bound method / proc (called with the int arg, returns int). A poly
+       element is assumed to be a dispatch-table callable -- optcarrot's
+       @fetch/@store hold Method|IntArray unified to poly through a hash. */
+    if (vt == TY_INT || vt == TY_INT_ARRAY || vt == TY_METHOD || vt == TY_PROC ||
+        vt == TY_POLY) { saw = 1; continue; }
+    if (vt == TY_NIL || vt == TY_UNKNOWN) continue;   /* filler / unresolved */
+    return 0;                     /* a clearly non-int element kind */
+  }
+  return saw;
+}
+
+/* `@table[i][j]` where @table is a poly array of int-returning callables/arrays
+   (a method dispatch table) yields an int. Returns 1 if `id` matches that shape
+   for the enclosing class. The index types don't matter (they may themselves be
+   poly mid-fixpoint); the result type follows from the table's element kinds. */
+static int poly_double_index_int(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm || strcmp(nm, "[]")) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an != 1) return 0;
+  const char *aty = nt_type(nt, av[0]);
+  if (aty && !strcmp(aty, "RangeNode")) return 0;   /* slice, not an element */
+  int inner = nt_ref(nt, id, "receiver");
+  if (inner < 0) return 0;
+  const char *ity = nt_type(nt, inner);
+  if (!ity || strcmp(ity, "CallNode")) return 0;
+  const char *inm = nt_str(nt, inner, "name");
+  if (!inm || strcmp(inm, "[]")) return 0;
+  int iargs = nt_ref(nt, inner, "arguments");
+  int ian = 0;
+  const int *iav = iargs >= 0 ? nt_arr(nt, iargs, "arguments", &ian) : NULL;
+  if (ian != 1) return 0;
+  (void)iav;
+  int ivnode = nt_ref(nt, inner, "receiver");
+  if (ivnode < 0) return 0;
+  const char *vty = nt_type(nt, ivnode);
+  if (!vty || strcmp(vty, "InstanceVariableReadNode")) return 0;
+  const char *ivname = nt_str(nt, ivnode, "name");
+  Scope *s = comp_scope_of(c, id);
+  int cid = s ? s->class_id : -1;
+  if (cid < 0 || cid >= c->nclasses || !ivname) return 0;
+  int iv = comp_ivar_index(&c->classes[cid], ivname);
+  if (iv < 0 || c->classes[cid].ivar_types[iv] != TY_POLY_ARRAY) return 0;
+  return ivar_array_elems_int_returning(c, cid, ivname);
+}
+
 TyKind infer_call(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -12,6 +87,12 @@ TyKind infer_call(Compiler *c, int id) {
 
   TyKind rt = recv >= 0 ? infer_type(c, recv) : TY_UNKNOWN;
   TyKind a0 = argc >= 1 ? infer_type(c, argv[0]) : TY_UNKNOWN;
+
+  /* `@table[i][j]` on a poly-array dispatch table of int-returning entries
+     yields an int (a method/peek table). Resolves the optcarrot CPU's
+     fetch/peek/store, which would otherwise run boxed-poly. */
+  if (recv >= 0 && !strcmp(name, "[]") && argc == 1 && poly_double_index_int(c, id))
+    return TY_INT;
 
   /* Complex / Rational value types. */
   if (recv < 0 && !strcmp(name, "Complex")) return TY_COMPLEX;

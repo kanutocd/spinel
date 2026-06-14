@@ -4176,6 +4176,23 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   mrb_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;
   return sp_poly_arr_get_hash(recv, i);
 }
+
+/* Integer-returning counterpart of sp_poly_index_poly for `poly[int]` where
+   the poly element holds an int-returning callable/container -- a bound
+   method (called with the int arg, int ABI) or an int array. Used when
+   inference proves the double index `@table[i][j]` yields an int (a method
+   dispatch table). Falls back to coercing the generic poly result. */
+static inline mrb_int sp_poly_index_int(sp_RbVal a, mrb_int i) {
+  if (a.tag == SP_TAG_INT) return (a.v.i >> i) & 1;
+  if (a.tag == SP_TAG_OBJ) {
+    if (a.cls_id == SP_BUILTIN_METHOD) {
+      sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
+      return ((mrb_int (*)(void *, mrb_int))(uintptr_t)m->fn)((void *)m->self, i);
+    }
+    if (a.cls_id == SP_BUILTIN_INT_ARRAY) return sp_IntArray_get((sp_IntArray *)a.v.p, i);
+  }
+  return sp_poly_to_i(sp_poly_arr_get_hash(a, i));
+}
 static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, mrb_int idx, sp_RbVal val) {
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
