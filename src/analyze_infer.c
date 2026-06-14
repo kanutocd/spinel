@@ -1589,9 +1589,10 @@ else {
 
   /* poly receiver / poly operand: result type of operations on sp_RbVal */
   if (recv >= 0 && (rt == TY_POLY || a0 == TY_POLY)) {
-    /* `str % poly_args` is printf-style formatting (result string), not a poly
-       arithmetic modulo -- defer to the rt==TY_STRING path below. */
-    if (!(rt == TY_STRING && !strcmp(name, "%")) &&
+    /* String operators with a poly operand are NOT poly arithmetic: `str % x`
+       is printf formatting, `str + x` is concatenation, `str * n` is repeat --
+       all yield a string. Defer them to the rt==TY_STRING path below. */
+    if (!(rt == TY_STRING && (!strcmp(name, "%") || !strcmp(name, "+") || !strcmp(name, "*"))) &&
         (!strcmp(name, "+") || !strcmp(name, "-") || !strcmp(name, "*") ||
          !strcmp(name, "/") || !strcmp(name, "%") || !strcmp(name, "**")))
       return TY_POLY;
@@ -2034,7 +2035,8 @@ else {
     if (rt == TY_STRING) {
       if (!strcmp(name, "%")) return TY_STRING;  /* sprintf (array or single value) */
       if (!strcmp(name, "+") || !strcmp(name, "*")) {
-        if (a0 == TY_POLY) return TY_POLY;  /* codegen uses sp_poly_add for poly operand */
+        /* `str + x` / `str * n` always yield a String; a poly operand (which
+           holds a string at runtime) is coerced via sp_poly_to_s in codegen. */
         return TY_STRING;
       }
       return TY_UNKNOWN;

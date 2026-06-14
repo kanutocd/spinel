@@ -3422,8 +3422,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     return;
   }
 
-  /* poly arithmetic: sp_poly_<op>(boxed, boxed) -> a (poly) result */
-  if (recv >= 0 && argc == 1 && (rt == TY_POLY || a0 == TY_POLY)) {
+  /* poly arithmetic: sp_poly_<op>(boxed, boxed) -> a (poly) result.
+     `str + poly` / `str * poly` are string concat/repeat (handled below as
+     sp_str_concat/sp_str_repeat with the poly operand coerced), not poly
+     arithmetic, so let them fall through. */
+  if (recv >= 0 && argc == 1 && (rt == TY_POLY || a0 == TY_POLY) &&
+      !(rt == TY_STRING && (!strcmp(name, "+") || !strcmp(name, "*")))) {
     const char *pfn = NULL;
     if (!strcmp(name, "+")) pfn = "sp_poly_add";
     else if (!strcmp(name, "-")) pfn = "sp_poly_sub";
@@ -3510,22 +3514,31 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
          operands — concat_chain_operand_gc_root). Recurses naturally: a
          chain's left operand is itself a `+` and gets its own rooted block.
          Pure literal / bare-read operands need no rooting. */
+      /* A poly operand (statically typed string here, holds a string at
+         runtime) must be coerced to a C string for sp_str_concat. */
+      int arg_poly = comp_ntype(c, argv[0]) == TY_POLY;
       if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0])) {
         int ta = ++g_tmp, tb = ++g_tmp;
         buf_printf(b, "({ const char *_t%d = ", ta); emit_expr(c, recv, b);
-        buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb); emit_expr(c, argv[0], b);
+        buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb);
+        if (arg_poly) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[0], b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_str_concat(_t%d, _t%d); })", tb, ta, tb);
       }
-else {
+      else {
         buf_puts(b, "sp_str_concat(");
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+        emit_expr(c, recv, b); buf_puts(b, ", ");
+        if (arg_poly) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        else emit_expr(c, argv[0], b);
         buf_puts(b, ")");
       }
       return;
     }
     if (rt == TY_STRING && !strcmp(name, "*")) {
       buf_puts(b, "sp_str_repeat(");
-      emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
+      emit_expr(c, recv, b); buf_puts(b, ", ");
+      if (comp_ntype(c, argv[0]) == TY_POLY) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else emit_expr(c, argv[0], b);
       buf_puts(b, ")");
       return;
     }

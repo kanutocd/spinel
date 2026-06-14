@@ -1,4 +1,6 @@
 #include "analyze_internal.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 /* True when `recv` reads an ivar/local that has at least one direct write of a
    numeric scalar (an Integer/Float literal, or a numeric-inferred value). Used
