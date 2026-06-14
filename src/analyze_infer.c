@@ -4,35 +4,71 @@
    `cid` is an int-returning kind: a bound method (a dispatch-table entry, called
    with an int arg returns int), an int array, an int, or nil filler. Mirrors
    legacy's cls_ivar_observed_types check in poly_index_narrow_int. */
+/* Classify a value type stored as an element of a dispatch/data table:
+   1 = int-returning when indexed/called (int bit, int array get, bound
+   method/proc call, or a poly assumed to be such a callable); 2 = neutral
+   filler (nil/unknown); 0 = a clearly non-int kind. */
+static int table_elem_int_returning(TyKind vt) {
+  if (vt == TY_INT || vt == TY_INT_ARRAY || vt == TY_METHOD || vt == TY_PROC ||
+      vt == TY_POLY)
+    return 1;
+  if (vt == TY_NIL || vt == TY_UNKNOWN) return 2;
+  return 0;
+}
+
 static int ivar_array_elems_int_returning(Compiler *c, int cid, const char *ivname) {
   const NodeTable *nt = c->nt;
   int saw = 0;
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
-    if (!ty || strcmp(ty, "CallNode")) continue;
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm || strcmp(nm, "[]=")) continue;
-    int recv = nt_ref(nt, id, "receiver");
-    if (recv < 0) continue;
-    const char *rty = nt_type(nt, recv);
-    if (!rty || strcmp(rty, "InstanceVariableReadNode")) continue;
-    const char *rn = nt_str(nt, recv, "name");
-    if (!rn || strcmp(rn, ivname)) continue;
-    Scope *s = comp_scope_of(c, id);
-    if (!s || s->class_id != cid) continue;
-    int args = nt_ref(nt, id, "arguments");
-    int an = 0;
-    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-    if (an < 2) continue;
-    TyKind vt = comp_ntype(c, av[1]);
-    /* int-returning element kinds: int (bit extraction), int array (get), a
-       bound method / proc (called with the int arg, returns int). A poly
-       element is assumed to be a dispatch-table callable -- optcarrot's
-       @fetch/@store hold Method|IntArray unified to poly through a hash. */
-    if (vt == TY_INT || vt == TY_INT_ARRAY || vt == TY_METHOD || vt == TY_PROC ||
-        vt == TY_POLY) { saw = 1; continue; }
-    if (vt == TY_NIL || vt == TY_UNKNOWN) continue;   /* filler / unresolved */
-    return 0;                     /* a clearly non-int element kind */
+    if (!ty) continue;
+    /* element write `@ivar[i] = v` */
+    if (!strcmp(ty, "CallNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || strcmp(nm, "[]=")) continue;
+      int recv = nt_ref(nt, id, "receiver");
+      if (recv < 0) continue;
+      const char *rty = nt_type(nt, recv);
+      if (!rty || strcmp(rty, "InstanceVariableReadNode")) continue;
+      const char *rn = nt_str(nt, recv, "name");
+      if (!rn || strcmp(rn, ivname)) continue;
+      Scope *s = comp_scope_of(c, id);
+      if (!s || s->class_id != cid) continue;
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (an < 2) continue;
+      int k = table_elem_int_returning(comp_ntype(c, av[1]));
+      if (k == 0) return 0;
+      if (k == 1) saw = 1;
+      continue;
+    }
+    /* whole-ivar write `@ivar = [..]` / `@ivar = [x] * n` */
+    if (!strcmp(ty, "InstanceVariableWriteNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || strcmp(nm, ivname)) continue;
+      Scope *s = comp_scope_of(c, id);
+      if (!s || s->class_id != cid) continue;
+      int v = nt_ref(nt, id, "value");
+      if (v < 0) continue;
+      const char *vty = nt_type(nt, v);
+      int arr = -1;   /* the ArrayNode whose elements to inspect */
+      if (vty && !strcmp(vty, "ArrayNode")) arr = v;
+      else if (vty && !strcmp(vty, "CallNode") && nt_str(nt, v, "name") &&
+               !strcmp(nt_str(nt, v, "name"), "*")) {
+        int ar = nt_ref(nt, v, "receiver");   /* `[..] * n` */
+        if (ar >= 0 && nt_type(nt, ar) && !strcmp(nt_type(nt, ar), "ArrayNode")) arr = ar;
+      }
+      if (arr < 0) return 0;   /* non-literal whole write: can't verify */
+      int en = 0;
+      const int *els = nt_arr(nt, arr, "elements", &en);
+      for (int e = 0; e < en; e++) {
+        int k = table_elem_int_returning(comp_ntype(c, els[e]));
+        if (k == 0) return 0;
+        if (k == 1) saw = 1;
+      }
+      continue;
+    }
   }
   return saw;
 }
