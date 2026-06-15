@@ -395,6 +395,27 @@ void mark_ie_subtree(Compiler *c, int node, int cls) {
   for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(c->nt, node, i, &n); for (int k = 0; k < n; k++) mark_ie_subtree(c, ids[k], cls); }
 }
 
+/* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
+   ConstantRead receiver's name to the underlying class so class-method dispatch
+   resolves it exactly like the direct `SomeClass.foo`. Mirrors the `class CONST`
+   reopening rewrite in walk_scope. Runs once after classes are registered. */
+void rewrite_const_alias_receivers(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "ConstantReadNode")) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn || comp_class_index(c, rn) >= 0) continue;  /* already a class name */
+    const char *real = resolve_class_alias(c, rn);
+    if (real && strcmp(real, rn)) {
+      char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees rn */
+      nt_set_str((NodeTable *)nt, recv, "name", buf);
+    }
+  }
+}
+
 /* For a receiverless instance_eval/exec CallNode with a literal block inside
    an instance method, the receiver is self (CRuby resolves it to
    self.instance_exec). Return that class index, else -1. The literal-block
@@ -1123,6 +1144,7 @@ void analyze_program(Compiler *c) {
   register_aliases(c);
   register_undefs(c);
   register_globals_consts(c);
+  rewrite_const_alias_receivers(c);
   register_ffi_decls(c);
 
   /* rescue variables (`rescue => e`) are typed as exception objects */
