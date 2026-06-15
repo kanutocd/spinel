@@ -3481,6 +3481,22 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
               const char *dt = dn >= 0 ? nt_type(nt, dn) : NULL;
               if (dt && !strcmp(dt, "ModuleNode")) yes = comp_method_in_chain(c, ci, qm, NULL) >= 0;
             }
+            /* builtin Class/Module methods every class object inherits */
+            if (!yes) {
+              static const char *const cls_uni[] = {
+                "name", "instance_methods", "public_instance_methods",
+                "private_instance_methods", "protected_instance_methods",
+                "instance_method", "method_defined?", "superclass", "ancestors",
+                "include?", "const_get", "const_set", "const_defined?",
+                "define_method", "allocate", "<", "<=", ">", ">=", NULL };
+              for (int u = 0; cls_uni[u]; u++) if (!strcmp(qm, cls_uni[u])) { yes = 1; break; }
+              /* `new`: a class responds, a module does not */
+              if (!yes && !strcmp(qm, "new")) {
+                int dn = c->classes[ci].def_node;
+                const char *dt = dn >= 0 ? nt_type(nt, dn) : NULL;
+                yes = !(dt && !strcmp(dt, "ModuleNode"));
+              }
+            }
           }
         }
         else if (ty_is_object(rt)) {
