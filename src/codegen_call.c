@@ -1968,14 +1968,23 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         int as_arr = 0; const char *as_kind = NULL;
         /* mixed-args trampoline: bind params to the trampoline body's args. */
         int tramp_argc = ie_tramp ? ie_tramp_effective_argc(c, id) : -1;
-        if (tramp_argc < 0 && is_exec && iac == 1 && npar >= 2) {
-          TyKind a0 = comp_ntype(c, iav[0]);
+        /* A sole splat arg (`instance_exec(*arr) { |a, b| }`) spreads its source
+           array across the params, exactly like passing the array directly.
+           Unwrap the splat to its operand and let the auto-splat path handle it.
+           A splat also spreads across a single param (`instance_exec(*arr) { |a| }`
+           binds `a` to `arr[0]`), unlike a directly-passed array (whole array to a
+           lone param), so allow `npar >= 1` when explicitly splatted. */
+        int arg0 = (iac == 1 && iav) ? iav[0] : -1;
+        int is_splat = arg0 >= 0 && nt_type(nt, arg0) && !strcmp(nt_type(nt, arg0), "SplatNode");
+        if (is_splat) arg0 = nt_ref(nt, arg0, "expression");
+        if (tramp_argc < 0 && is_exec && iac == 1 && (npar >= 2 || (npar >= 1 && is_splat)) && arg0 >= 0) {
+          TyKind a0 = comp_ntype(c, arg0);
           if (ty_is_array(a0)) {
             as_kind = (a0 == TY_POLY_ARRAY) ? "Poly" : array_kind(a0);
             as_arr = ++g_tmp;
             /* Evaluate the array into a side buffer so its own prelude flushes
                to g_pre before this declaration line (avoid splicing mid-line). */
-            Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, iav[0], &ab);
+            Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, arg0, &ab);
             emit_indent(g_pre, g_indent); emit_ctype(c, a0, g_pre);
             buf_printf(g_pre, " _t%d = %s;\n", as_arr, ab.p ? ab.p : "NULL"); free(ab.p);
           }

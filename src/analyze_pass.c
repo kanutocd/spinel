@@ -2045,9 +2045,16 @@ int infer_block_params(Compiler *c) {
        trampoline param read), not the caller's args. */
     int tramp_argc = strcmp(cname, "instance_exec") ? ie_tramp_effective_argc(c, id) : -1;
     /* auto-splat: a single array arg destructured across N>=2 params binds
-       each to the element type. */
-    if (tramp_argc < 0 && iac == 1 && rnp >= 2) {
-      TyKind a0 = infer_type(c, iav[0]);
+       each to the element type. A sole splat (`instance_exec(*arr) { |a, b| }`)
+       spreads the same way -- unwrap it to its array operand. A splat also
+       spreads across a single param (`instance_exec(*arr) { |a| }` binds `a`
+       to `arr[0]`), unlike a directly-passed array (which binds the whole array
+       to a lone param), so allow `rnp >= 1` when explicitly splatted. */
+    int arg0 = (iac == 1 && iav) ? iav[0] : -1;
+    int is_splat = arg0 >= 0 && nt_type(nt, arg0) && !strcmp(nt_type(nt, arg0), "SplatNode");
+    if (is_splat) arg0 = nt_ref(nt, arg0, "expression");
+    if (tramp_argc < 0 && iac == 1 && (rnp >= 2 || (rnp >= 1 && is_splat)) && arg0 >= 0) {
+      TyKind a0 = infer_type(c, arg0);
       if (ty_is_array(a0)) {
         TyKind et = ty_array_elem(a0);
         for (int k = 0; k < rnp; k++) {
