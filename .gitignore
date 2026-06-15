@@ -22,8 +22,8 @@
 /spinel_analyze.exe
 /spinel_codegen
 /spinel_codegen.exe
-/spinel_parse
-/spinel_parse.exe
+/legacy/spinel_parse
+/legacy/spinel_parse.exe
 /spinel_rbs_extract
 /spinel_rbs_extract.exe
 /perf.data

@@ -117,9 +117,9 @@ build/rbs/%.o: $(RBS_DIR)/src/%.c
 
 # ---- C Parser ----
 
-parse: spinel_parse$(EXE)
+parse: legacy/spinel_parse$(EXE)
 
-spinel_parse$(EXE): legacy/spinel_parse.c $(PRISM_LIB)
+legacy/spinel_parse$(EXE): legacy/spinel_parse.c $(PRISM_LIB)
 	$(CC) $(CFLAGS) -I$(PRISM_INC) legacy/spinel_parse.c $(PRISM_LIB) -lm -o $@
 
 # ---- C compiler (src/) ----
@@ -535,4 +535,4 @@ uninstall:
 # intermediates). Only the root-level C artifacts need an explicit rm.
 clean:
 	rm -rf build/ legacy/build/
-	rm -f spinel_parse$(EXE) spinel_rbs_extract$(EXE) spinel
+	rm -f legacy/spinel_parse$(EXE) spinel_rbs_extract$(EXE) spinel

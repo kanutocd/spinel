@@ -47,7 +47,7 @@ codegen: legacy
 root-build:
 	+@$(MAKE) -C $(ROOT) --no-print-directory parse regexp
 
-PARSE_BIN := $(ROOT)/spinel_parse$(EXE)
+PARSE_BIN := $(ROOT)/legacy/spinel_parse$(EXE)
 SP_RT_LIB := $(ROOT)/lib/libspinel_rt.a
 
 ANALYZE_STAMP := $(BUILD)/stamps/spinel_analyze.rb.stamp
