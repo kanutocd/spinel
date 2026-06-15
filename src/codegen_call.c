@@ -9348,6 +9348,9 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     int ta = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp;
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
     emit_indent(b, indent); buf_printf(b, "sp_RbVal _t%d = %s;\n", ta, rb.p ? rb.p : "sp_box_nil()"); free(rb.p);
+    /* Root the boxed receiver so a GC fired by the loop body doesn't free a
+       freshly-built collection held only by this temp. */
+    emit_indent(b, indent); buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d);\n", ta);
     emit_indent(b, indent); buf_printf(b, "mrb_int _t%d = sp_poly_arr_len_ex(_t%d);\n", tn, ta);
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
@@ -9388,6 +9391,11 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     }
     emit_indent(b, indent);
     buf_printf(b, "sp_PolyArray *_t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    /* Root the receiver: a freshly-built array referenced only by this temp
+       is otherwise freed if the loop body triggers GC mid-iteration, leaving
+       the next element fetch dangling. */
+    emit_indent(b, indent);
+    buf_printf(b, "SP_GC_ROOT(_t%d);\n", ta);
     emit_indent(b, indent);
     buf_printf(b, "for (mrb_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {\n", t, t, ta, t);
     if (p0) {
