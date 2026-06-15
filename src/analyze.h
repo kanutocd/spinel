@@ -24,6 +24,11 @@ const char *block_param_name(Compiler *c, int block, int idx);
 /* Class index when a receiverless instance_eval/exec resolves to self, else -1. */
 int ie_implicit_self_class(Compiler *c, int id);
 
+/* instance_exec keyword-arg helpers: the call's trailing KeywordHashNode (or
+   -1), and the value node bound to a keyword name within it (or -1). */
+int ie_call_kwhash(Compiler *c, int id);
+int ie_kwhash_value(Compiler *c, int kwhash, const char *name);
+
 /* Returns 1 if the idx-th required param is a MultiTargetNode (tuple destructure). */
 int block_param_is_multi(Compiler *c, int block, int idx);
 

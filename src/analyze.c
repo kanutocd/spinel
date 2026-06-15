@@ -415,6 +415,34 @@ int ie_implicit_self_class(Compiler *c, int id) {
   return s->class_id;
 }
 
+/* In a call-site KeywordHashNode (`k: 9, j: 2`), the value node bound to the
+   keyword `name`, or -1. Used to match instance_exec keyword block params. */
+int ie_kwhash_value(Compiler *c, int kwhash, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (kwhash < 0 || !name) return -1;
+  int en = 0; const int *els = nt_arr(nt, kwhash, "elements", &en);
+  for (int i = 0; i < en; i++) {
+    const char *ety = nt_type(nt, els[i]);
+    if (!ety || strcmp(ety, "AssocNode")) continue;
+    int key = nt_ref(nt, els[i], "key");
+    const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+    if (!kty || strcmp(kty, "SymbolNode")) continue;
+    const char *kn = nt_str(nt, key, "value");
+    if (kn && !strcmp(kn, name)) return nt_ref(nt, els[i], "value");
+  }
+  return -1;
+}
+
+/* The trailing KeywordHashNode of a call's arguments (`k: 1`), or -1. */
+int ie_call_kwhash(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int args = nt_ref(nt, id, "arguments");
+  int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+  if (ac <= 0) return -1;
+  const char *lty = nt_type(nt, av[ac - 1]);
+  return (lty && !strcmp(lty, "KeywordHashNode")) ? av[ac - 1] : -1;
+}
+
 /* (Re)build the instance_eval/exec node→class map from current receiver types. */
 void build_ie_map(Compiler *c) {
   const NodeTable *nt = c->nt;

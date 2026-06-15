@@ -1926,18 +1926,67 @@ int infer_block_params(Compiler *c) {
     if (blk < 0) continue;
     int pn = nt_ref(nt, blk, "parameters");
     if (pn < 0) continue;
-    int inner = nt_ref(nt, pn, "parameters");
-    int pnode = inner >= 0 ? inner : pn;
-    int rnp = 0; const int *reqs = nt_arr(nt, pnode, "requireds", &rnp);
     int iargs = nt_ref(nt, id, "arguments");
     int iac = 0; const int *iav = iargs >= 0 ? nt_arr(nt, iargs, "arguments", &iac) : NULL;
     Scope *bs = comp_scope_of(c, blk);
+    /* A trailing `k: v` call-site hash is not a positional arg; bind keyword
+       block params to it by name. */
+    int kwhash = ie_call_kwhash(c, id);
+    if (kwhash >= 0) iac -= 1;
+    const char *pnty = nt_type(nt, pn);
+    if (pnty && !strcmp(pnty, "NumberedParametersNode")) {
+      /* `{ _1 + _2 }` / `{ it ... }` (it normalizes to _1): bind _1.._N to the
+         call-site arg types. */
+      int maxn = (int)nt_int(nt, pn, "maximum", 0);
+      for (int k = 0; k < maxn && k < iac; k++) {
+        char npn[8]; snprintf(npn, sizeof npn, "_%d", k + 1);
+        TyKind at = infer_type(c, iav[k]);
+        LocalVar *lv = scope_local_intern(bs, npn); lv->is_block_param = 1;
+        if (at != TY_UNKNOWN && lv->type != at) { lv->type = at; changed = 1; }
+      }
+      continue;
+    }
+    int inner = nt_ref(nt, pn, "parameters");
+    int pnode = inner >= 0 ? inner : pn;
+    int rnp = 0; const int *reqs = nt_arr(nt, pnode, "requireds", &rnp);
+    /* auto-splat: a single array arg destructured across N>=2 params binds
+       each to the element type. */
+    if (iac == 1 && rnp >= 2) {
+      TyKind a0 = infer_type(c, iav[0]);
+      if (ty_is_array(a0)) {
+        TyKind et = ty_array_elem(a0);
+        for (int k = 0; k < rnp; k++) {
+          const char *p = nt_str(nt, reqs[k], "name");
+          if (!p) continue;
+          LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
+          if (et != TY_UNKNOWN && lv->type != et) { lv->type = et; changed = 1; }
+        }
+        continue;
+      }
+    }
     for (int k = 0; k < rnp && k < iac; k++) {
       const char *p = nt_str(nt, reqs[k], "name");
       if (!p) continue;
       TyKind at = infer_type(c, iav[k]);
       LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
       if (at != TY_UNKNOWN && lv->type != at) { lv->type = at; changed = 1; }
+    }
+    /* keyword block params (`|k:, j: 5|`): match the call-site `k: v` hash by
+       name; an omitted optional keyword takes its default expr's type. */
+    int nkw = 0; const int *kws = nt_arr(nt, pnode, "keywords", &nkw);
+    for (int k = 0; k < nkw; k++) {
+      const char *kpty = nt_type(nt, kws[k]);
+      const char *kpn = nt_str(nt, kws[k], "name");
+      if (!kpn) continue;
+      int vn = ie_kwhash_value(c, kwhash, kpn);
+      TyKind kt = TY_UNKNOWN;
+      if (vn >= 0) kt = infer_type(c, vn);
+      else if (kpty && !strcmp(kpty, "OptionalKeywordParameterNode")) {
+        int dv = nt_ref(nt, kws[k], "value");
+        if (dv >= 0) kt = infer_type(c, dv);
+      }
+      LocalVar *lv = scope_local_intern(bs, kpn); lv->is_block_param = 1;
+      if (kt != TY_UNKNOWN && lv->type != kt) { lv->type = kt; changed = 1; }
     }
   }
 

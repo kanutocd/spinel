@@ -1782,6 +1782,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         const char *bpty = bp_node >= 0 ? nt_type(nt, bp_node) : NULL;
         int iargs = nt_ref(nt, id, "arguments");
         int iac = 0; const int *iav = iargs >= 0 ? nt_arr(nt, iargs, "arguments", &iac) : NULL;
+        /* a trailing `k: v` call-site hash binds keyword params, not positionals */
+        int ie_kwhash = ie_call_kwhash(c, id);
+        if (ie_kwhash >= 0) iac -= 1;
         if (bpty && !strcmp(bpty, "NumberedParametersNode")) {
           /* `{ _1.method }`: _1.._N bind like positional block params. */
           int maxn = (int)nt_int(nt, bp_node, "maximum", 0);
@@ -1798,14 +1801,44 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         int inner = bp_node >= 0 ? nt_ref(nt, bp_node, "parameters") : -1;
         int pnode = inner >= 0 ? inner : bp_node;
         int npar = 0; const int *reqs = pnode >= 0 ? nt_arr(nt, pnode, "requireds", &npar) : NULL;
+        /* auto-splat: a single array arg spread across N>=2 params. Evaluate
+           the array once, then bind each param to its element. */
+        int as_arr = 0; const char *as_kind = NULL;
+        if (is_exec && iac == 1 && npar >= 2) {
+          TyKind a0 = comp_ntype(c, iav[0]);
+          if (ty_is_array(a0)) {
+            as_kind = (a0 == TY_POLY_ARRAY) ? "Poly" : array_kind(a0);
+            as_arr = ++g_tmp;
+            /* Evaluate the array into a side buffer so its own prelude flushes
+               to g_pre before this declaration line (avoid splicing mid-line). */
+            Buf ab; memset(&ab, 0, sizeof ab); emit_expr(c, iav[0], &ab);
+            emit_indent(g_pre, g_indent); emit_ctype(c, a0, g_pre);
+            buf_printf(g_pre, " _t%d = %s;\n", as_arr, ab.p ? ab.p : "NULL"); free(ab.p);
+          }
+        }
         for (int p = 0; p < npar; p++) {
           const char *pn = nt_str(nt, reqs[p], "name");
           if (!pn) continue;
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "lv_%s = ", rename_local(pn));
-          if (is_exec) { if (p < iac) emit_expr(c, iav[p], g_pre); else buf_puts(g_pre, "0"); }
+          if (as_kind) buf_printf(g_pre, "sp_%sArray_get(_t%d, %d)", as_kind, as_arr, p);
+          else if (is_exec) { if (p < iac) emit_expr(c, iav[p], g_pre); else buf_puts(g_pre, "0"); }
           else buf_printf(g_pre, "_t%d", tr);  /* instance_eval yields self */
           buf_puts(g_pre, ";\n");
+        }
+        /* keyword block params: each binds to its matched `k: v` value, or to
+           the default expr when an optional keyword is omitted. */
+        int nkw = 0; const int *kws = pnode >= 0 ? nt_arr(nt, pnode, "keywords", &nkw) : NULL;
+        for (int k = 0; k < nkw; k++) {
+          const char *kpn = nt_str(nt, kws[k], "name");
+          if (!kpn) continue;
+          int vn = ie_kwhash_value(c, ie_kwhash, kpn);
+          if (vn < 0) vn = nt_ref(nt, kws[k], "value");  /* omitted optional -> default */
+          Buf vb; memset(&vb, 0, sizeof vb);
+          if (vn >= 0) emit_expr(c, vn, &vb); else buf_puts(&vb, "0");
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "lv_%s = %s;\n", rename_local(kpn), vb.p ? vb.p : "0");
+          free(vb.p);
         }
         }
       }
