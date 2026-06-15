@@ -5235,7 +5235,15 @@ else {
                      t2, t, t2, t2, t, t);
         }
         else {
-          buf_printf(b, "sp_range_include(&_t%d, ", t); emit_expr(c, argv[0], b); buf_puts(b, ")");
+          /* sp_range_include takes mrb_int; a float arg (`(1..).include?(2.4)`)
+             needs an explicit cast, else clang -Werror flags the implicit
+             float-literal->int conversion (gcc truncates silently). */
+          int arg_is_float = comp_ntype(c, argv[0]) == TY_FLOAT;
+          buf_printf(b, "sp_range_include(&_t%d, ", t);
+          if (arg_is_float) buf_puts(b, "(mrb_int)(");
+          emit_expr(c, argv[0], b);
+          if (arg_is_float) buf_puts(b, ")");
+          buf_puts(b, ")");
         }
       }
       else if (!strcmp(name, "first") || !strcmp(name, "min") || !strcmp(name, "begin")) {

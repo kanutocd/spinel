@@ -253,6 +253,14 @@ TESTS := $(filter-out test/sp_net_basic.rb,$(TESTS))
 endif
 TEST_TARGETS := $(patsubst test/%.rb,build/test-results/%.ok,$(TESTS))
 
+# Warnings the generated-C -Werror check should not gate on. clang enables
+# -Wunused-value by default (gcc only under -Wall, which the build disables),
+# so a discarded value-producing statement-expression -- e.g. the
+# `({ ...; v; })` emitted for `Fiber[:k] = v` in statement position -- fails
+# CI under clang while gcc is silent. The value is intentionally discarded;
+# behaviour is still gated by the output diff. Keep this list minimal.
+TEST_WARN_SUPPRESS := -Wno-unused-value
+
 # `make test` always runs fresh: it wipes the prior `.ok` stamps first,
 # then runs the suite. (The old incremental `test` + `retest` split is
 # gone — a stale `.ok` reading PASS was a recurring foot-gun.)
@@ -335,7 +343,7 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINEL)
 	if [ -f "$<.args" ]; then args=$$(cat "$<.args"); fi; \
 	rm -f "$@.diff"; \
 	$(SPINEL) "$<" -c --no-line-map -o "$$cfile" 2>/dev/null && \
-	$(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
+	$(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
 	$(CC) $(CFLAGS) "$$cfile.o" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
 	  if [ -f "$<.expected" ]; then \
@@ -401,7 +409,7 @@ bench: $(SPINEL) $(SP_RT_LIB)
 	  bn=$$(basename "$$f" .rb); \
 	  if [ "$$tty" = 1 ]; then printf '\r\033[K  [%d/%d] %s' "$$i" "$$total" "$$bn"; fi; \
 	  $(TIMEOUT10) $(SPINEL) "$$f" -c --no-line-map -o /tmp/_sp_b.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c /tmp/_sp_b.c -o /tmp/_sp_b.c.o 2>/dev/null && \
+	  $(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib -c /tmp/_sp_b.c -o /tmp/_sp_b.c.o 2>/dev/null && \
 	  $(CC) $(CFLAGS) /tmp/_sp_b.c.o $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o /tmp/_sp_b_bin$(EXE) 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    $(TIMEOUT60) $(REF_RUBY) "$$f" >/tmp/_sp_b_exp 2>/dev/null; \
