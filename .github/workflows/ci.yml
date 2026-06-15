@@ -97,6 +97,16 @@ jobs:
       CC: sccache gcc
       SCCACHE_GHA_ENABLED: "true"
     steps:
+      # Real-time scanning of every spawned cc/ld/.exe and temp file dominates
+      # this compile-heavy job (846 per-test builds). Turning it off cuts the
+      # test step several-fold. try/catch so a Defender policy change can never
+      # red the job.
+      - name: Disable Defender real-time monitoring
+        shell: pwsh
+        run: |
+          try { Set-MpPreference -DisableRealtimeMonitoring $true }
+          catch { Write-Host "Could not disable Defender realtime monitoring: $_" }
+
       - uses: actions/checkout@v6
 
       - name: Set up MSYS2 (MINGW64)
@@ -139,7 +149,12 @@ jobs:
         run: make -j$(nproc) LTO=0 all
 
       - name: Run tests
-        run: make -j$(nproc) test OPT=-O0
+        # Oversubscribe -j (process-spawn/link-latency bound on Windows, not
+        # CPU bound) and use plain gcc: each test's generated C is unique, so
+        # the sccache wrapper only adds miss-overhead per compile here (the
+        # build step above keeps sccache, where caching the runtime/prism
+        # objects pays off).
+        run: make -j$(( $(nproc) * 2 )) test OPT=-O0 CC=gcc
 
       - name: sccache stats
         if: always()

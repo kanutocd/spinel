@@ -344,8 +344,7 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINEL)
 	if [ -f "$<.args" ]; then args=$$(cat "$<.args"); fi; \
 	rm -f "$@.diff"; \
 	$(SPINEL) "$<" -c --no-line-map -o "$$cfile" 2>/dev/null && \
-	$(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
-	$(CC) $(CFLAGS) "$$cfile.o" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
+	$(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib "$$cfile" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
 	  if [ -f "$<.expected" ]; then \
 	    LC_ALL=C sed 's/\r$$//' "$<.expected" >"$$exp.n"; \
