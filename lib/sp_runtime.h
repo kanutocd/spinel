@@ -4540,6 +4540,18 @@ static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
    library calls sp_re_set_error_handler at startup -- codegen emits
    the install call after the exception infrastructure is set up. */
 static void sp_re_default_error_handler(const char *msg) {
+  /* msg points at the regex compiler's stack buffer. sp_raise_cls stores
+     the pointer and longjmps past that frame, leaving it dangling -- copy
+     to a GC-managed string first (mirrors sp_re_startup_error_handler).
+     gcc happened to leave the stack intact; clang reused it, so e.message
+     read garbage (regexp_error_catchable). */
+  if (msg) {
+    size_t n = strlen(msg);
+    char *buf = sp_str_alloc_raw(n + 1);
+    memcpy(buf, msg, n);
+    buf[n] = 0;
+    msg = buf;
+  }
   sp_raise_cls("RegexpError", msg);
 }
 /* Issue #846: during sp_re_init (before main()'s setjmp scope is

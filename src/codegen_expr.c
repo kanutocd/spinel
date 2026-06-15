@@ -809,8 +809,11 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       if (!strcmp(nm, "E"))  { buf_puts(b, "M_E"); return; }
     }
     if (par_nmc && !strcmp(par_nmc, "File") && nm) {
-      if (!strcmp(nm, "SEPARATOR"))      { buf_puts(b, "\"/\""); return; }
-      if (!strcmp(nm, "PATH_SEPARATOR")) { buf_puts(b, "\":\""); return; }
+      /* Emit marker-framed literals (\xff prefix at [-1]) like every other
+         spinel string, so sp_str_byte_len/sp_str_concat can read the length
+         marker without an out-of-bounds [-1] over-read on a bare literal. */
+      if (!strcmp(nm, "SEPARATOR"))      { buf_puts(b, "(&(\"\\xff\" \"/\")[1])"); return; }
+      if (!strcmp(nm, "PATH_SEPARATOR")) { buf_puts(b, "(&(\"\\xff\" \":\")[1])"); return; }
       if (!strcmp(nm, "ALT_SEPARATOR"))  { buf_puts(b, "(&(\"\\xff\")[1])"); return; }
     }
     if (par_nmc && !strcmp(par_nmc, "Process") && nm) {
