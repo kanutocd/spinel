@@ -1694,6 +1694,97 @@ static char *build_rbs_text(Compiler *c) {
   return b.p ? b.p : strdup("");
 }
 
+/* The legacy string tag for `t` (e.g. "int", "int_array", "obj_Foo"). Objects
+   aren't in ty_name's switch, so spell them as obj_<ClassName> here. */
+static void ty_tag_into(Compiler *c, TyKind t, Buf *b) {
+  if (ty_is_object(t)) {
+    int cid = ty_object_class(t);
+    if (cid >= 0 && cid < c->nclasses && c->classes[cid].name)
+      buf_printf(b, "obj_%s", c->classes[cid].name);
+    else
+      buf_puts(b, "object");
+    return;
+  }
+  buf_puts(b, ty_name(t));
+}
+
+/* Resolve `fid` to a source path for the position-keyed exports. */
+static const char *emit_file_path(Compiler *c, int fid) {
+  const char *path = nt_file_path(c->nt, fid);
+  if (!path) path = c->nt->source_file;
+  if (!path || !*path) path = "source.rb";
+  return path;
+}
+
+/* 1 when scope `s`'s signature widened to the boxed poly slow path. */
+static int scope_sig_degraded(Compiler *c, Scope *s) {
+  if (ty_is_degraded(s->ret)) return 1;
+  for (int i = 0; i < s->nparams; i++) {
+    LocalVar *p = scope_local(s, s->pnames[i]);
+    TyKind pt = (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY;
+    if (ty_is_degraded(pt)) return 1;
+  }
+  return 0;
+}
+
+/* Build the position-keyed type + diagnostics JSON for the ruby-lsp addon:
+   every node with a concrete inferred type keyed by {file,line,col}, plus one
+   warning per method whose signature degraded to untyped. Positions come from
+   the parser's node_line/node_col/node_file (the SPINEL_DEBUG machinery), so
+   the driver enables it. */
+static char *build_types_json(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  Buf b; memset(&b, 0, sizeof b);
+  buf_puts(&b, "{\n  \"types\": [\n");
+  int tn = 0;
+  for (int id = 0; id < nt->count && id < c->node_cap; id++) {
+    TyKind t = c->ntype[id];
+    if (t == TY_UNKNOWN || t == TY_VOID) continue;
+    int ln = (int)nt_int(nt, id, "node_line", 0);
+    if (ln <= 0) continue;
+    int col = (int)nt_int(nt, id, "node_col", 0);
+    int fid = (int)nt_int(nt, id, "node_file", 0);
+    if (tn > 0) buf_puts(&b, ",\n");
+    buf_puts(&b, "    {\"file\":\"");
+    json_escape_into(&b, emit_file_path(c, fid));
+    buf_printf(&b, "\",\"line\":%d,\"col\":%d,\"type\":\"", ln, col);
+    Buf tag; memset(&tag, 0, sizeof tag);
+    ty_tag_into(c, t, &tag);
+    json_escape_into(&b, tag.p ? tag.p : "");
+    free(tag.p);
+    buf_puts(&b, "\",\"rbs\":\"");
+    Buf rbs; memset(&rbs, 0, sizeof rbs);
+    ty_to_rbs_into(c, t, &rbs);
+    json_escape_into(&b, rbs.p ? rbs.p : "");
+    free(rbs.p);
+    buf_puts(&b, "\"}");
+    tn++;
+  }
+  buf_puts(&b, "\n  ],\n  \"diagnostics\": [\n");
+  int dn = 0;
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (!s->name || !*s->name || s->def_node < 0) continue;
+    if (!scope_sig_degraded(c, s)) continue;
+    int ln = (int)nt_int(nt, s->def_node, "node_line", 0);
+    if (ln <= 0) continue;
+    int col = (int)nt_int(nt, s->def_node, "node_col", 0);
+    int fid = (int)nt_int(nt, s->def_node, "node_file", 0);
+    if (dn > 0) buf_puts(&b, ",\n");
+    buf_puts(&b, "    {\"file\":\"");
+    json_escape_into(&b, emit_file_path(c, fid));
+    buf_printf(&b, "\",\"line\":%d,\"col\":%d,\"severity\":\"warning\",\"message\":\"", ln, col);
+    Buf msg; memset(&msg, 0, sizeof msg);
+    buf_printf(&msg, "Spinel: `%s` has a parameter or return widened to untyped (boxed poly slow path)", s->name);
+    json_escape_into(&b, msg.p ? msg.p : "");
+    free(msg.p);
+    buf_puts(&b, "\"}");
+    dn++;
+  }
+  buf_puts(&b, "\n  ]\n}\n");
+  return b.p ? b.p : strdup("{\n  \"types\": [\n\n  ],\n  \"diagnostics\": [\n\n  ]\n}\n");
+}
+
 /* Write `text` to `path`; warn (but don't abort) on failure. */
 static int emit_write_file(const char *path, const char *text) {
   FILE *f = fopen(path, "wb");
@@ -1733,6 +1824,14 @@ char *codegen_program(const NodeTable *nt) {
     char *rbs = build_rbs_text(c);
     emit_write_file(rbs_out, rbs);
     free(rbs);
+    comp_free(c);
+    return strdup("");
+  }
+  const char *types_out = getenv("SPINEL_EMIT_TYPES");
+  if (types_out && *types_out) {
+    char *json = build_types_json(c);
+    emit_write_file(types_out, json);
+    free(json);
     comp_free(c);
     return strdup("");
   }
