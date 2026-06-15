@@ -2156,7 +2156,7 @@ static const char*sp_PtrArray_inspect(sp_PtrArray*a){if(!a)return "[]";SP_GC_ROO
    when values are inspectable as one-liners — match CRuby). */
 static const char*sp_StrIntHash_inspect(sp_StrIntHash*h){SP_GC_ROOT(h);sp_String*s=sp_String_new("{");SP_GC_ROOT(s);if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_int_to_s(sp_StrIntHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
 /* Hash#to_proc lookup fn — cap is the hash, args[0] the string key. */
-static mrb_int sp_StrIntHash_proc_fn(void *cap, mrb_int *args) { return sp_StrIntHash_get((sp_StrIntHash *)cap, (const char *)(uintptr_t)args[0]); }
+static mrb_int sp_StrIntHash_proc_fn(void *cap, mrb_int argc, mrb_int *args) { if (argc < 1) return 0; return sp_StrIntHash_get((sp_StrIntHash *)cap, (const char *)(uintptr_t)args[0]); }
 static const char*sp_StrStrHash_inspect(sp_StrStrHash*h){SP_GC_ROOT(h);sp_String*s=sp_String_new("{");SP_GC_ROOT(s);if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_str_inspect(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_str_inspect(sp_StrStrHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
 static const char*sp_IntStrHash_inspect(sp_IntStrHash*h){SP_GC_ROOT(h);sp_String*s=sp_String_new("{");SP_GC_ROOT(s);if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_str_inspect(sp_IntStrHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
 static const char*sp_IntIntHash_inspect(sp_IntIntHash*h){SP_GC_ROOT(h);sp_String*s=sp_String_new("{");SP_GC_ROOT(s);if(h){for(mrb_int i=0;i<h->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_int_to_s(h->order[i]));sp_String_append(s,"=>");sp_String_append(s,sp_int_to_s(sp_IntIntHash_get(h,h->order[i])));}}sp_String_append(s,"}");return s->data;}
@@ -5234,7 +5234,12 @@ static void sp_BoundMethod_scan(void *p) { sp_BoundMethod *m = (sp_BoundMethod *
 static sp_BoundMethod *sp_bound_method_new(void *self, mrb_int fn, const char *name) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->fn = fn; m->name = name; return m; }
 static mrb_int sp_proc_arity(sp_Proc *p) { return p ? p->arity : 0; }
 static mrb_bool sp_proc_lambda_p(sp_Proc *p) { return p ? p->lambda_p : FALSE; }
-static mrb_int sp_proc_call(sp_Proc *p, mrb_int *args) { if (!p || !p->fn) return 0; if (!args) { mrb_int noargs[16] = {0}; return ((mrb_int (*)(void *, mrb_int *))p->fn)(p->cap, noargs); } return ((mrb_int (*)(void *, mrb_int *))p->fn)(p->cap, args); }
+static mrb_int sp_proc_call(sp_Proc *p, mrb_int argc, mrb_int *args) { if (!p || !p->fn) return 0; if (!args) { mrb_int noargs[16] = {0}; return ((mrb_int (*)(void *, mrb_int, mrb_int *))p->fn)(p->cap, 0, noargs); } return ((mrb_int (*)(void *, mrb_int, mrb_int *))p->fn)(p->cap, argc, args); }
+/* Lambda strict-arity check: raise ArgumentError if argc is outside
+   [req, req+opt] (no upper bound with a rest param). Procs are lenient. */
+static void sp_proc_lambda_arity_check(mrb_int argc, mrb_int req, mrb_int opt, mrb_bool has_rest) {
+  if (argc < req || (!has_rest && argc > req + opt)) sp_raise_cls("ArgumentError", "wrong number of arguments");
+}
 static sp_PolyArray *sp_proc_parameters(sp_Proc *p) { sp_PolyArray *r = sp_PolyArray_new(); if (!p || p->param_count <= 0 || !p->param_kinds) return r; SP_GC_ROOT(r); for (mrb_int i = 0; i < p->param_count; i++) { sp_PolyArray *pair = sp_PolyArray_new(); sp_PolyArray_push(pair, sp_box_sym(p->param_kinds[i])); if (p->param_names && p->param_names[i] >= 0) sp_PolyArray_push(pair, sp_box_sym(p->param_names[i])); sp_PolyArray_push(r, sp_box_poly_array(pair)); } return r; }
 
 /* Proc#<< / Proc#>> composition. The composed proc captures the two
@@ -5243,14 +5248,14 @@ static sp_PolyArray *sp_proc_parameters(sp_Proc *p) { sp_PolyArray *r = sp_PolyA
    swaps the operands so `(f >> g).call(x)` == g(f(x)). */
 typedef struct { sp_Proc *outer; sp_Proc *inner; } sp_ProcCompose;
 static void sp_proc_compose_scan(void *p) { sp_ProcCompose *c = (sp_ProcCompose *)p; if (c->outer) sp_gc_mark(c->outer); if (c->inner) sp_gc_mark(c->inner); }
-static mrb_int sp_proc_compose_fn(void *cap, mrb_int *args) {
+static mrb_int sp_proc_compose_fn(void *cap, mrb_int argc, mrb_int *args) {
   sp_ProcCompose *c = (sp_ProcCompose *)cap;
   mrb_int inner_args[16] = {0};
-  if (args) inner_args[0] = args[0];
-  mrb_int mid = sp_proc_call(c->inner, inner_args);
+  if (args && argc > 0) inner_args[0] = args[0];
+  mrb_int mid = sp_proc_call(c->inner, 1, inner_args);
   mrb_int outer_args[16] = {0};
   outer_args[0] = mid;
-  return sp_proc_call(c->outer, outer_args);
+  return sp_proc_call(c->outer, 1, outer_args);
 }
 static sp_Proc *sp_proc_compose(sp_Proc *outer, sp_Proc *inner) {
   sp_ProcCompose *c = (sp_ProcCompose *)sp_gc_alloc(sizeof(sp_ProcCompose), NULL, sp_proc_compose_scan);
@@ -5279,7 +5284,7 @@ static sp_Curry *sp_curry_apply(sp_Curry *c, mrb_int arg) {
 }
 static mrb_int sp_curry_to_int(sp_Curry *c) {
   if (!c || !c->target) return 0;
-  return sp_proc_call(c->target, c->args);
+  return sp_proc_call(c->target, c->nargs, c->args);
 }
 
 /* Hash#to_proc cap-scan: the proc's `cap` field IS the source hash

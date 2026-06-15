@@ -562,12 +562,13 @@ void emit_call(Compiler *c, int id, Buf *b) {
         if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
         else emit_expr(c, argv[k], b);
       }
-      buf_printf(b, ") : sp_proc_call((sp_Proc *)_t%d.v.p, (mrb_int[16]){", t);
+      buf_printf(b, ") : sp_proc_call((sp_Proc *)_t%d.v.p, %d, (mrb_int[16]){", t, argc);
       for (int k = 0; k < argc; k++) {
         if (k) buf_puts(b, ", ");
         if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
         else emit_expr(c, argv[k], b);
       }
+      if (argc == 0) buf_puts(b, "0");  /* C99: no empty initializer list */
       buf_puts(b, "}))");
       return;
     }
@@ -693,13 +694,14 @@ void emit_call(Compiler *c, int id, Buf *b) {
     if (unbox_poly || unbox_float) buf_puts(b, "((void)");
     buf_puts(b, "sp_proc_call(");
     emit_expr(c, recv, b);
-    buf_puts(b, ", (mrb_int[16]){");
+    buf_printf(b, ", %d, (mrb_int[16]){", argc);
     for (int k = 0; k < argc; k++) {
       if (k) buf_puts(b, ", ");
       /* a heap-pointer argument is laundered into the mrb_int slot */
       if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
       else emit_expr(c, argv[k], b);
     }
+    if (argc == 0) buf_puts(b, "0");  /* C99: no empty initializer list */
     buf_puts(b, "})");
     if (unbox_ptr) buf_puts(b, ")");
     if (unbox_poly) buf_puts(b, ", _sp_proc_poly_ret)");
@@ -5568,8 +5570,9 @@ else {
         const char *keyexpr = (kt == TY_SYMBOL) ? "(sp_sym)args[0]"
                             : (kt == TY_STRING) ? "(const char *)(uintptr_t)args[0]"
                             : "args[0]";
-        buf_printf(&g_proc_protos, "static mrb_int _hashproc_%d(void *cap, mrb_int *args);\n", pn);
-        buf_printf(&g_procs, "static mrb_int _hashproc_%d(void *cap, mrb_int *args) {\n", pn);
+        buf_printf(&g_proc_protos, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args);\n", pn);
+        buf_printf(&g_procs, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args) {\n", pn);
+        buf_printf(&g_procs, "  if (argc < 1) return 0;\n");
         buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap;\n", hn, hn);
         if (vt == TY_POLY) {
           if (!g_needs_proc_poly_retslot) {

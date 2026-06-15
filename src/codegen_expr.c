@@ -603,7 +603,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
          sp_proc_call already returns mrb_int; emit it directly with no cast. */
       buf_puts(b, "sp_proc_call(");
       emit_yblk_ref(b);
-      buf_puts(b, ", (mrb_int[]){");
+      buf_printf(b, ", %d, (mrb_int[16]){", yargc);
       for (int k = 0; k < yargc; k++) { if (k) buf_puts(b, ", "); emit_expr(c, yargv[k], b); }
       if (yargc == 0) buf_puts(b, "0");
       buf_puts(b, "})");
