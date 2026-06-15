@@ -1,7 +1,7 @@
 # First-class Proc / lambda in the C rewrite — 設計と計画メモ
 
 `proc {}` / `lambda {}` / `->(){}` を**値**として扱う(変数代入・引数渡し・戻り値・
-`Proc#call`)機能を、C 書き直し(`src/analyze.c` + `src/codegen.c` → `build/spinelc`)に
+`Proc#call`)機能を、C 書き直し(`src/analyze.c` + `src/codegen.c` → `build/spinel`)に
 追加するための設計メモ。
 
 > **対象は C 書き直しのみ。** legacy Ruby (`legacy/spinel_*.rb`) は凍結リファレンス
@@ -92,7 +92,7 @@ poly 経由)は戻り値を `TY_POLY`(boxed)にフォールバック。
 
 ## 検証
 
-- 各スライス後: `build/spinelc` で対象 .rb を直接コンパイル+実行し CRuby/legacy と出力一致を確認。
+- 各スライス後: `build/spinel` で対象 .rb を直接コンパイル+実行し CRuby/legacy と出力一致を確認。
   `cc -Werror` で生成 C をビルド(ハーネスと同条件)。
 - `make test`(C 版)で proc*.ok が green に変わり、**他テストの pass 数が減らない**ことを確認
   (`rm -rf build/test-results/` してから)。680 error ベースラインは漸減が指標。

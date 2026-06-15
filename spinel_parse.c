@@ -1883,7 +1883,7 @@ else {
       content = read_file(lib_path);
       if (!content) {
         /* the compiler binary may live one level below the repo root (e.g.
-           build/spinelc with the stdlib at ../lib): retry one level up */
+           build/spinel with the stdlib at ../lib): retry one level up */
         char alt_path[1024];
         int exe_len = (int)strlen(lib_dir) - 4;   /* strip the trailing "/lib" */
         if (exe_len < 0) exe_len = 0;

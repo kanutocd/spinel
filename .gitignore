@@ -13,7 +13,7 @@
 /build/
 /legacy/build/
 /vendor/
-# Dev convenience symlink to build/spinelc (created by `make`)
+# Dev convenience symlink to build/spinel (created by `make`)
 /spinel
 
 # Temp files

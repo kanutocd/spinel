@@ -1,7 +1,7 @@
 # Spinel AOT Compiler - Makefile
 #
 # Usage:
-#   make              Build the C compiler (parser + runtime + spinelc)
+#   make              Build the C compiler (parser + runtime + spinel)
 #   make parse        Build the C parser only
 #   make test         Run the feature tests (always a fresh run)
 #   make bench        Run benchmarks vs CRuby
@@ -51,13 +51,10 @@ else
   RBS_EXTRACT_TARGET =
 endif
 
-all: parse regexp spinelc $(RBS_EXTRACT_TARGET) spinel
-
-# Dev convenience: a `./spinel` pointing at the built single binary (the
-# installed command is `spinel` too). Best-effort symlink, copy fallback for
-# filesystems without symlinks.
-spinel: $(SPINELC)
-	@ln -sf $(SPINELC) spinel 2>/dev/null || cp $(SPINELC) spinel
+# Note: use the phony `spinelc` alias here, not `$(SPINEL)` directly -- SPINEL
+# is defined further down, and prerequisites are expanded when this line is
+# read (it would expand to empty here).
+all: parse regexp spinelc $(RBS_EXTRACT_TARGET)
 
 # ---- Dependencies ----
 deps: vendor/prism/include/prism/diagnostic.h vendor/rbs/include/rbs/parser.h
@@ -128,11 +125,11 @@ spinel_parse$(EXE): spinel_parse.c $(PRISM_LIB)
 # The single-binary C reimplementation of the analyzer + code generator.
 # Reuses spinel_parse.c's Prism walk (compiled with -DSPINEL_PARSE_AS_LIB so
 # its standalone main() drops out and sp_parse_file_to_text is exposed).
-# The binary emits C; the test harness invokes cc to link libspinel_rt.a.
+# `spinel` is the single binary: it emits C and then drives cc to link it.
 
-SPINELC      = build/spinelc$(EXE)
-SPINELC_HDRS = src/node_table.h src/codegen.h src/codegen_internal.h src/types.h src/compiler.h src/analyze.h src/analyze_internal.h
-SPINELC_OBJ  = build/csrc/node_table.o build/csrc/types.o build/csrc/compiler.o \
+SPINEL      = build/spinel$(EXE)
+SPINEL_HDRS = src/node_table.h src/codegen.h src/codegen_internal.h src/types.h src/compiler.h src/analyze.h src/analyze_internal.h
+SPINEL_OBJ  = build/csrc/node_table.o build/csrc/types.o build/csrc/compiler.o \
                build/csrc/analyze.o build/csrc/analyze_util.o build/csrc/analyze_infer.o \
                build/csrc/analyze_scope.o build/csrc/analyze_pass.o build/csrc/codegen.o build/csrc/codegen_util.o \
                build/csrc/codegen_fold.o build/csrc/codegen_call.o \
@@ -141,16 +138,20 @@ SPINELC_OBJ  = build/csrc/node_table.o build/csrc/types.o build/csrc/compiler.o 
 build/csrc:
 	@mkdir -p build/csrc
 
-build/csrc/%.o: src/%.c $(SPINELC_HDRS) | build/csrc
+build/csrc/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
 build/csrc/sp_parse_lib.o: spinel_parse.c $(PRISM_LIB) | build/csrc
 	$(CC) $(CFLAGS) -DSPINEL_PARSE_AS_LIB -I$(PRISM_INC) -c spinel_parse.c -o $@
 
-$(SPINELC): $(SPINELC_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB)
-	$(CC) $(CFLAGS) $(SPINELC_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB) -lm $(LDFLAGS) -o $@
+$(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB)
+	$(CC) $(CFLAGS) $(SPINEL_OBJ) build/csrc/sp_parse_lib.o $(PRISM_LIB) -lm $(LDFLAGS) -o $@
+	@# Dev convenience: a repo-root `./spinel` pointing at the built binary
+	@# (the installed command is `spinel` too). Best-effort; gitignored.
+	@ln -sf $@ spinel 2>/dev/null || cp $@ spinel 2>/dev/null || true
 
-spinelc: $(SPINELC)
+# Backward-compatible alias for `make spinelc` (the binary is build/spinel now).
+spinelc: $(SPINEL)
 
 # ---- Legacy Ruby compiler (regression oracle) ----
 # Lives in legacy/ with its own Makefile; these are thin delegators.
@@ -321,9 +322,9 @@ endif
 analyze-fail-test:
 	+@$(MAKE) -C legacy --no-print-directory analyze-fail-test
 
-# The .ok target is the test's stamp. Order-only $(SPINELC) keeps a
+# The .ok target is the test's stamp. Order-only $(SPINEL) keeps a
 # compiler relink from invalidating every test.
-build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINELC)
+build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINEL)
 	@mkdir -p build/test-results
 	@tmpdir=$$(mktemp -d /tmp/spinel-test.XXXXXX); \
 	ast=$$tmpdir/test.ast; \
@@ -335,7 +336,7 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINELC)
 	args=""; \
 	if [ -f "$<.args" ]; then args=$$(cat "$<.args"); fi; \
 	rm -f "$@.diff"; \
-	$(SPINELC) "$<" -c --no-line-map -o "$$cfile" 2>/dev/null && \
+	$(SPINEL) "$<" -c --no-line-map -o "$$cfile" 2>/dev/null && \
 	$(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
 	$(CC) $(CFLAGS) "$$cfile.o" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
@@ -392,7 +393,7 @@ test/%.rb.expected: test/%.rb
 	  rm -f $@.tmp; \
 	fi
 
-bench: $(SPINELC) $(SP_RT_LIB)
+bench: $(SPINEL) $(SP_RT_LIB)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@total=$$(ls benchmark/*.rb | wc -l); \
 	if [ -t 1 ]; then tty=1; else tty=0; fi; \
@@ -401,7 +402,7 @@ bench: $(SPINELC) $(SP_RT_LIB)
 	  i=$$((i+1)); \
 	  bn=$$(basename "$$f" .rb); \
 	  if [ "$$tty" = 1 ]; then printf '\r\033[K  [%d/%d] %s' "$$i" "$$total" "$$bn"; fi; \
-	  $(TIMEOUT10) $(SPINELC) "$$f" -c --no-line-map -o /tmp/_sp_b.c 2>/dev/null && \
+	  $(TIMEOUT10) $(SPINEL) "$$f" -c --no-line-map -o /tmp/_sp_b.c 2>/dev/null && \
 	  $(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib -c /tmp/_sp_b.c -o /tmp/_sp_b.c.o 2>/dev/null && \
 	  $(CC) $(CFLAGS) /tmp/_sp_b.c.o $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o /tmp/_sp_b_bin$(EXE) 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
@@ -442,12 +443,12 @@ OPTCARROT_DIR  := build/optcarrot
 OPTCARROT_REPO := https://github.com/mame/optcarrot.git
 OPTCARROT_BRANCH := experiment/spinel
 
-optcarrot: $(SPINELC) $(SP_RT_LIB)
+optcarrot: $(SPINEL) $(SP_RT_LIB)
 	@if [ ! -d $(OPTCARROT_DIR) ]; then \
 	  git clone --depth=1 --branch=$(OPTCARROT_BRANCH) $(OPTCARROT_REPO) $(OPTCARROT_DIR); \
 	fi
 	@ruby $(OPTCARROT_DIR)/tools/pack-for-spinel.rb > build/optcarrot-single.rb
-	@$(SPINELC) build/optcarrot-single.rb -c --no-line-map -o build/optcarrot-single.c
+	@$(SPINEL) build/optcarrot-single.rb -c --no-line-map -o build/optcarrot-single.c
 	@$(CC) $(CFLAGS) -DSP_INT_OVERFLOW_MODE_WRAP -Ilib build/optcarrot-single.c $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o build/optcarrot-single
 	@out=$$($(TIMEOUT60) ./build/optcarrot-single 2>&1); \
 	echo "$$out"; \
@@ -501,7 +502,7 @@ SPNLDIR   = $(PREFIX)/lib/spinel
 # shipped — `legacy/spinel-legacy` stays in the source tree for comparison.
 install: all
 	install -d $(SPNLDIR)/lib
-	install -m 755 $(SPINELC)            $(SPNLDIR)/spinel$(EXE)
+	install -m 755 $(SPINEL)            $(SPNLDIR)/spinel$(EXE)
 	install -m 644 lib/libspinel_rt.a    $(SPNLDIR)/lib/
 	install -m 644 lib/sp_runtime.h      $(SPNLDIR)/lib/
 	install -m 644 lib/sp_types.h        $(SPNLDIR)/lib/

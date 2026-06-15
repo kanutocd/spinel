@@ -1,4 +1,4 @@
-/* spinelc / spinel: the single-binary Spinel compiler *and* driver.
+/* spinel: the single-binary Spinel compiler *and* driver.
  *
  * One executable does the whole job, with no shell wrapper and no chain of
  * helper binaries (the legacy parse -> analyze -> codegen pipeline collapsed
@@ -136,7 +136,7 @@ static void exe_dir(const char *argv0, char *out, size_t outsz) {
   out[outsz - 1] = '\0';
 }
 
-/* Resolve the lib/ directory: a dev tree builds the binary at build/spinelc
+/* Resolve the lib/ directory: a dev tree builds the binary at build/spinel
    (lib at ../lib); an installed tree drops it next to lib/. */
 static void resolve_lib_dir(const char *argv0, char *out, size_t outsz) {
   char dir[4096], cand[4096];

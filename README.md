@@ -86,7 +86,7 @@ RUBY
 ./spinel app.rb --int-overflow=wrap   # +/-/* wrap silently instead of raising
 ```
 
-`./spinel` is the compiler: a single native binary (`build/spinelc`; the
+`./spinel` is the compiler: a single native binary (`build/spinel`; the
 repo-root `spinel` is a convenience symlink `make` creates) that parses,
 infers types, emits C, invokes `cc` to link it, and can run the result —
 no shell wrapper or chained helper binaries, so it works on Windows
@@ -356,7 +356,7 @@ Whole-program type inference drives several compile-time optimizations:
 ## Architecture
 
 ```
-spinel                Single binary: compiler + cc driver (symlink to build/spinelc)
+spinel                Single binary: compiler + cc driver (symlink to build/spinel)
 spinel_parse.c        C frontend: libprism → text AST (1_608 lines)
 spinel_analyze.rb     Type inference: AST → IR (21_162 lines, self-hosted)
 spinel_codegen.rb     C emission: AST + IR → C (30_411 lines, self-hosted)
@@ -484,7 +484,7 @@ by inlining the referenced file.
 
 ```bash
 make deps         # fetch libprism into vendor/prism (one-time)
-make              # build the C compiler (parser + regexp library + spinelc)
+make              # build the C compiler (parser + regexp library + spinel)
 make test         # run the feature tests (always a fresh run)
 make bench        # run benchmarks vs CRuby
 make legacy       # build the legacy Ruby compiler into legacy/build/
