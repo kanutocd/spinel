@@ -578,6 +578,49 @@ int ie_class_of(Compiler *c, int node) {
   return (g_ie_node_class && node >= 0) ? g_ie_node_class[node] : -1;
 }
 
+/* Register an ivar first assigned inside an instance_exec/instance_eval block on
+   the block's receiver class. register_locals only interns ivar writes whose
+   enclosing scope is a class body or method; an ivar written solely inside a
+   lifted iexec block has no such scope, so without this it gets no struct slot
+   (and any read of it fails to resolve). Runs in the fixpoint right after
+   build_ie_map; returns 1 when it adds a new slot so the fixpoint re-runs and
+   infers the new ivar's type from its assignment. */
+int register_ie_block_ivars(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (!g_ie_node_class) return 0;
+  int changed = 0;
+  for (int id = 0; id < nt->count; id++) {
+    int cls = g_ie_node_class[id];
+    if (cls < 0) continue;
+    const char *ty = nt_type(nt, id);
+    if (!ty) continue;
+    if (strcmp(ty, "InstanceVariableWriteNode") &&
+        strcmp(ty, "InstanceVariableOperatorWriteNode") &&
+        strcmp(ty, "InstanceVariableOrWriteNode") &&
+        strcmp(ty, "InstanceVariableAndWriteNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    ClassInfo *ci = &c->classes[cls];
+    int iv = comp_ivar_index(ci, nm);
+    if (iv < 0) { iv = comp_ivar_intern(ci, nm); changed = 1; }
+    /* Type the slot from the assignment value. The general ivar-write inference
+       keys on the write's enclosing scope class_id, which for a lifted iexec
+       block is the toplevel/method, not the receiver -- so it never types this
+       slot. An ivar written only inside iexec blocks has no competing writer, so
+       widening it here from the value type is safe. */
+    int v = nt_ref(nt, id, "value");
+    if (v >= 0) {
+      TyKind vt = infer_type(c, v);
+      if (vt != TY_UNKNOWN && vt != TY_NIL) {
+        TyKind cur = ci->ivar_types[iv];
+        TyKind nu = (cur == TY_UNKNOWN) ? vt : ty_unify(cur, vt);
+        if (nu != cur) { ci->ivar_types[iv] = nu; changed = 1; }
+      }
+    }
+  }
+  return changed;
+}
+
 /* ---- Block/lambda parameter alpha-renaming ----------------------------
  * Block and lambda parameters are interned into the *enclosing* scope, so a
  * parameter sharing a name with an enclosing local collapses onto a single
@@ -1390,6 +1433,7 @@ void analyze_program(Compiler *c) {
     int ch = 0;
     sp_narrow_memo_bump();  /* invalidate per-iteration narrow-helper memo */
     build_ie_map(c);  /* refresh instance_exec receiver-class map each pass */
+    ch |= register_ie_block_ivars(c);  /* slot ivars first assigned in iexec blocks */
     ch |= infer_write_types(c);
     ch |= infer_param_types(c);
     ch |= infer_param_hash_value(c);
