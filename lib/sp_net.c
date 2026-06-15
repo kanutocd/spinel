@@ -68,20 +68,38 @@ const char *sp_net_shell_capture(const char *cmd, int max_bytes) { (void)cmd; (v
 /* ---------- graceful shutdown ---------- */
 
 static volatile sig_atomic_t sp_net_term_flag = 0;
+/* Self-pipe: the term handler writes a byte here so a blocked accept (via
+ * poll) wakes even when the signal lands in the check-then-accept window. */
+static int sp_net_sigpipe[2] = {-1, -1};
 
 static void sp_net_term_signal(int sig) {
     (void)sig;
     sp_net_term_flag = 1;
+    if (sp_net_sigpipe[1] >= 0) {
+        ssize_t w = write(sp_net_sigpipe[1], "x", 1);  /* write() is async-signal-safe */
+        (void)w;
+    }
 }
 
 int sp_net_install_term_handlers(void) {
+    if (sp_net_sigpipe[0] < 0 && pipe(sp_net_sigpipe) == 0) {
+        for (int i = 0; i < 2; i++) {
+            int fl = fcntl(sp_net_sigpipe[i], F_GETFL, 0);
+            if (fl >= 0) fcntl(sp_net_sigpipe[i], F_SETFL, fl | O_NONBLOCK);
+            int fd = fcntl(sp_net_sigpipe[i], F_GETFD, 0);
+            if (fd >= 0) fcntl(sp_net_sigpipe[i], F_SETFD, fd | FD_CLOEXEC);
+        }
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = sp_net_term_signal;
     sigemptyset(&sa.sa_mask);
-    /* SA_RESETHAND: a second signal restores the default action so a
-     * non-cooperative second Ctrl-C kills immediately. */
-    sa.sa_flags = SA_RESETHAND;
+    /* No SA_RESETHAND and no SA_RESTART: a repeated term signal must keep
+     * hitting this handler (idempotent flag set) rather than the default
+     * action -- the latter killed the process with 143 instead of letting
+     * the accept loop exit cleanly. Without SA_RESTART, a signal during a
+     * blocked accept/poll surfaces as EINTR. */
+    sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT,  &sa, NULL);
     return 0;
@@ -125,11 +143,26 @@ int sp_net_accept(int sfd) {
     socklen_t clen = sizeof(caddr);
     int fd;
     for (;;) {
-        /* Honor a term signal that arrived between accepts (flag set
-         * with no syscall in flight to interrupt) -- check before
-         * blocking, not only on EINTR, or the next accept() blocks
-         * forever with the flag already set. */
         if (sp_net_term_flag) return -1;
+        /* Wait for an incoming connection OR a term signal (which wakes the
+         * self-pipe). Polling first closes the check-then-block race: a
+         * signal that set the flag/pipe before we block makes poll return
+         * immediately, so we never enter a blocking accept with the flag
+         * already set. */
+        struct pollfd pfds[2];
+        pfds[0].fd = sfd;               pfds[0].events = POLLIN; pfds[0].revents = 0;
+        nfds_t npfd = 1;
+        if (sp_net_sigpipe[0] >= 0) {
+            pfds[1].fd = sp_net_sigpipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
+            npfd = 2;
+        }
+        int pr = poll(pfds, npfd, -1);
+        if (sp_net_term_flag) return -1;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (!(pfds[0].revents & POLLIN)) continue;  /* woken by the self-pipe alone */
         fd = accept(sfd, (struct sockaddr *)&caddr, &clen);
         if (fd >= 0) return fd;
         if (errno == EINTR) {
