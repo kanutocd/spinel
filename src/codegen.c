@@ -2387,6 +2387,10 @@ char *codegen_program(const NodeTable *nt) {
   buf_puts(&body, "    sp_re_init();\n");
   buf_puts(&body, "    { sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
   buf_puts(&body, "    sp_program_name = argc > 0 ? argv[0] : \"\";\n");
+  /* Ruby auto-seeds its PRNG at startup, so rand/shuffle/sample vary per
+     run. Seed once here; an explicit srand(seed) in user code runs later
+     and overrides this for reproducible sequences. */
+  buf_puts(&body, "    srand((unsigned)time(NULL));\n");
   /* Register END blocks (atexit runs LIFO, so they execute in reverse registration order) */
   for (int e = 1; e <= end_count; e++)
     buf_printf(&body, "    atexit(sp_end_fn_%d);\n", e);
