@@ -1454,7 +1454,15 @@ else {
         int is_sym_op = a0ty && !strcmp(a0ty, "SymbolNode") && argc == 1;
         if (!is_sym_op) {
           TyKind it = infer_type(c, argv[0]);
-          if (it != TY_UNKNOWN) return it;
+          if (it != TY_UNKNOWN) {
+            /* The accumulator is reassigned to the block body each iteration,
+               so an int seed folded over floats accumulates float. */
+            int rblk = nt_ref(nt, id, "block");
+            int rbody = rblk >= 0 ? nt_ref(nt, rblk, "body") : -1;
+            int rbn = 0; const int *rbb = rbody >= 0 ? nt_arr(nt, rbody, "body", &rbn) : NULL;
+            if (rbn > 0) { TyKind bt = infer_type(c, rbb[rbn - 1]); if (ty_is_numeric(bt)) it = ty_promote_numeric(it, bt); }
+            return it;
+          }
         }
       }
       /* empty array literal `[]` with sym op: codegen treats as int_array → returns int */

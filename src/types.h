@@ -53,6 +53,7 @@ typedef enum {
 
 const char *ty_name(TyKind t);         /* legacy string tag, for diagnostics */
 int ty_is_numeric(TyKind t);           /* INT or FLOAT */
+TyKind ty_promote_numeric(TyKind a, TyKind b); /* fold-accumulator numeric promotion */
 int ty_is_array(TyKind t);
 TyKind ty_array_of(TyKind elem);       /* element type -> array kind */
 TyKind ty_array_elem(TyKind arr);      /* array kind -> element type */

@@ -118,3 +118,18 @@ TyKind ty_unify(TyKind a, TyKind b) {
   if (b == TY_NIL && ty_is_object(a)) return a;
   return TY_POLY;
 }
+
+/* Numeric accumulator promotion: a fold accumulator seeded with one numeric
+   type but reassigned to another (e.g. `[1.5].reduce(0){|a,x| a+x}` -- an int
+   seed folded over floats) takes the wider numeric type (float > bigint > int)
+   rather than widening to poly. Non-numeric mixes fall back to ty_unify. */
+TyKind ty_promote_numeric(TyKind a, TyKind b) {
+  if (a == b) return a;
+  if (a == TY_UNKNOWN) return b;
+  if (b == TY_UNKNOWN) return a;
+  if (ty_is_numeric(a) && ty_is_numeric(b)) {
+    if (a == TY_FLOAT || b == TY_FLOAT) return TY_FLOAT;
+    return TY_BIGINT;  /* int + bigint */
+  }
+  return ty_unify(a, b);
+}

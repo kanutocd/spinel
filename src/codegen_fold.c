@@ -1151,6 +1151,11 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     TyKind it = comp_ntype(c, init);
     if (it != TY_UNKNOWN) acc_ty = it;
   }
+  /* An int seed folded over floats accumulates float (matches the reduce
+     return-type promotion in infer_type); keep the C accumulator type in step.
+     Only a numeric body promotes -- a poly body keeps the seed type (codegen
+     re-types the params and re-infers the body under the shadow below). */
+  { TyKind bt = comp_ntype(c, bb[bn - 1]); if (ty_is_numeric(bt)) acc_ty = ty_promote_numeric(acc_ty, bt); }
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp;
   buf_puts(b, "({ ");
   emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", ta); emit_expr(c, recv, b); buf_puts(b, "; ");
