@@ -4796,7 +4796,11 @@ static const char *sp_file_read(const char *path) {
     sp_raise_cls("Errno::EISDIR", sp_sprintf("Is a directory @ io_fread - %s", path));
   }
   FILE *f = fopen(path, "r");
-  if (!f) return &("\xff" "")[1];
+  if (!f) {
+    sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" : errno == EACCES ? "Errno::EACCES" : "RuntimeError",
+                 sp_sprintf("%s @ rb_sysopen - %s", strerror(errno), path));
+    return &("\xff" "")[1];
+  }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -4815,10 +4819,13 @@ static void sp_file_write(const char *path, const char *data) {
     sp_raise_cls("Errno::EISDIR", sp_sprintf("Is a directory @ rb_sysopen - %s", path));
   }
   FILE *f = fopen(path, "wb");
-  if (f) {
-    fwrite(data, 1, sp_str_byte_len(data), f);
-    fclose(f);
+  if (!f) {
+    sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" : errno == EACCES ? "Errno::EACCES" : "RuntimeError",
+                 sp_sprintf("%s @ rb_sysopen - %s", strerror(errno), path));
+    return;
   }
+  fwrite(data, 1, sp_str_byte_len(data), f);
+  fclose(f);
 }
 static sp_Time sp_file_mtime(const char *path) {
   if (!path) {
@@ -5110,7 +5117,11 @@ static sp_IntArray *sp_file_binread_bytes(const char *path) {
   }
   FILE *f = fopen(path, "rb");
   sp_IntArray *a = sp_IntArray_new();
-  if (!f) return a;
+  if (!f) {
+    sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" : errno == EACCES ? "Errno::EACCES" : "RuntimeError",
+                 sp_sprintf("%s @ rb_sysopen - %s", strerror(errno), path));
+    return a;
+  }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
