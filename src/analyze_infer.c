@@ -1754,6 +1754,7 @@ else {
   if (recv >= 0 && ty_is_hash(rt)) {
     if (!strcmp(name, "to_proc")) return TY_PROC;
     if (!strcmp(name, "key") && argc == 1 && rt == TY_SYM_POLY_HASH) return TY_SYMBOL;
+    if (!strcmp(name, "to_h") && argc == 0 && nt_ref(nt, id, "block") < 0) return rt;  /* identity */
     if (!strcmp(name, "[]"))     return ty_hash_val(rt);
     if (!strcmp(name, "[]="))    return argc >= 2 ? ty_unify(infer_type(c, argv[1]), ty_hash_val(rt)) : ty_hash_val(rt);
     if (!strcmp(name, "fetch")) {

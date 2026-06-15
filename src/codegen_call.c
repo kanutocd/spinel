@@ -1683,6 +1683,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
 
   /* freeze / frozen? on hashes: use the GC-header frozen bit */
   if (recv >= 0 && argc == 0 && ty_is_hash(comp_ntype(c, recv))) {
+    if (!strcmp(name, "to_h") && nt_ref(nt, id, "block") < 0) {  /* identity */
+      emit_expr(c, recv, b);
+      return;
+    }
     if (!strcmp(name, "freeze")) {
       buf_puts(b, "sp_gc_freeze("); emit_expr(c, recv, b); buf_puts(b, ")");
       return;
