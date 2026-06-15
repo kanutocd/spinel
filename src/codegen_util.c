@@ -327,6 +327,7 @@ int builtin_class_id(const char *name) {
 const char *c_type_name(TyKind t) {
   switch (t) {
     case TY_INT:         return "mrb_int";
+    case TY_BIGINT:      return "sp_Bigint *";
     case TY_FLOAT:       return "mrb_float";
     case TY_BOOL:        return "mrb_bool";
     case TY_STRING:      return "const char *";
@@ -364,7 +365,7 @@ const char *c_type_name(TyKind t) {
   }
 }
 int is_scalar_ret(TyKind t) {
-  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
+  return t == TY_INT || t == TY_BIGINT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
          t == TY_SYMBOL || t == TY_RANGE || t == TY_TIME || t == TY_COMPLEX || t == TY_RATIONAL || t == TY_STRINGIO || t == TY_STRINGSCANNER || t == TY_MATCHDATA || t == TY_REGEX || t == TY_EXCEPTION ||
          t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY ||
          t == TY_STRBUF ||
