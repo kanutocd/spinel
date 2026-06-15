@@ -2340,7 +2340,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (cn && !strcmp(cn, "Array") && argc == 1 && nt_ref(nt, id, "block") < 0) {
         /* Array.new(n) -> PolyArray of n nils */
         int tn = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-        Buf nb; memset(&nb, 0, sizeof nb); emit_expr(c, argv[0], &nb);
+        Buf nb; memset(&nb, 0, sizeof nb); emit_int_expr(c, argv[0], &nb);  /* poly size -> int (spinel-dev#24) */
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "mrb_int _t%d = ", tn); buf_puts(g_pre, nb.p ? nb.p : "0"); buf_puts(g_pre, ";\n");
         emit_indent(g_pre, g_indent);
@@ -2364,7 +2364,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         const char *ip = block_param_name(c, blk, 0);
         const char *irn = ip ? rename_local(ip) : NULL;
         Buf nb; memset(&nb, 0, sizeof nb);
-        if (argc >= 1) emit_expr(c, argv[0], &nb);
+        if (argc >= 1) emit_int_expr(c, argv[0], &nb);  /* poly size -> int (spinel-dev#24) */
         emit_indent(g_pre, g_indent);
         if (argc >= 1) { buf_printf(g_pre, "mrb_int _t%d = ", tn); buf_puts(g_pre, nb.p ? nb.p : "0"); buf_puts(g_pre, ";\n"); }
         else { buf_printf(g_pre, "mrb_int _t%d = 0;\n", tn); }
@@ -2416,7 +2416,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         const char *k = (at == TY_POLY_ARRAY) ? "Poly" : array_kind(at);
         if (k) {
           int tn = ++g_tmp, tv = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-          Buf nb; memset(&nb, 0, sizeof nb); emit_expr(c, argv[0], &nb);
+          /* The size goes into an `mrb_int` temp; coerce a poly size expression
+             (e.g. `nrows * ncols` where a factor widened to poly -> sp_poly_mul,
+             which returns sp_RbVal) through sp_poly_to_i. spinel-dev#24. */
+          Buf nb; memset(&nb, 0, sizeof nb); emit_int_expr(c, argv[0], &nb);
           Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, argv[1], &vb);
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "mrb_int _t%d = ", tn); buf_puts(g_pre, nb.p ? nb.p : ""); buf_puts(g_pre, ";\n");
