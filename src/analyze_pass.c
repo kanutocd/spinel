@@ -242,6 +242,10 @@ int infer_write_types(Compiler *c) {
     else {
       continue;
     }
+    /* A void value assigned in value position (`v = always_raising_method`)
+       is nil-ish: type the slot poly so it is declarable. The RHS call is
+       emitted via emit_boxed, which evaluates it (it diverges) and yields nil. */
+    if (newt == TY_VOID) newt = TY_POLY;
     if (!nm) continue;
     LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
     if (!lv || lv->is_block_param) continue;
@@ -1057,6 +1061,10 @@ else {
     }
     LocalVar *p = scope_local(m, m->pnames[k]);
     if (!p || p->rbs_seeded) continue;
+    /* A void arg (`sink(always_raising_method)`) is nil-ish in value position:
+       bind the param poly so it is declarable; the arg is emitted via
+       emit_boxed (it diverges and yields nil). */
+    if (at == TY_VOID) at = TY_POLY;
     /* A nil arg narrows against an object param (NULL encodes nil) but widens
        any non-object param to poly. Pass nil through to ty_unify only while
        the param is still unknown or already an object. */

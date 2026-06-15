@@ -108,7 +108,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
            ({ int _n = 0; nt_arr(c->nt, arg, "elements", &_n); _n == 0; })) {
     buf_puts(b, "(void)0;  /* puts [] prints nothing */\n");
   }
-  else if (t == TY_NIL) {
+  else if (t == TY_NIL || t == TY_VOID) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); putchar('\\n');  /* puts nil */\n");
   }
   else if (nt_type(c->nt, arg) && !strcmp(nt_type(c->nt, arg), "ConstantReadNode") &&
@@ -170,6 +170,11 @@ void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   else if (t == TY_NIL) {
     (void)arg;
+  }
+  else if (t == TY_VOID) {
+    /* a void value (e.g. an always-raising method) printed: evaluate it for
+       its effect (it diverges or returns nil); print renders nil as nothing */
+    buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, ");\n");
   }
   else if (t == TY_POLY || ty_is_object(t)) {
     int tv = ++g_tmp;
@@ -246,7 +251,7 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "{ sp_Time _t%d = ", tv); emit_expr(c, arg, b);
     buf_printf(b, "; fputs(sp_time_inspect_v(_t%d), stdout); putchar('\\n'); }\n", tv);
   }
-  else if (t == TY_NIL) {
+  else if (t == TY_NIL || t == TY_VOID) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
   }
   else if (nt_type(c->nt, arg) && !strcmp(nt_type(c->nt, arg), "ArrayNode") &&
