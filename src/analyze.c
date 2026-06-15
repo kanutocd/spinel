@@ -499,40 +499,29 @@ void blkp_mark_subtree(const NodeTable *nt, int node, char *marks) {
   for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(nt, node, i, &n); for (int k = 0; k < n; k++) blkp_mark_subtree(nt, ids[k], marks); }
 }
 
-/* Iteration block parameters (each/map/select/...) are already shadow-safe via
-   a codegen save/restore around the inlined body. Renaming is only needed for
-   forms the inliner does not cover: lambdas lowered to standalone proc
-   functions, and instance_eval/exec (and trampoline) block bodies spliced at
-   the call site. Returns 1 if `L` is such a node. */
+/* A block/lambda parameter is interned into the enclosing (flat) scope, so two
+   blocks reusing a name -- or a block param sharing a name with an enclosing
+   local -- collapse onto one LocalVar and one type. The rename pass below splits
+   them, but only for nodes this predicate accepts. We accept any block owned by
+   a call: the collision check in rename_shadowing_block_params is the real
+   filter (it fires only when the name is actually shared), and codegen reads
+   every param name through block_param_name + rename_local, so a renamed slot
+   stays consistent in the inliner, the standalone-proc lowering, and the
+   instance_eval/exec splice path alike. Returns 1 if `L` is such a node. */
 int blkp_needs_rename(Compiler *c, int L) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, L);
   if (ty && !strcmp(ty, "LambdaNode")) return 1;
   if (!ty || strcmp(ty, "BlockNode")) return 0;
-  /* Find the CallNode that owns this block. Rename for forms whose block
-     params are typed by a dedicated param-inference pass (so a renamed slot
-     still gets a type): instance_eval/exec splice bodies and inject/reduce
-     folds. Ordinary iteration blocks (each/map/...) keep the inliner's
-     save/restore over the shared slot and must not be renamed. */
+  /* A block owned by a call is renameable. Ordinary iteration blocks
+     (each/map/select/...) were once excluded on the assumption the inliner's
+     save/restore made them shadow-safe; that holds for the element-typed shadow
+     path but not when sibling blocks of divergent element types share a name
+     (e.g. `arr.map{|x| x+0.5}.map{|x| x.floor}` -- the poly-array map leg writes
+     the shared poly slot), so they go through the collision gate too. */
   for (int id = 0; id < nt->count; id++) {
     if (nt_ref(nt, id, "block") != L) continue;
-    const char *cn = nt_str(nt, id, "name");
-    if (!cn) return 0;
-    if (!strcmp(cn, "instance_eval") || !strcmp(cn, "instance_exec") ||
-        !strcmp(cn, "inject") || !strcmp(cn, "reduce")) return 1;
-    /* blocks lifted to standalone proc/fiber functions: proc {} / lambda {} /
-       Proc.new {} / Fiber.new {} / Thread.new {}. Their params are typed by a
-       dedicated pass, so renaming a shadowing param is safe. */
-    int rcv = nt_ref(nt, id, "receiver");
-    if (rcv < 0 && (!strcmp(cn, "proc") || !strcmp(cn, "lambda"))) return 1;
-    if (rcv >= 0 && !strcmp(cn, "new")) {
-      const char *rty = nt_type(nt, rcv);
-      int is_const = rty && (!strcmp(rty, "ConstantReadNode") ||
-                             (!strcmp(rty, "ConstantPathNode") && nt_ref(nt, rcv, "parent") < 0));
-      const char *rn = is_const ? nt_str(nt, rcv, "name") : NULL;
-      if (rn && (!strcmp(rn, "Proc") || !strcmp(rn, "Fiber") || !strcmp(rn, "Thread"))) return 1;
-    }
-    return 0;
+    return nt_str(nt, id, "name") != NULL;
   }
   return 0;
 }

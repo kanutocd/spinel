@@ -2250,7 +2250,7 @@ int infer_block_params(Compiler *c) {
               !strcmp(name, "map!") || !strcmp(name, "collect!") ||
               !strcmp(name, "select!") || !strcmp(name, "filter!") || !strcmp(name, "reject!") ||
               !strcmp(name, "uniq") || !strcmp(name, "uniq!") ||
-              !strcmp(name, "keep_if") || !strcmp(name, "delete_if") || !strcmp(name, "each_index") ||
+              !strcmp(name, "keep_if") || !strcmp(name, "delete_if") ||
               !strcmp(name, "flat_map") || !strcmp(name, "each_with_object") ||
               !strcmp(name, "chunk") || !strcmp(name, "group_by") ||
               !strcmp(name, "tally_by") || !strcmp(name, "min_by_all") ||
@@ -2259,6 +2259,9 @@ int infer_block_params(Compiler *c) {
               !strcmp(name, "each_cons") || !strcmp(name, "cycle")) &&
              ty_is_array(rt))
       pt = ty_array_elem(rt);
+    /* each_index { |i| } binds the index, not the element: always int. */
+    else if (!strcmp(name, "each_index") && ty_is_array(rt))
+      pt = TY_INT;
     /* TY_POLY receiver with iteration methods: element type is TY_POLY */
     else if (rt == TY_POLY &&
              (!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
