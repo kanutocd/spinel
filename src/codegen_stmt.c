@@ -1387,6 +1387,46 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
     t = ++g_tmp;
     emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, "; ");
   }
+
+  /* Fast path: `case <int> when <integer literals>` captures the branch value
+     into _cr through a C switch (jump table) instead of an O(n) `==` if-chain
+     -- the slab-AST `case @nd_type[id] when <int>` interpreter-dispatch shape
+     (#282). INT only: the poly path keeps sp_poly_eq (`===`), since
+     sp_poly_to_i on a non-numeric subject would mis-match `case 0`. */
+  if (pred >= 0 && pt == TY_INT && nw > 0) {
+    int all_int = 1, ndup = 0;
+    long long vals[512];
+    for (int w = 0; w < nw && all_int; w++) {
+      int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+      if (wc == 0) { all_int = 0; break; }
+      for (int j = 0; j < wc; j++) {
+        const char *cty = nt_type(nt, conds[j]);
+        if (!cty || strcmp(cty, "IntegerNode")) { all_int = 0; break; }
+        long long v = (long long)nt_int(nt, conds[j], "value", 0);
+        for (int d = 0; d < ndup; d++) if (vals[d] == v) { all_int = 0; break; }  /* dup label -> bail */
+        if (all_int && ndup < (int)(sizeof vals / sizeof vals[0])) vals[ndup++] = v;
+      }
+    }
+    if (all_int) {
+      buf_printf(b, "switch (_t%d) { ", t);
+      for (int w = 0; w < nw; w++) {
+        int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+        for (int j = 0; j < wc; j++)
+          buf_printf(b, "case %lldLL: ", (long long)nt_int(nt, conds[j], "value", 0));
+        buf_puts(b, "{ ");
+        emit_case_branch_value(c, nt_ref(nt, whens[w], "statements"), rt, cr, b);
+        buf_puts(b, "break; } ");
+      }
+      if (else_c >= 0) {
+        buf_puts(b, "default: { ");
+        emit_case_branch_value(c, nt_ref(nt, else_c, "statements"), rt, cr, b);
+        buf_puts(b, "break; } ");
+      }
+      buf_printf(b, "} _cr%d; })", cr);
+      return;
+    }
+  }
+
   for (int w = 0; w < nw; w++) {
     int wn = whens[w];
     int wc = 0;
