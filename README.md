@@ -92,8 +92,10 @@ infers types, emits C, invokes `cc` to link it, and can run the result —
 no shell wrapper or chained helper binaries, so it works on Windows
 natively. It supports the full option set, including `--rbs DIR`
 (RBS-seeded inference) and the `--emit-rbs` / `--emit-types` /
-`--emit-symbol-map` analysis modes. The legacy Ruby backend is kept as a
-regression oracle and has its own driver, `./legacy/spinel-legacy`.
+`--emit-symbol-map` analysis modes. The legacy Ruby backend is kept only as
+a headless regression oracle (the self-host fixpoint and analyze-fail
+gates), driven by `make bootstrap` / `make analyze-fail-test`; it no longer
+ships a user-facing driver.
 
 #### Integer overflow
 
@@ -494,8 +496,9 @@ make clean        # remove build artifacts
 ```
 
 The legacy Ruby backend builds entirely under `legacy/build/` (binaries
-and bootstrap intermediates) and is never installed — it is a local
-regression oracle, driven by `./legacy/spinel-legacy`. The normal C build
+and bootstrap intermediates) and is never installed — it is a headless
+regression oracle for the self-host fixpoint (`make bootstrap`) and the
+analyze-fail diagnostics (`make analyze-fail-test`). The normal C build
 never touches the `legacy/` source tree.
 
 Override install prefix: `make install PREFIX=$HOME/.local`

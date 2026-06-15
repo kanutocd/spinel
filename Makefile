@@ -497,9 +497,9 @@ gate-optcarrot:
 PREFIX   ?= /usr/local
 SPNLDIR   = $(PREFIX)/lib/spinel
 
-# Install the C compiler only. The legacy Ruby compiler is a local
-# regression oracle (legacy/, `make legacy`/`bootstrap`) and is not
-# shipped — `legacy/spinel-legacy` stays in the source tree for comparison.
+# Install the single `spinel` binary only. The legacy Ruby compiler is a
+# headless regression oracle (legacy/, `make legacy`/`bootstrap`/
+# `analyze-fail-test`) and is not shipped.
 install: all
 	install -d $(SPNLDIR)/lib
 	install -m 755 $(SPINEL)            $(SPNLDIR)/spinel$(EXE)
