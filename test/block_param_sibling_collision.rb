@@ -8,6 +8,16 @@
 p [1, 2, 3].map { |x| x + 0.5 }.map { |x| x.floor }
 # [1, 2, 3]
 
+# --- the same chain folded with reduce (the exact filed one-liner) ---
+# The second map's |x| must re-narrow poly->float so the chain yields a
+# typed int array that reduce can fold, instead of locking poly.
+puts([1, 2, 3].map { |x| x + 0.5 }.map { |x| x.floor }.reduce(0) { |a, x| a + x })
+# 6
+
+# --- a genuinely heterogeneous receiver must stay poly (no bad re-narrow) ---
+p [1, "a", 2.0].map { |x| x.inspect }.reduce("") { |a, x| a + x }
+# "1\"a\"2.0"
+
 # --- three sibling each_index blocks share |i| (all int indices) ---
 def t_each_index
   [10, 20, 30].each_index { |i| puts i }

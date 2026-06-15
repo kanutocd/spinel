@@ -926,6 +926,76 @@ static void apply_rbs_seeds(Compiler *c, const char *path) {
   fclose(f);
 }
 
+/* Iteration methods whose block binds a parameter to the receiver array's
+   element type (the forms infer_block_params re-derives from the receiver).
+   A param of such a block can lock to poly when the element type settles only
+   late in the fixpoint (e.g. `arr.map{...}.map{...}`: the inner map's receiver
+   becomes a typed array only after the outer map narrows). */
+static int iter_elem_block_method(const char *n) {
+  static const char *names[] = {
+    "each","map","collect","select","reject","filter","find","detect",
+    "find_all","flat_map","filter_map","reverse_each","each_entry",
+    "take_while","drop_while","sort_by","min_by","max_by","group_by",
+    "partition","count","sum","any?","all?","none?","one?","keep_if",
+    "delete_if","uniq","find_index","each_with_index","reduce","inject", NULL };
+  for (int i = 0; names[i]; i++) if (!strcmp(n, names[i])) return 1;
+  return 0;
+}
+
+/* Is local `nm` assigned anywhere in `node`'s subtree (a block body)? Stops at
+   nested defs/classes and at nested blocks/lambdas that re-bind `nm` (its
+   writes there are a different variable). Used to leave a reassigned block
+   param locked: its widening contribution is not recoverable by re-derivation
+   from the element type alone. */
+static int blkp_name_written(Compiler *c, int node, const char *nm) {
+  if (node < 0) return 0;
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, node);
+  if (!ty) return 0;
+  if (!strcmp(ty, "DefNode") || !strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) return 0;
+  if ((!strcmp(ty, "BlockNode") || !strcmp(ty, "LambdaNode")) && blkp_binds_param(c, node, nm)) return 0;
+  if (lv_node_is_write(ty)) {
+    const char *n = nt_str(nt, node, "name");
+    if (n && !strcmp(n, nm)) return 1;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (blkp_name_written(c, nt_ref_at(nt, node, i), nm)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) { int m = 0; const int *ids = nt_arr_at(nt, node, i, &m); for (int k = 0; k < m; k++) if (blkp_name_written(c, ids[k], nm)) return 1; }
+  return 0;
+}
+
+/* Clear a transient poly lock on iteration-block params over a now-typed
+   (non-poly) array, so the optimistic re-narrow can re-derive the element
+   type. Only read-only params are reset: a param reassigned in the body has a
+   widening contribution the element-type re-derivation cannot recover (the
+   re-run would re-narrow it and silently miscompile), so it stays locked.
+   Reset to UNKNOWN -- never the element type directly. Returns the count. */
+static int reset_locked_iter_block_params(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  for (int id = 0; id < nt->count; id++) {
+    int block = nt_ref(nt, id, "block");
+    if (block < 0) continue;
+    const char *cn = nt_str(nt, id, "name");
+    if (!cn || !iter_elem_block_method(cn)) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0) continue;
+    TyKind rt = infer_type(c, recv);
+    if (!ty_is_array(rt) || rt == TY_POLY_ARRAY) continue;
+    Scope *bs = comp_scope_of(c, block);
+    if (!bs) continue;
+    int body = nt_ref(nt, block, "body");
+    for (int k = 0; ; k++) {
+      const char *pn = block_param_name(c, block, k);
+      if (!pn) break;
+      LocalVar *lp = scope_local(bs, pn);
+      if (lp && lp->type == TY_POLY && !blkp_name_written(c, body, pn)) { lp->type = TY_UNKNOWN; n++; }
+    }
+  }
+  return n;
+}
+
 void analyze_program(Compiler *c) {
   /* scope 0 = top level */
   Scope *top = comp_scope_new(c, NULL, -1);
@@ -1154,6 +1224,7 @@ void analyze_program(Compiler *c) {
         if (p && p->type == TY_POLY && !p->is_block_param) { p->type = TY_UNKNOWN; any = 1; }
       }
     }
+    if (reset_locked_iter_block_params(c)) any = 1;
     if (any) {
       for (int iter = 0; iter < 128; iter++) {
         int ch = 0;
