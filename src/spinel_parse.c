@@ -22,9 +22,52 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <prism.h>
-#if defined(_WIN32)
-#include <process.h>  /* _getpid -- for a unique temp-file name (no open_memstream on MinGW) */
-#endif
+
+/* ---- In-memory output buffer ----
+   The final text AST is assembled into a growable byte buffer rather than a
+   FILE*, so the in-process entry point needs no open_memstream (POSIX.1-2008,
+   absent on Solaris/AIX/HP-UX/MinGW and pre-10.13 macOS) nor a temp-file
+   round-trip. One code path on every platform. */
+typedef struct { char *data; size_t len; size_t cap; } SpStrBuf;
+
+static void sb_ensure(SpStrBuf *sb, size_t extra) {
+  if (sb->len + extra + 1 <= sb->cap) return;
+  size_t nc = sb->cap ? sb->cap : 4096;
+  while (nc < sb->len + extra + 1) {
+    if (nc > (((size_t)-1) / 2)) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+    nc *= 2;
+  }
+  char *nd = realloc(sb->data, nc);
+  if (!nd) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+  sb->data = nd;
+  sb->cap = nc;
+}
+
+static void sb_puts(SpStrBuf *sb, const char *s) {
+  size_t n = strlen(s);
+  sb_ensure(sb, n);
+  memcpy(sb->data + sb->len, s, n);
+  sb->len += n;
+  sb->data[sb->len] = '\0';
+}
+
+static void sb_printf(SpStrBuf *sb, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  va_list ap2;
+  va_copy(ap2, ap);
+  int needed = vsnprintf(NULL, 0, fmt, ap);
+  va_end(ap);
+  if (needed < 0) {
+    va_end(ap2);
+    fprintf(stderr, "spinel_parse: vsnprintf failed\n");
+    exit(1);
+  }
+  sb_ensure(sb, (size_t)needed);
+  vsnprintf(sb->data + sb->len, (size_t)needed + 1, fmt, ap2);
+  va_end(ap2);
+  sb->len += (size_t)needed;
+}
 
 /* ---- Output buffer ---- */
 static char **lines;
@@ -2193,12 +2236,12 @@ else {
 }
 
 /* ---- Main ---- */
-/* Parse `source_file` and write the text AST to `out`. `argv0` is the
+/* Parse `source_file` and append the text AST to `out`. `argv0` is the
    invoking program path (used to locate the stdlib for plain `require`s).
-   Returns 0 on success, 1 on read/parse error. Shared by the standalone
-   `main` and the in-process `sp_parse_file_to_text` entry so the Prism
-   walk has exactly one home. */
-static int sp_parse_emit(const char *source_file, const char *argv0, FILE *out) {
+   Returns 0 on success, 1 on read/parse error. This is the library copy;
+   the standalone CLI's FILE*-streaming variant lives in
+   legacy/spinel_parse.c. */
+static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *out) {
   char *source = read_file(source_file);
   if (!source) {
     fprintf(stderr, "spinel_parse: cannot open '%s'\n", source_file);
@@ -2287,21 +2330,22 @@ else {
   int root_id = flatten(root);
 
   /* Output */
-  fprintf(out, "ROOT %d\n", root_id);
+  sb_printf(out, "ROOT %d\n", root_id);
   /* Issue #878: emit the source file path as a top-level fact so
      `__dir__` and similar compile-time helpers can recover it
      even when the source contains no `__FILE__` reference. The
      loader stashes it in @source_file_path. */
-  fprintf(out, "SOURCE_FILE %s\n", g_source_file_escaped);
+  sb_printf(out, "SOURCE_FILE %s\n", g_source_file_escaped);
   /* Debug multi-file map: emit the id -> path table so codegen can resolve
      each node's `node_file` id to a path for its `#line` directive. */
   for (int i = 0; i < sp_file_count; i++) {
     char *esc = escape_str((const uint8_t *)sp_file_table[i], strlen(sp_file_table[i]));
-    fprintf(out, "FILE %d %s\n", i, esc);
+    sb_printf(out, "FILE %d %s\n", i, esc);
     free(esc);
   }
   for (size_t i = 0; i < line_count; i++) {
-    fprintf(out, "%s\n", lines[i]);
+    sb_puts(out, lines[i]);
+    sb_puts(out, "\n");
     free(lines[i]);
   }
   free(lines);
@@ -2324,44 +2368,16 @@ else {
    frees), or NULL on error. `argv0` locates the stdlib for plain requires.
    Avoids any on-disk intermediate by writing to an in-memory stream. */
 char *sp_parse_file_to_text(const char *source_file, const char *argv0) {
-#if defined(_WIN32)
-  /* MinGW/MSVCRT has no open_memstream, and tmpfile() opens in the (often
-     unwritable) drive root on CI. Capture sp_parse_emit's output through a
-     uniquely-named temp file in TEMP/TMP, then read it back. */
-  const char *td = getenv("TEMP");
-  if (!td) td = getenv("TMP");
-  if (!td) td = ".";
-  char path[4096];
-  snprintf(path, sizeof path, "%s\\spinel_ast_%d.tmp", td, (int)_getpid());
-  FILE *out = fopen(path, "wb+");
-  if (!out) return NULL;
-  int rc = sp_parse_emit(source_file, argv0, out);
-  char *buf = NULL;
-  if (rc == 0 && fflush(out) == 0 && fseek(out, 0, SEEK_END) == 0) {
-    long sz = ftell(out);
-    if (sz >= 0) {
-      rewind(out);
-      buf = (char *)malloc((size_t)sz + 1);
-      if (buf) {
-        size_t n = fread(buf, 1, (size_t)sz, out);
-        buf[n] = '\0';
-      }
-    }
-  }
-  fclose(out);
-  remove(path);
-  return buf;
-#else
-  char *buf = NULL;
-  size_t sz = 0;
-  FILE *out = open_memstream(&buf, &sz);
-  if (!out) return NULL;
-  int rc = sp_parse_emit(source_file, argv0, out);
-  fclose(out);
+  SpStrBuf out = {0};
+  int rc = sp_parse_emit(source_file, argv0, &out);
   if (rc != 0) {
-    free(buf);
+    free(out.data);
     return NULL;
   }
-  return buf;
-#endif
+  if (!out.data) {
+    /* Success with no bytes emitted: hand back a valid empty string. */
+    out.data = (char *)malloc(1);
+    if (out.data) out.data[0] = '\0';
+  }
+  return out.data;
 }

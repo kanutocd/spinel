@@ -22,9 +22,6 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <prism.h>
-#if defined(_WIN32)
-#include <process.h>  /* _getpid -- for a unique temp-file name (no open_memstream on MinGW) */
-#endif
 
 /* ---- Output buffer ---- */
 static char **lines;
@@ -2195,9 +2192,9 @@ else {
 /* ---- Main ---- */
 /* Parse `source_file` and write the text AST to `out`. `argv0` is the
    invoking program path (used to locate the stdlib for plain `require`s).
-   Returns 0 on success, 1 on read/parse error. Shared by the standalone
-   `main` and the in-process `sp_parse_file_to_text` entry so the Prism
-   walk has exactly one home. */
+   Returns 0 on success, 1 on read/parse error. This is the standalone CLI;
+   the single-binary C compiler links the in-memory variant in
+   src/spinel_parse.c instead. */
 static int sp_parse_emit(const char *source_file, const char *argv0, FILE *out) {
   char *source = read_file(source_file);
   if (!source) {
@@ -2334,50 +2331,3 @@ int main(int argc, char **argv) {
   return rc;
 }
 #endif
-
-/* In-process entry for the single-binary C compiler: parse `source_file`
-   and return the text AST as a malloc'd NUL-terminated buffer (caller
-   frees), or NULL on error. `argv0` locates the stdlib for plain requires.
-   Avoids any on-disk intermediate by writing to an in-memory stream. */
-char *sp_parse_file_to_text(const char *source_file, const char *argv0) {
-#if defined(_WIN32)
-  /* MinGW/MSVCRT has no open_memstream, and tmpfile() opens in the (often
-     unwritable) drive root on CI. Capture sp_parse_emit's output through a
-     uniquely-named temp file in TEMP/TMP, then read it back. */
-  const char *td = getenv("TEMP");
-  if (!td) td = getenv("TMP");
-  if (!td) td = ".";
-  char path[4096];
-  snprintf(path, sizeof path, "%s\\spinel_ast_%d.tmp", td, (int)_getpid());
-  FILE *out = fopen(path, "wb+");
-  if (!out) return NULL;
-  int rc = sp_parse_emit(source_file, argv0, out);
-  char *buf = NULL;
-  if (rc == 0 && fflush(out) == 0 && fseek(out, 0, SEEK_END) == 0) {
-    long sz = ftell(out);
-    if (sz >= 0) {
-      rewind(out);
-      buf = (char *)malloc((size_t)sz + 1);
-      if (buf) {
-        size_t n = fread(buf, 1, (size_t)sz, out);
-        buf[n] = '\0';
-      }
-    }
-  }
-  fclose(out);
-  remove(path);
-  return buf;
-#else
-  char *buf = NULL;
-  size_t sz = 0;
-  FILE *out = open_memstream(&buf, &sz);
-  if (!out) return NULL;
-  int rc = sp_parse_emit(source_file, argv0, out);
-  fclose(out);
-  if (rc != 0) {
-    free(buf);
-    return NULL;
-  }
-  return buf;
-#endif
-}
