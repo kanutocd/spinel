@@ -1107,6 +1107,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     TyKind st = comp_ntype(c, argv[0]);
     buf_puts(b, "((void)sp_sleep(");
     if (st == TY_INT) { buf_puts(b, "(double)"); emit_expr(c, argv[0], b); }
+    else if (st == TY_POLY) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
     else emit_expr(c, argv[0], b);
     buf_puts(b, "), (mrb_int)0)");
     return;
@@ -8058,15 +8059,19 @@ else {
     }
     if (is_fiber2) {
       TyKind fvt = comp_ntype(c, argv[1]);
+      /* Fiber storage is poly-valued. A nil/void/untyped value has no scalar
+         C slot -- carry it boxed (`void _t = nil` is otherwise a type error). */
+      int fval_poly = (fvt == TY_POLY || fvt == TY_UNKNOWN || fvt == TY_NIL || fvt == TY_VOID);
       int tf = ++g_tmp;
       buf_puts(b, "({ ");
-      emit_ctype(c, fvt != TY_UNKNOWN ? fvt : TY_POLY, b);
+      emit_ctype(c, fval_poly ? TY_POLY : fvt, b);
       buf_printf(b, " _t%d = ", tf);
-      emit_expr(c, argv[1], b);
+      if (fval_poly) emit_boxed(c, argv[1], b);
+      else emit_expr(c, argv[1], b);
       buf_puts(b, "; sp_Fiber_storage_set(sp_fiber_current, ");
       emit_expr(c, argv[0], b);
       buf_puts(b, ", ");
-      if (fvt != TY_POLY && fvt != TY_UNKNOWN) {
+      if (!fval_poly) {
         char tfs[32]; snprintf(tfs, sizeof tfs, "_t%d", tf);
         emit_boxed_text(c, fvt, tfs, b);
       }
