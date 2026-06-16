@@ -66,6 +66,8 @@ static int sp_bt_n = 0;
 #include "sp_gc.h"
 /* sp_Fiber + the Fiber API; the bodies live in libspinel_rt.a (lib/sp_fiber.c). */
 #include "sp_fiber.h"
+/* sp_Ractor + the Ractor API; the bodies live in libspinel_rt.a (lib/sp_ractor.c). */
+#include "sp_ractor.h"
 static const char *sp_sym_to_s(sp_sym id);
 
 /* sp_raise_cls forward decl — defined later in this header (line ~1017).
@@ -346,7 +348,8 @@ static const char *sp_rational_inspect(sp_Rational r) {
    hook is responsible for deciding whether to keep the storage
    (pool push) or free it. Used by class-instance free-list pools. */
 /* sp_gc_heap / sp_gc_bytes are defined in lib/sp_gc.c (extern via sp_gc.h). */
-static size_t sp_gc_threshold = 256*1024;
+/* __thread: per-Ractor GC trigger threshold (see lib/sp_gc.h). */
+static __thread size_t sp_gc_threshold = 256*1024;
 
 /* ---- GC verify: opt-in mark-path validation (release-neutral) ------------
  * SPINEL_GC_VERIFY=1  before the collector invokes an object's scan hook,
@@ -359,7 +362,8 @@ static size_t sp_gc_threshold = 256*1024;
 /* GC verify state + helpers live in lib/sp_gc.c. */
 
 /* ---- String GC ---- */
-static sp_str_hdr *sp_str_heap = NULL;
+/* __thread: each Ractor owns a private string heap. */
+static __thread sp_str_hdr *sp_str_heap = NULL;
 #define SPL(s) (&("\xff" s)[1])
 static const char sp_str_empty_data[] = "\xff";
 #define sp_str_empty (sp_str_empty_data + 1)
@@ -511,7 +515,7 @@ static const char *sp_int_codepoint_to_str(mrb_int n) {
    0xfd) whose buffers can move on realloc. */
 #define SP_STR_LCACHE_BITS 5
 #define SP_STR_LCACHE_SIZE (1u << SP_STR_LCACHE_BITS)
-static struct sp_str_lcache_entry {
+static __thread struct sp_str_lcache_entry {
   const char *s;
   size_t byte_len;
   mrb_int char_len;
@@ -789,13 +793,13 @@ static inline void _sp_gc_root_pop(int *added) { if (*added) sp_gc_nroots--; }
    collector body can reach it. */
 static void sp_gc_cleanup(int*p){sp_gc_nroots=*p;}
 #define SP_GC_NBUCKETS 32
-static sp_gc_hdr*sp_gc_buckets[SP_GC_NBUCKETS];
+static __thread sp_gc_hdr*sp_gc_buckets[SP_GC_NBUCKETS];
 static inline int sp_gc_bucket(size_t sz){int b=(int)(sz/16);return b<SP_GC_NBUCKETS?b:SP_GC_NBUCKETS-1;}
 /* sp_gc_cycle / sp_gc_old_bytes are in lib/sp_gc.c (extern via sp_gc.h);
    sp_gc_old_heap is collector-private to lib/sp_gc.c. */
 
 /* GC verify support + sp_gc_collect live in lib/sp_gc.c. */
-static size_t sp_gc_threshold_init=256*1024;
+static __thread size_t sp_gc_threshold_init=256*1024;
 /* sp_oom_die + the SPINEL_MAX_HEAP_MB governor (sp_gc_enforce_mem_limit)
    live in lib/sp_gc.c. */
 /* SPINEL_GC_STRESS=1: shrink the collection threshold to a few KB so a
@@ -841,14 +845,18 @@ static void sp_gc_pool_relink(sp_gc_hdr *h) {
    (uniform across classes). SP_POOL_REPORT=1 dumps per-class stats
    at exit. */
 #define SP_POOL_DEFAULT_MAX 1048576L
+/* Pool free-lists are __thread: each Ractor recycles into its own private
+   pool out of its own heap, so cross-thread recycling can never alias.
+   The constructor (main thread only) reads SP_POOL_MAX; Ractor threads
+   keep the SP_POOL_DEFAULT_MAX TLS initializer. */
 #define SP_POOL_DEFINE(CLS) \
-  static sp_gc_hdr *sp_##CLS##_pool_head = NULL; \
-  static long sp_##CLS##_pool_count = 0; \
-  static long sp_##CLS##_pool_max = SP_POOL_DEFAULT_MAX; \
-  static long sp_##CLS##_pool_pushes = 0; \
-  static long sp_##CLS##_pool_pops = 0; \
-  static long sp_##CLS##_pool_freed = 0; \
-  static long sp_##CLS##_pool_hwm = 0; \
+  static __thread sp_gc_hdr *sp_##CLS##_pool_head = NULL; \
+  static __thread long sp_##CLS##_pool_count = 0; \
+  static __thread long sp_##CLS##_pool_max = SP_POOL_DEFAULT_MAX; \
+  static __thread long sp_##CLS##_pool_pushes = 0; \
+  static __thread long sp_##CLS##_pool_pops = 0; \
+  static __thread long sp_##CLS##_pool_freed = 0; \
+  static __thread long sp_##CLS##_pool_hwm = 0; \
   __attribute__((constructor)) static void sp_##CLS##_pool_init(void) { \
     const char *m = getenv("SP_POOL_MAX"); \
     if (m && *m) { long v = atol(m); if (v >= 0) sp_##CLS##_pool_max = v; } \
@@ -2225,16 +2233,16 @@ mrb_regexp_pattern* re_compile(const char *pattern, int64_t len, uint32_t flags)
 void re_free(mrb_regexp_pattern *pat);
 int re_exec(const mrb_regexp_pattern *pat, const char *str, int64_t len, int64_t start, int *captures, int captures_size);
 
-/* Regexp globals: $1-$9 captures */
-static const char *sp_re_captures[10] = {0};
-static int sp_re_caps[64];
+/* Regexp globals: $1-$9 captures (__thread: per-Ractor match state) */
+static __thread const char *sp_re_captures[10] = {0};
+static __thread int sp_re_caps[64];
 /* NULL (not "") so sp_mark_string's null-guard handles the unset case
    without reaching the `s[-1]` access. The rodata `""` literal would
    trigger -Wstringop-overflow under -O3 + sp_mark_string inlining at
    the call site in sp_re_mark_globals — gcc proves the `s[-1] = 0xfc`
    write would be out-of-bounds even though the runtime guard
    `s[-1] == 0xfe` (always false for rodata) prevents it from firing. */
-static const char *sp_re_last_str = NULL;
+static __thread const char *sp_re_last_str = NULL;
 
 /* Symbolic back-references populated alongside the numbered captures.
    Read by codegen's BackReferenceReadNode arm:
@@ -2242,9 +2250,9 @@ static const char *sp_re_last_str = NULL;
      $`  -> sp_re_match_pre  (substring before the match)
      $'  -> sp_re_match_post (substring after the match)
    $~ falls back to $& since Spinel has no MatchData wrapper. */
-static const char *sp_re_match_str = NULL;
-static const char *sp_re_match_pre = NULL;
-static const char *sp_re_match_post = NULL;
+static __thread const char *sp_re_match_str = NULL;
+static __thread const char *sp_re_match_pre = NULL;
+static __thread const char *sp_re_match_post = NULL;
 
 /* ARGV runtime: argv[i] strings are dup'd via sp_str_dup_external on
    main() entry, which allocates from the str-heap with mark byte
@@ -4416,18 +4424,20 @@ static const char *sp_json_val(sp_RbVal v) {
 
 #include <setjmp.h>
 #define SP_EXC_STACK_MAX 64
-static jmp_buf sp_exc_stack[SP_EXC_STACK_MAX];
-static const char *sp_exc_msg[SP_EXC_STACK_MAX];
-static volatile int sp_exc_top = 0;
-static const char *sp_exc_cls[SP_EXC_STACK_MAX];
-static volatile const char *sp_last_exc_cls = sp_str_empty;
+/* __thread: each Ractor pthread has its own rescue landing-pad stack and
+   in-flight exception state, so an exception in one Ractor is isolated. */
+static __thread jmp_buf sp_exc_stack[SP_EXC_STACK_MAX];
+static __thread const char *sp_exc_msg[SP_EXC_STACK_MAX];
+static __thread volatile int sp_exc_top = 0;
+static __thread const char *sp_exc_cls[SP_EXC_STACK_MAX];
+static __thread volatile const char *sp_last_exc_cls = sp_str_empty;
 /* The raised exception OBJECT, carried alongside (cls,msg) so a user
    exception subclass keeps its ivars across raise -> rescue (#1415).
    NULL for a bare string/builtin raise, which reconstructs on catch.
    sp_pending_exc_obj is set by sp_raise_exc just before the longjmp and
    consumed into the per-frame slot by sp_raise_cls. */
-static void *sp_exc_obj[SP_EXC_STACK_MAX];
-static void *sp_pending_exc_obj = NULL;
+static __thread void *sp_exc_obj[SP_EXC_STACK_MAX];
+static __thread void *sp_pending_exc_obj = NULL;
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
    A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
@@ -4812,10 +4822,11 @@ void sp_bigint_raise_zerodiv(const char *msg) { sp_raise_cls("ZeroDivisionError"
 /* sp_exc_is_a: see earlier definition (takes volatile sp_Exception *) */
 
 #define SP_CATCH_STACK_MAX 64
-static jmp_buf sp_catch_stack[SP_CATCH_STACK_MAX];
-static const char *sp_catch_tag[SP_CATCH_STACK_MAX];
-static mrb_int sp_catch_val[SP_CATCH_STACK_MAX];
-static volatile int sp_catch_top = 0;
+/* __thread: per-Ractor catch/throw landing pads (see exception stack). */
+static __thread jmp_buf sp_catch_stack[SP_CATCH_STACK_MAX];
+static __thread const char *sp_catch_tag[SP_CATCH_STACK_MAX];
+static __thread mrb_int sp_catch_val[SP_CATCH_STACK_MAX];
+static __thread volatile int sp_catch_top = 0;
 static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, "uncaught throw: %s\n", tag); exit(1); }
 
 /* Kernel#sleep with sub-second precision. Argument is seconds as a
@@ -5204,8 +5215,9 @@ static sp_StrArray *sp_StrArray_slice_bang(sp_StrArray *a, mrb_int from, mrb_int
    order before returning. */
 #define SP_AT_EXIT_MAX 256
 struct sp_Proc;
-static struct sp_Proc *sp_at_exit_hooks[SP_AT_EXIT_MAX];
-static mrb_int sp_at_exit_count = 0;
+/* __thread: at_exit hooks registered inside a Ractor stay local to it. */
+static __thread struct sp_Proc *sp_at_exit_hooks[SP_AT_EXIT_MAX];
+static __thread mrb_int sp_at_exit_count = 0;
 static sp_PtrArray *sp_PtrArray_slice_bang(sp_PtrArray *a, mrb_int from, mrb_int n) {
   if (!a) return sp_PtrArray_new_scan(NULL);
   if (a->frozen) { sp_raise_frozen_array(); return sp_PtrArray_new_scan(a->scan_elem); }
@@ -5379,7 +5391,8 @@ typedef struct sp_Val sp_Val;
 typedef sp_Val *(*sp_fn_t)(sp_Val *self, sp_Val *arg);
 struct sp_Val { enum { SP_PROC2, SP_INT2, SP_BOOL2, SP_NIL2 } tag; union { struct { sp_fn_t fn; int ncaptures; } proc; mrb_int ival; mrb_bool bval; } u; sp_Val *captures[]; };
 #define SP_ARENA_SIZE ((size_t)16ULL * 1024 * 1024 * 1024)
-static char *sp_arena = NULL; static size_t sp_arena_pos = 0;
+/* __thread: lambda arena is mmap'd lazily per-Ractor on first use. */
+static __thread char *sp_arena = NULL; static __thread size_t sp_arena_pos = 0;
 static void *sp_lam_alloc(size_t sz) { sz = (sz + 7) & ~(size_t)7; if (!sp_arena) { sp_arena = (char *)mmap(NULL, SP_ARENA_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0); if (sp_arena == MAP_FAILED) { perror("mmap"); exit(1); } sp_arena_pos = 0; } if (sp_arena_pos + sz > SP_ARENA_SIZE) { fprintf(stderr, "arena exhausted\n"); exit(1); } void *p = sp_arena + sp_arena_pos; sp_arena_pos += sz; return p; }
 static sp_Val *sp_lam_proc(sp_fn_t fn, int ncap) { sp_Val *v = (sp_Val *)sp_lam_alloc(sizeof(sp_Val) + sizeof(sp_Val *) * ncap); v->tag = SP_PROC2; v->u.proc.fn = fn; v->u.proc.ncaptures = ncap; return v; }
 static sp_Val *sp_lam_int(mrb_int n) { sp_Val *v = (sp_Val *)sp_lam_alloc(sizeof(sp_Val)); v->tag = SP_INT2; v->u.ival = n; return v; }
