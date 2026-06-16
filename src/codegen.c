@@ -785,8 +785,9 @@ void emit_fiber_new(Compiler *c, int id, Buf *b) {
 }
 
 /* Lower a `proc {}` / `lambda {}` / `Proc.new {}` / `->(){}` literal: emit a
-   standalone `static mrb_int _proc_N(void *cap, mrb_int *args)` (sp_proc_call's
-   ABI) into g_procs, and emit the boxing `sp_proc_new_meta(...)` value into `b`. */
+   standalone `static mrb_int _proc_N(void *cap, mrb_int argc, mrb_int *args)`
+   (sp_proc_call's ABI) into g_procs, and emit the boxing `sp_proc_new_meta(...)`
+   value into `b`. */
 void emit_proc_literal(Compiler *c, int create, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, create);
@@ -916,7 +917,7 @@ else if (orecv >= 0 && onm) {
     buf_puts(&g_procs, "}\n");
   }
 
-  buf_printf(&g_proc_protos, "static mrb_int _proc_%d(void *_cap, mrb_int *args);\n", pid);
+  buf_printf(&g_proc_protos, "static mrb_int _proc_%d(void *_cap, mrb_int argc, mrb_int *args);\n", pid);
 
   /* Save every emission global: the proc body is a fresh function context. */
   Buf *sv_pre = g_pre; int sv_indent = g_indent, sv_nren = g_nren, sv_block = g_block_id;
@@ -931,10 +932,13 @@ else if (orecv >= 0 && onm) {
   else { g_cap_struct = NULL; g_cap_names = NULL; }
 
   Buf *pb = &g_procs;
-  buf_printf(pb, "static mrb_int _proc_%d(void *_cap, mrb_int *args) {\n", pid);
+  buf_printf(pb, "static mrb_int _proc_%d(void *_cap, mrb_int argc, mrb_int *args) {\n", pid);
   buf_puts(pb, "    SP_GC_SAVE();\n");
   if (ncap == 0) buf_puts(pb, "    (void)_cap;\n");
   buf_puts(pb, "    (void)args;\n");
+  buf_puts(pb, "    (void)argc;\n");
+  /* Lambda: enforce strict arity (required params only -- no optionals/rest yet). */
+  if (is_lambda) buf_printf(pb, "    sp_proc_lambda_arity_check(argc, %d, 0, FALSE);\n", arity);
   for (int k = 0; k < arity; k++) {
     const char *p = proc_param_name(c, create, k);
     LocalVar *lv = scope_local(bs, p);
@@ -2457,7 +2461,7 @@ char *codegen_program(const NodeTable *nt) {
   }
   emit_stmts(c, c->scopes[0].body, &body, 1);
   if (g_needs_at_exit)
-    buf_puts(&body, "  { mrb_int _ax_args[16] = {0}; for (mrb_int _ax = sp_at_exit_count - 1; _ax >= 0; _ax--) sp_proc_call(sp_at_exit_hooks[_ax], _ax_args); }\n");
+    buf_puts(&body, "  { mrb_int _ax_args[16] = {0}; for (mrb_int _ax = sp_at_exit_count - 1; _ax >= 0; _ax--) sp_proc_call(sp_at_exit_hooks[_ax], 0, _ax_args); }\n");
   buf_puts(&body, "  return 0;\n}\n");
 
   emit_regex_section(&b);
