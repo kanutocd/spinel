@@ -1479,7 +1479,8 @@ void emit_regex_section(Buf *b) {
   }
   buf_puts(b, "static void sp_re_init(void) {\n");
   buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
-  buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n");
+  if (g_needs_class_machinery)
+    buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n");
   /* Replace the runtime's hook with the superset that also marks this
      program's heap-typed globals/constants/class-ivars (it chains to
      sp_re_mark_globals itself). */
@@ -1858,6 +1859,38 @@ static int emit_write_file(const char *path, const char *text) {
 
 /* ---- top level ---- */
 
+/* Conservative pre-scan: does the program use the class-introspection helper
+   bank (sp_class_to_s / sp_class_superclass / sp_class_is_ancestor /
+   sp_class_ancestors / sp_poly_is_a / sp_user_exc_parent / ...)? Any user
+   class/module forces it on (the struct/scan emission and dispatch may touch
+   it). With no user classes, only explicit builtin introspection needs it: a
+   `.class` / `is_a?` / `kind_of?` / `instance_of?` / `ancestors` /
+   `superclass` / `===` call, or a builtin class constant used as a value
+   (e.g. `puts Integer`, `Integer < Numeric`). Over-approximating is safe (it
+   only emits dead helpers); under-approximating would be a hard link error, so
+   the set is deliberately broad. */
+static int program_needs_class_machinery(Compiler *c) {
+  if (c->nclasses > 0) return 1;
+  const NodeTable *nt = c->nt;
+  for (int i = 0; i < nt->count; i++) {
+    const char *ty = nt_type(nt, i);
+    if (!ty) continue;
+    if (!strcmp(ty, "CallNode")) {
+      const char *nm = nt_str(nt, i, "name");
+      if (nm && (!strcmp(nm, "class") || !strcmp(nm, "is_a?") ||
+                 !strcmp(nm, "kind_of?") || !strcmp(nm, "instance_of?") ||
+                 !strcmp(nm, "ancestors") || !strcmp(nm, "superclass") ||
+                 !strcmp(nm, "===")))
+        return 1;
+    }
+    else if (!strcmp(ty, "ConstantReadNode") || !strcmp(ty, "ConstantPathNode")) {
+      const char *nm = nt_str(nt, i, "name");
+      if (nm && is_builtin_class_name(nm)) return 1;
+    }
+  }
+  return 0;
+}
+
 char *codegen_program(const NodeTable *nt) {
   Compiler *c = comp_new(nt);
   analyze_program(c);
@@ -1969,6 +2002,9 @@ char *codegen_program(const NodeTable *nt) {
                    "if(sp_ndyn<8192){sp_dyn_syms[sp_ndyn]=sp_str_dup_external(s);return (sp_sym)(%d+sp_ndyn++);}"
                    "return (sp_sym)0;}\n\n", ns, ns > 0 ? "sp_sym_names[i]" : "\"\"", ns, ns);
   }
+  /* sp_class_to_s is referenced by the runtime itself (sp_poly_puts /
+     sp_poly_to_s SP_TAG_CLASS arms), so it is always emitted, independent of
+     the gated introspection bank below. */
   {
     buf_puts(&b, "static const char *sp_class_to_s(sp_Class c){switch(c.cls_id){");
     for (int i = 0; i < c->nclasses; i++) {
@@ -1997,6 +2033,8 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "case -130:return SPL(\"Math\");case -131:return SPL(\"Complex\");");
     buf_puts(&b, "default:return \"\";} }\n\n");
   }
+  g_needs_class_machinery = program_needs_class_machinery(c);
+  if (g_needs_class_machinery) {
   /* sp_cls_is_module[i]: 1 if user class i was defined as a module, 0 if class */
   if (c->nclasses > 0) {
     buf_printf(&b, "static const int sp_cls_is_module[%d] = {", c->nclasses);
@@ -2246,6 +2284,7 @@ char *codegen_program(const NodeTable *nt) {
     }
     buf_puts(&b, "  return 0;\n}\n");
   }
+  }  /* if (g_needs_class_machinery) */
 
   /* class structs + GC scan functions. Forward-declare every typedef first so
      a class struct may embed a pointer to a class defined later. */

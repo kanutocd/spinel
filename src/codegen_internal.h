@@ -173,6 +173,12 @@ extern NameSet *g_cap_names;
 /* set when the program registers an at_exit hook; main()'s tail then runs them
    in reverse registration order. */
 extern int g_needs_at_exit;
+/* set when the program may use class-introspection machinery (user classes, or
+   .class / is_a? / kind_of? / instance_of? / ancestors / superclass / === on
+   builtins, or a builtin class constant used as a value). When clear, the
+   sp_class_* / sp_poly_is_a / sp_user_exc_parent helper bank is not emitted --
+   a minimal program like `p 42` carries none of it. */
+extern int g_needs_class_machinery;
 
 const char *rename_local(const char *nm);
 
@@ -301,6 +307,7 @@ void emit_tail_lead(Buf *b);
 const char *rename_local(const char *nm);
 void unsupported(Compiler *c, int id, const char *what);
 int builtin_class_id(const char *name);
+int is_builtin_class_name(const char *n);
 const char *c_type_name(TyKind t);
 int is_scalar_ret(TyKind t);
 const char *ffi_c_type(const char *spec);
