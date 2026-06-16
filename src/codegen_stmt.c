@@ -2124,6 +2124,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       }
     }
     if (is_block_call(c, id)) { emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, indent, 0); return; }
+    if (is_blockless_block_param_call(c, id)) return;  /* dead path: no block supplied */
     if (emit_output_call(c, id, b, indent)) return;
     /* Signal.trap / ::Signal.trap stmt: no-op */
     {

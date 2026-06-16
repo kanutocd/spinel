@@ -8952,6 +8952,32 @@ int scope_has_return(Compiler *c, int scope_idx) {
   return 0;
 }
 
+/* Follow a chain of pure `...` forwarders (a method whose whole body is a
+   single `target(...)` call, no receiver) from `mi` to the method that
+   actually yields or owns the &block; return its index, else -1. A real-
+   function forwarder can't pass a literal block down to a yielding target,
+   so a block-bearing call is redirected straight to that final target. */
+static int pure_forwarding_target(Compiler *c, int mi, int depth) {
+  if (mi < 0 || depth > 16) return -1;
+  Scope *m = &c->scopes[mi];
+  if (m->yields || (m->blk_param && m->blk_param[0])) return mi;
+  int body = m->body;
+  if (body < 0 || !nt_type(c->nt, body) || strcmp(nt_type(c->nt, body), "StatementsNode")) return -1;
+  int n = 0; const int *st = nt_arr(c->nt, body, "body", &n);
+  if (n != 1) return -1;
+  int call = st[0];
+  const char *cty = nt_type(c->nt, call);
+  if (!cty || strcmp(cty, "CallNode") || nt_ref(c->nt, call, "receiver") >= 0) return -1;
+  int args = nt_ref(c->nt, call, "arguments");
+  int ac = 0; const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &ac) : NULL;
+  if (ac != 1 || !nt_type(c->nt, av[0]) || strcmp(nt_type(c->nt, av[0]), "ForwardingArgumentsNode")) return -1;
+  const char *tn = nt_str(c->nt, call, "name");
+  if (!tn) return -1;
+  int t = comp_method_index(c, tn);
+  if (t < 0 && m->class_id >= 0) t = comp_method_in_chain(c, m->class_id, tn, NULL);
+  return pure_forwarding_target(c, t, depth + 1);
+}
+
 /* Inline a call to a free-function yielding method `foo(args) { |bp| ... }`:
    declare the method's locals (renamed to avoid clashing with the call
    site), bind params to args, then emit the method body with yield
@@ -8989,6 +9015,16 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   }
   (void)implicit_self;
   if (mi < 0) return 0;
+  /* `fwd(args) { block }` where fwd just forwards `target(...)`: a literal
+     block can't reach a real-function forwarder, so retarget to `target`
+     with this call's args + block (target then splices the block normally). */
+  {
+    int blk0 = nt_ref(nt, id, "block");
+    if (blk0 >= 0 && nt_type(nt, blk0) && !strcmp(nt_type(nt, blk0), "BlockNode")) {
+      int t = pure_forwarding_target(c, mi, 0);
+      if (t >= 0) mi = t;
+    }
+  }
   Scope *m = &c->scopes[mi];
   if (!m->yields || scope_has_return(c, mi)) return 0;
   int block = nt_ref(nt, id, "block");   /* may be -1: no block passed */
@@ -9049,11 +9085,37 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int args = nt_ref(nt, id, "arguments");
   int argc = 0;
   const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  /* `bar(...)` inside a `def foo(...)` forwarder: bind this (inlined) target's
+     params from the enclosing forwarder's synth __fwd_* params, not from a
+     literal ForwardingArgumentsNode (which has no value of its own). */
+  Scope *fwd_encl = NULL;
+  if (argc == 1 && argv && nt_type(nt, argv[0]) &&
+      !strcmp(nt_type(nt, argv[0]), "ForwardingArgumentsNode"))
+    fwd_encl = comp_scope_of(c, argv[0]);
+  /* A trailing keyword-hash arg binds by param name, not positionally. */
+  int kwh = -1, pos_argc = argc;
+  if (argc > 0 && argv && nt_type(nt, argv[argc - 1]) &&
+      !strcmp(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh = argv[argc - 1]; pos_argc = argc - 1;
+  }
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
     buf_printf(b, "lv__y%d_%s = ", tag, m->pnames[i]);
     int sv = g_nren; g_nren = 0;
-    emit_arg_or_default(c, m, i, i < argc ? argv[i] : -1, b);
+    if (fwd_encl && i < fwd_encl->nparams) {
+      LocalVar *ep = scope_local(fwd_encl, fwd_encl->pnames[i]);
+      LocalVar *mp = scope_local(m, m->pnames[i]);
+      TyKind et = ep ? ep->type : TY_POLY;
+      TyKind mt = mp ? mp->type : TY_POLY;
+      char txt[80]; snprintf(txt, sizeof txt, "lv_%s", fwd_encl->pnames[i]);
+      if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, b);
+      else buf_puts(b, txt);
+    }
+    else if (i < pos_argc) emit_arg_or_default(c, m, i, argv[i], b);
+    else {
+      int kv = kwh >= 0 ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
+      emit_arg_or_default(c, m, i, kv, b);
+    }
     g_nren = sv;
     buf_puts(b, ";\n");
   }
@@ -9096,6 +9158,24 @@ int is_block_call(Compiler *c, int id) {
   if (!ty || strcmp(ty, "CallNode")) return 0;
   const char *nm = nt_str(nt, id, "name");
   if (!nm || (strcmp(nm, "call") && strcmp(nm, "()") && strcmp(nm, "[]") && strcmp(nm, "yield"))) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "LocalVariableReadNode")) return 0;
+  const char *rn = nt_str(nt, recv, "name");
+  return rn && !strcmp(rn, g_block_param_name);
+}
+
+/* A `<&block-param>.call(...)` on the inlined method's block param while NO
+   block is supplied at this site (g_block_id<0). This arises when a real-
+   function forwarder with no block of its own inlines a target that calls its
+   &block: the path is dead for any real caller (a block-requiring method
+   invoked without one raises), but must still compile. Caller emits nil. */
+int is_blockless_block_param_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (!g_block_param_name || !g_block_param_name[0] || g_block_id >= 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty || strcmp(ty, "CallNode")) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm || (strcmp(nm, "call") && strcmp(nm, "()") && strcmp(nm, "[]"))) return 0;
   int recv = nt_ref(nt, id, "receiver");
   if (recv < 0 || !nt_type(nt, recv) || strcmp(nt_type(nt, recv), "LocalVariableReadNode")) return 0;
   const char *rn = nt_str(nt, recv, "name");

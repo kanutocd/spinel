@@ -617,6 +617,10 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
     return;
   }
+  if (is_blockless_block_param_call(c, id)) {  /* dead path: no block supplied */
+    buf_puts(b, default_value(comp_ntype(c, id)));
+    return;
+  }
   if (!strcmp(ty, "SelfNode")) { buf_puts(b, g_self); return; }  /* self is the object reference (pointer) */
   if (!strcmp(ty, "InstanceVariableReadNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@x" */

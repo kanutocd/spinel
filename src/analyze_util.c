@@ -185,7 +185,16 @@ TyKind yield_value_type(Compiler *c, int mi) {
     const char *cty = nt_type(nt, cid);
     if (!cty || strcmp(cty, "CallNode")) continue;
     int blk = nt_ref(nt, cid, "block");
-    if (blk < 0) continue;
+    /* A `callee(...)` forward carries its block implicitly inside the `...`
+       (no explicit block node); treat it as a forwarded block too. */
+    int fwd_args = 0;
+    {
+      int a = nt_ref(nt, cid, "arguments");
+      int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      fwd_args = (an == 1 && av && nt_type(nt, av[0]) &&
+                  !strcmp(nt_type(nt, av[0]), "ForwardingArgumentsNode"));
+    }
+    if (blk < 0 && !fwd_args) continue;
     /* skip calls that live inside method mi itself (recursive self-calls);
        only external call sites provide a concrete block value type */
     if ((int)(comp_scope_of(c, cid) - c->scopes) == mi) continue;
@@ -207,11 +216,12 @@ else {
       }
     }
     if (rmi != mi) continue;
-    /* `mi(&b)`: the call forwards the block of its enclosing method rather
-       than passing a literal. The value `mi` yields is then whatever that
-       forwarded block produces -- i.e. the enclosing method's yield value. */
-    const char *blkty = nt_type(nt, blk);
-    if (blkty && !strcmp(blkty, "BlockArgumentNode")) {
+    /* `mi(&b)` / `mi(...)`: the call forwards the block of its enclosing
+       method rather than passing a literal. The value `mi` yields is then
+       whatever that forwarded block produces -- the enclosing method's
+       own yield value. */
+    const char *blkty = blk >= 0 ? nt_type(nt, blk) : NULL;
+    if (fwd_args || (blkty && !strcmp(blkty, "BlockArgumentNode"))) {
       Scope *encl = comp_scope_of(c, cid);
       int emi = encl ? (int)(encl - c->scopes) : -1;
       TyKind ft = (emi >= 0 && emi != mi) ? yield_value_type(c, emi) : TY_UNKNOWN;
@@ -252,19 +262,27 @@ TyKind method_call_ret(Compiler *c, int mi, int call_id) {
      return the per-call-site block body type so puts/assign use the right type. */
   if (c->scopes[mi].is_lowered_yield || is_yield || is_blk_param_call(c, last, mi)) {
     int blk = nt_ref(c->nt, call_id, "block");
-    if (blk >= 0) {
-      const char *bty = nt_type(c->nt, blk);
-      if (bty && !strcmp(bty, "BlockArgumentNode")) {
-        /* `callee(&b)` forwards the block active in the enclosing method, so
-           the value `callee` yields is whatever that forwarded block produces
-           -- i.e. the enclosing method's own per-call-site yield value. */
-        Scope *encl = comp_scope_of(c, call_id);
-        int emi = encl ? (int)(encl - c->scopes) : -1;
-        if (emi >= 0 && emi != mi) {
-          TyKind ft = yield_value_type(c, emi);
-          if (ft != TY_UNKNOWN && ft != TY_VOID) return ft;
-        }
+    const char *bty = blk >= 0 ? nt_type(c->nt, blk) : NULL;
+    /* `callee(&b)` / `callee(...)` forwards the block active in the enclosing
+       method (a `...` forward carries it implicitly, with no block node), so
+       the value `callee` yields is whatever that forwarded block produces --
+       i.e. the enclosing method's own per-call-site yield value. */
+    int fwd = (bty && !strcmp(bty, "BlockArgumentNode"));
+    if (!fwd && blk < 0) {
+      int a = nt_ref(c->nt, call_id, "arguments");
+      int an = 0; const int *av = a >= 0 ? nt_arr(c->nt, a, "arguments", &an) : NULL;
+      fwd = (an == 1 && av && nt_type(c->nt, av[0]) &&
+             !strcmp(nt_type(c->nt, av[0]), "ForwardingArgumentsNode"));
+    }
+    if (fwd) {
+      Scope *encl = comp_scope_of(c, call_id);
+      int emi = encl ? (int)(encl - c->scopes) : -1;
+      if (emi >= 0 && emi != mi) {
+        TyKind ft = yield_value_type(c, emi);
+        if (ft != TY_UNKNOWN && ft != TY_VOID) return ft;
       }
+    }
+    if (blk >= 0) {
       int bbody = nt_ref(c->nt, blk, "body");
       int bn = 0; const int *bb = bbody >= 0 ? nt_arr(c->nt, bbody, "body", &bn) : NULL;
       if (bn > 0) {

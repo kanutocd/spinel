@@ -1856,6 +1856,31 @@ int first_block_call_args(Compiler *c, int si) {
 
 int a_proc_params_node(Compiler *c, int create); /* forward decl */
 
+/* Follow a chain of pure `...` forwarders (a method whose whole body is a
+   single `target(...)` call) starting at `mi` until reaching the method that
+   actually yields (or owns the &block). Returns that method's index, or -1.
+   Lets a block passed to a forwarder be typed from the real yielder's args. */
+static int forwarding_yield_target(Compiler *c, int mi, int depth) {
+  if (mi < 0 || depth > 16) return -1;
+  Scope *m = &c->scopes[mi];
+  if (m->yields || (m->blk_param && m->blk_param[0])) return mi;
+  int body = m->body;
+  if (body < 0 || nt_kind(c->nt, body) != NK_StatementsNode) return -1;
+  int n = 0; const int *st = nt_arr(c->nt, body, "body", &n);
+  if (n != 1) return -1;
+  int call = st[0];
+  if (nt_kind(c->nt, call) != NK_CallNode || nt_ref(c->nt, call, "receiver") >= 0) return -1;
+  int args = nt_ref(c->nt, call, "arguments");
+  int ac = 0; const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &ac) : NULL;
+  if (ac != 1 || !av || !nt_type(c->nt, av[0]) ||
+      strcmp(nt_type(c->nt, av[0]), "ForwardingArgumentsNode")) return -1;
+  const char *tn = nt_str(c->nt, call, "name");
+  if (!tn) return -1;
+  int t = comp_method_index(c, tn);
+  if (t < 0 && m->class_id >= 0) t = comp_method_in_chain(c, m->class_id, tn, NULL);
+  return forwarding_yield_target(c, t, depth + 1);
+}
+
 /* Bind block parameter types for supported iteration methods. */
 int infer_block_params(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -2227,9 +2252,17 @@ int infer_block_params(Compiler *c) {
           if (cid >= 0) mi = comp_cmethod_in_chain(c, cid, name, NULL);
         }
       }
-      if (mi >= 0 && c->scopes[mi].yields) {
-        int yn = first_yield(c, mi);
-        int ya = yn >= 0 ? nt_ref(nt, yn, "arguments") : first_block_call_args(c, mi);
+      /* A block passed to a pure `...` forwarder is really consumed by the
+         method the forward eventually reaches; type its params from there. */
+      int yld_mi = mi;
+      if (mi >= 0 && !c->scopes[mi].yields &&
+          !(c->scopes[mi].blk_param && c->scopes[mi].blk_param[0])) {
+        int t = forwarding_yield_target(c, mi, 0);
+        if (t >= 0) yld_mi = t;
+      }
+      if (yld_mi >= 0 && c->scopes[yld_mi].yields) {
+        int yn = first_yield(c, yld_mi);
+        int ya = yn >= 0 ? nt_ref(nt, yn, "arguments") : first_block_call_args(c, yld_mi);
         int yc = 0;
         const int *yargs = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
         Scope *bs = comp_scope_of(c, block);
@@ -2245,7 +2278,7 @@ int infer_block_params(Compiler *c) {
         int min_yc = yc;
         for (int _yi = 0; _yi < nt->count; _yi++) {
           if (!nt_type(nt, _yi) || strcmp(nt_type(nt, _yi), "YieldNode")) continue;
-          if (c->nscope[_yi] != mi) continue;
+          if (c->nscope[_yi] != yld_mi) continue;
           int _ya = nt_ref(nt, _yi, "arguments");
           int _yc = 0;
           if (_ya >= 0) nt_arr(nt, _ya, "arguments", &_yc);
