@@ -1845,8 +1845,10 @@ int infer_block_params(Compiler *c) {
   int changed = 0;
 
   /* `->(x, ...) {}` (LambdaNode): its params live in the enclosing scope (no
-     separate scope), like block params. Register and type them; default to
-     int (the proc-literal slice default) until call-site arg inference lands. */
+     separate scope), like block params. Register them here; the int default is
+     applied later, AFTER the call-site arg-type seeding below, so a `->(t){...}`
+     later called as `f.call("x")` types `t` from the call (string) instead of
+     unifying a premature int default with it into poly (#1372). */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || strcmp(ty, "LambdaNode")) continue;
@@ -1858,7 +1860,6 @@ int infer_block_params(Compiler *c) {
       const char *p = nt_str(nt, reqs[k], "name");
       if (!p) continue;
       LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
-      if (lv->type == TY_UNKNOWN) { lv->type = TY_INT; changed = 1; }
     }
   }
 
@@ -2093,6 +2094,24 @@ int infer_block_params(Compiler *c) {
         TyKind merged = ty_unify(lv->type, at);
         if (merged != lv->type) { lv->type = merged; changed = 1; }
       }
+    }
+  }
+
+  /* Lambda param int default, applied AFTER the call-site seeding above so it
+     only fills params no call site typed -- the arithmetic-proc fallback,
+     matching the proc-literal default loop below (#1372). */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "LambdaNode")) continue;
+    int pn = nt_ref(nt, id, "parameters");
+    if (pn < 0) continue;
+    int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+    Scope *bs = comp_scope_of(c, id);
+    for (int k = 0; k < rn; k++) {
+      const char *p = nt_str(nt, reqs[k], "name");
+      if (!p) continue;
+      LocalVar *lv = scope_local(bs, p);
+      if (lv && lv->type == TY_UNKNOWN) { lv->type = TY_INT; changed = 1; }
     }
   }
 
