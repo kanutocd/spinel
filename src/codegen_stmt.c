@@ -1691,6 +1691,42 @@ static void emit_unbox_node(Compiler *c, TyKind t, int node, Buf *b) {
   emit_expr(c, node, b);
 }
 
+/* A genuine poly body (TY_POLY) is unboxed into any narrower (non-poly) return
+   slot (#1417). */
+static int tail_needs_unbox(TyKind r0, TyKind ret) {
+  return r0 == TY_POLY && ret != TY_POLY;
+}
+
+/* The return slot's nil representation for a non-poly type. */
+static void emit_ret_nil(Compiler *c, TyKind t, Buf *b) {
+  if (t == TY_INT || t == TY_BOOL) buf_puts(b, "SP_INT_NIL");
+  else if (t == TY_FLOAT) buf_puts(b, "sp_float_nil()");
+  else if (t == TY_STRING || ty_is_object(t)) buf_puts(b, "NULL");
+  else {
+    const char *cn = c_type_name(t);
+    if (cn && cn[0] && cn[strlen(cn) - 1] == '*') buf_puts(b, "NULL");
+    else buf_puts(b, default_value(t));
+  }
+}
+
+/* Emit a tail/return value expression into a non-poly return slot. A call that
+   resolves to nil through a nil/unresolved receiver is typed `-> Integer` (etc.)
+   per RBS but emits the poly box `sp_box_nil()`; returning that raw from a
+   non-poly C function is uncompilable (#1432). Detect that exact emission and
+   substitute the slot's typed nil instead. The text test is precise: a literal
+   `sp_box_nil()` carries no side-effect prelude, so discarding it is safe, and
+   any other emission (e.g. a poly-dispatch `({...})`) is passed through
+   unchanged. */
+static void emit_tail_value(Compiler *c, int node, Buf *b) {
+  if (g_ret_type == TY_POLY) { emit_expr(c, node, b); return; }
+  Buf tmp; memset(&tmp, 0, sizeof tmp);
+  emit_expr(c, node, &tmp);
+  const char *txt = tmp.p ? tmp.p : "";
+  if (!strcmp(txt, "sp_box_nil()")) emit_ret_nil(c, g_ret_type, b);
+  else buf_puts(b, txt);
+  free(tmp.p);
+}
+
 /* A literal whose evaluation has no side effects -- used to decide whether a
    discarded `return <expr>` in a void function needs `(void)(<expr>)` to keep
    the side effects or can collapse to a bare `return;`. Callers unwrap parens
@@ -1763,8 +1799,8 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
     /* a poly return value feeding a narrower (non-poly) return slot -- e.g. a
        method(:sym) target pinned to mrb_int that returns a poly @ivar, or an
        RBS-typed String/object method whose body yields poly -- needs coercing. */
-    else if (r0 == TY_POLY && g_ret_type != TY_POLY) emit_unbox_node(c, g_ret_type, a[0], b);
-    else emit_expr(c, a[0], b);
+    else if (tail_needs_unbox(r0, g_ret_type)) emit_unbox_node(c, g_ret_type, a[0], b);
+    else emit_tail_value(c, a[0], b);
     buf_puts(b, ";\n");
   }
   else if (g_ret_type == TY_POLY) buf_puts(b, "return sp_box_nil();\n");
@@ -3656,8 +3692,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
      method(:sym) target, or an RBS-typed String/object method whose body yields
      poly -- needs coercing. (Only for a real return slot, not a begin/rescue
      result var, which stays poly.) */
-  else if (!g_result_var && g_ret_type != TY_POLY && comp_ntype(c, id) == TY_POLY) emit_unbox_node(c, g_ret_type, id, b);
-  else emit_expr(c, id, b);
+  else if (!g_result_var && tail_needs_unbox(comp_ntype(c, id), g_ret_type)) emit_unbox_node(c, g_ret_type, id, b);
+  else emit_tail_value(c, id, b);
   buf_puts(b, ";\n");
 }
 
