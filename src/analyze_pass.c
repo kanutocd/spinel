@@ -2813,6 +2813,24 @@ TyKind return_node_type(Compiler *c, int id) {
   return n > 0 ? infer_type(c, a[0]) : TY_NIL;
 }
 
+/* Defined in codegen_fold.c (linked in). */
+int is_descendant(Compiler *c, int k, int anc);
+
+/* True when the method body's tail statement unconditionally raises, so the C
+   function never reaches a return (used to widen its void type to the override
+   return type -- the unreachable "return value" can safely take that type). */
+static int scope_tail_raises(Compiler *c, int s) {
+  const NodeTable *nt = c->nt;
+  int body = c->scopes[s].body;
+  if (body < 0 || nt_kind(nt, body) != NK_StatementsNode) return 0;
+  int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+  if (bn <= 0) return 0;
+  int last = bb[bn - 1];
+  const char *ty = nt_type(nt, last);
+  return ty && !strcmp(ty, "CallNode") && nt_ref(nt, last, "receiver") < 0 &&
+         nt_str(nt, last, "name") && !strcmp(nt_str(nt, last, "name"), "raise");
+}
+
 int infer_return_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -2880,6 +2898,31 @@ int infer_return_types(Compiler *c) {
       if (pr != TY_UNKNOWN && sc->ret_proc_ret != (int)pr) { sc->ret_proc_ret = (int)pr; changed = 1; }
     }
   }
+
+  /* An abstract base method (`def self.table_name; raise; end`) infers a void
+     return, but a subclass overrides it with a value-returning version. A call
+     bound to the base in value position would then assign void into a temp and
+     fail to compile (#1416). Since the base body always raises, its return is
+     unreachable -- widen its type to the override return(s), so the call is
+     usable. Only raising bases qualify (a genuinely nil-returning void method
+     must stay void). */
+  for (int s = 1; s < c->nscopes; s++) {
+    Scope *sc = &c->scopes[s];
+    if (sc->ret != TY_VOID || sc->class_id < 0 || !sc->name) continue;
+    if (sc->ret_specialized || sc->ret_rbs_seeded || sc->cs_synth) continue;
+    if (!scope_tail_raises(c, s)) continue;
+    TyKind unified = TY_VOID;
+    for (int t = 1; t < c->nscopes; t++) {
+      Scope *ot = &c->scopes[t];
+      if (t == s || !ot->name || strcmp(ot->name, sc->name)) continue;
+      if (ot->is_cmethod != sc->is_cmethod || ot->class_id < 0) continue;
+      if (!is_descendant(c, ot->class_id, sc->class_id)) continue;
+      if (ot->ret == TY_VOID || ot->ret == TY_UNKNOWN) continue;
+      unified = (unified == TY_VOID) ? ot->ret : ty_unify(unified, ot->ret);
+    }
+    if (unified != TY_VOID) { sc->ret = unified; changed = 1; }
+  }
+
   free(ret_acc); free(has_ret);
   return changed;
 }
