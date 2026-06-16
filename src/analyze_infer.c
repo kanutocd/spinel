@@ -1257,10 +1257,19 @@ else {
     }
   }
 
-  /* bare call inside a module/class body -> class method of that module/class */
-  if (recv < 0 && g_cbody_class_id >= 0) {
-    int smi = comp_cmethod_in_chain(c, g_cbody_class_id, name, NULL);
-    if (smi >= 0) return method_call_ret(c, smi, id);
+  /* bare call inside a module/class body -> class method of that module/class.
+     Use the per-node enclosing-cbody: g_cbody_class_id is only set during the
+     scope pass, not the inference fixpoint, so relying on it leaves a bare
+     module-body cmethod call (e.g. `take(mk)` where mk is `def self.mk`) typed
+     void. The scope pass records the enclosing cbody per node in node_cbody[id]
+     (cf. analyze_scope.c, analyze.c which already read it during inference). */
+  if (recv < 0) {
+    int cbody = c->node_cbody[id];
+    if (cbody < 0) cbody = g_cbody_class_id;
+    if (cbody >= 0) {
+      int smi = comp_cmethod_in_chain(c, cbody, name, NULL);
+      if (smi >= 0) return method_call_ret(c, smi, id);
+    }
   }
   /* bare call inside an instance_eval/exec block: dispatch on receiver class */
   if (recv < 0) {
