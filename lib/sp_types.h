@@ -126,7 +126,14 @@ typedef struct{const char *name;}sp_Encoding;
 
 /* ---- GC headers ---- */
 typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); size_t size; unsigned marked : 1; unsigned frozen : 1; void (*recycle)(struct sp_gc_hdr *); } sp_gc_hdr;
-typedef struct sp_str_hdr { struct sp_str_hdr *next; size_t size; size_t len; } sp_str_hdr;
+/* size/len packed to uint32 (4 GB per-string cap, far beyond any real
+   string) so the cached FNV `hash` fits without growing the 24-byte
+   header -- i.e. zero per-string RSS cost vs the pre-cache layout.
+   `size` is vestigial (written by sp_str_alloc, never read back; the
+   str-heap sweep no longer folds string bytes into sp_gc_bytes).
+   `hash` caches sp_str_hash for heap/heap-frozen keys; 0 == not yet
+   computed, invalidated to 0 on any in-place mutation (setbyte/set_len). */
+typedef struct sp_str_hdr { struct sp_str_hdr *next; uint32_t size; uint32_t len; uint64_t hash; } sp_str_hdr;
 
 /* ---- Typed arrays ---- */
 #define SP_STRARR_INLINE 4
