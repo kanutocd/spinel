@@ -5455,6 +5455,27 @@ else {
           buf_puts(b, "; break;");
         }
       }
+      /* a symbol-keyed hash (`{ name: ... }`) reaches here as SymPolyHash; add
+         its `[]` / `fetch` arm so a Hash receiver indexed by a symbol is not
+         dropped when a user class also defines an instance `[]` (#1437). */
+      if ((is_aref || is_fetch) && infer_type(c, argv[0]) == TY_SYMBOL) {
+        TyKind trt = is_scalar_ret(ret) ? ret : TY_INT;
+        char getx[200];
+        snprintf(getx, sizeof getx, "sp_SymPolyHash_get((sp_SymPolyHash *)_t%d.v.p, _t%d)", tv, atmp[0]);
+        buf_printf(b, " case SP_BUILTIN_SYM_POLY_HASH: _t%d = sp_SymPolyHash_has_key((sp_SymPolyHash *)_t%d.v.p, _t%d) ? ", tr, tv, atmp[0]);
+        if (ret == TY_POLY) buf_puts(b, getx);
+        else if (trt == TY_STRING) buf_printf(b, "sp_poly_to_s(%s)", getx);
+        else if (trt == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", getx);
+        else buf_printf(b, "sp_poly_to_i(%s)", getx);
+        buf_puts(b, " : ");
+        if (is_fetch && argc == 2) {
+          char dn[32]; snprintf(dn, sizeof dn, "_t%d", atmp[1]);
+          if (ret == TY_POLY) emit_boxed_text(c, infer_type(c, argv[1]), dn, b); else buf_puts(b, dn);
+        }
+        else if (is_fetch) { buf_puts(b, "(sp_raise_cls(\"KeyError\", \"key not found\"), "); buf_puts(b, ret == TY_POLY ? "sp_box_nil()" : default_value(trt)); buf_puts(b, ")"); }
+        else buf_puts(b, ret == TY_POLY ? "sp_box_nil()" : default_value(trt));
+        buf_puts(b, "; break;");
+      }
       buf_printf(b, " } _t%d; })", tr);
       free(atmp);
       return;
