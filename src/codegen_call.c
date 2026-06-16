@@ -1139,17 +1139,51 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     }
     else if (ac >= 2 && nt_type(nt, av[0]) &&
              (!strcmp(nt_type(nt, av[0]), "ConstantReadNode") || !strcmp(nt_type(nt, av[0]), "ConstantPathNode"))) {
-      buf_printf(b, "sp_raise_cls(\"%s\", ", nt_str(nt, av[0], "name"));
-      emit_expr(c, av[1], b); buf_puts(b, ")");
+      /* `raise Cls, arg` on a user exception subclass with ivars is
+         `raise Cls.new(arg)`: construct the object so its ivar is set (and
+         the message comes from the class's initialize/super), then carry it.
+         A bare-string/builtin exception keeps the (cls, msg) fast path. */
+      const char *cn = nt_str(nt, av[0], "name");
+      int xc = cn ? comp_class_index(c, cn) : -1;
+      int ic = -1;
+      if (xc >= 0 && class_is_exc_subclass(c, xc) && c->classes[xc].nivars > 0)
+        ic = comp_method_in_chain(c, xc, "initialize", NULL);
+      if (xc >= 0 && ic >= 0 && c->scopes[ic].nparams >= 1) {
+        buf_printf(b, "sp_raise_exc((sp_Exception *)sp_%s_new(", c->classes[xc].name);
+        /* match the constructor's first-param type, which falls back to poly
+           when unknown (same rule emit_class_new uses for the signature). */
+        LocalVar *p0 = scope_local(&c->scopes[ic], c->scopes[ic].pnames[0]);
+        TyKind pt0 = (p0 && p0->type != TY_UNKNOWN) ? p0->type : TY_POLY;
+        if (pt0 == TY_POLY) emit_boxed(c, av[1], b);
+        else emit_expr(c, av[1], b);
+        buf_puts(b, "))");
+      }
+      else {
+        buf_printf(b, "sp_raise_cls(\"%s\", ", cn);
+        emit_expr(c, av[1], b); buf_puts(b, ")");
+      }
     }
     else {
       TyKind at = ac > 0 ? comp_ntype(c, av[0]) : TY_UNKNOWN;
       if (at == TY_EXCEPTION)
-        { buf_puts(b, "sp_raise_exc("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
+        { buf_puts(b, "sp_raise_exc((sp_Exception *)("); emit_expr(c, av[0], b); buf_puts(b, "))"); }
       else
         { buf_puts(b, "sp_raise("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
     }
     return;
+  }
+
+  /* A specialized rescue var (`rescue MyError => e`, MyError carrying ivars)
+     is typed as the subclass object so `e.<ivar>` reads work. Its
+     exception-shaped queries still route through the base sp_Exception helpers
+     (the struct's leading members mirror sp_Exception); the ivar readers fall
+     through to normal object dispatch below. */
+  if (recv >= 0 && ty_is_object(comp_ntype(c, recv)) &&
+      class_is_exc_subclass(c, ty_object_class(comp_ntype(c, recv)))) {
+    if (!strcmp(name, "message") || !strcmp(name, "to_s") || !strcmp(name, "to_str")) {
+      buf_puts(b, "sp_exc_message((sp_Exception *)("); emit_expr(c, recv, b); buf_puts(b, "))");
+      return;
+    }
   }
 
   /* exception object methods */

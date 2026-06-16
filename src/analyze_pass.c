@@ -1496,6 +1496,31 @@ int infer_param_types(Compiler *c) {
     const char *name = nt_str(nt, id, "name");
     int recv = nt_ref(nt, id, "receiver");
 
+    /* `raise Cls, arg` constructs `Cls.new(arg)` for a user exception
+       subclass, so seed Cls#initialize's first param from arg's type --
+       without this the param stays TY_UNKNOWN and the constructor gets
+       marked unreachable, dropping the initialize call (#1415). */
+    if (recv < 0 && name && !strcmp(name, "raise")) {
+      int rargs = nt_ref(nt, id, "arguments");
+      int ran = 0; const int *rav = rargs >= 0 ? nt_arr(nt, rargs, "arguments", &ran) : NULL;
+      if (ran >= 2 && nt_type(nt, rav[0]) &&
+          (!strcmp(nt_type(nt, rav[0]), "ConstantReadNode") || !strcmp(nt_type(nt, rav[0]), "ConstantPathNode"))) {
+        const char *rcn = nt_str(nt, rav[0], "name");
+        int rci = rcn ? comp_class_index(c, rcn) : -1;
+        if (rci >= 0 && class_is_exc_subclass(c, rci)) {
+          int imi = comp_method_in_chain(c, rci, "initialize", NULL);
+          if (imi >= 0 && c->scopes[imi].nparams >= 1) {
+            LocalVar *ip = scope_local(&c->scopes[imi], c->scopes[imi].pnames[0]);
+            TyKind at = infer_type(c, rav[1]);
+            if (ip && !ip->rbs_seeded && at != TY_UNKNOWN) {
+              TyKind m = ty_unify(ip->type, at);
+              if (m != ip->type) { ip->type = m; changed = 1; }
+            }
+          }
+        }
+      }
+    }
+
     /* <method>.call(args): bind the call-site arg types to the target
        method's params (the Method ABI is the only call site for a method
        reached solely via method(:sym)). */

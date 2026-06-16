@@ -1590,7 +1590,13 @@ else {
   }
 
   /* exception receiver methods */
-  if (recv >= 0 && rt == TY_EXCEPTION) {
+  /* A specialized rescue var is typed as the exception subclass object, but
+     its exception-shaped queries still answer as on a base exception, unless
+     the subclass defines its own override (#1415). */
+  int exc_shaped = rt == TY_EXCEPTION ||
+                   (ty_is_object(rt) && class_is_exc_subclass(c, ty_object_class(rt)) &&
+                    comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0);
+  if (recv >= 0 && exc_shaped) {
     if (!strcmp(name, "message") || !strcmp(name, "to_s") ||
         !strcmp(name, "to_str") || !strcmp(name, "inspect") ||
         !strcmp(name, "full_message") || !strcmp(name, "class")) return TY_STRING;

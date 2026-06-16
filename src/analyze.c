@@ -1,5 +1,23 @@
 #include "analyze_internal.h"
 
+/* Defined in codegen.c (linked into the same binary). Used to specialize a
+   `rescue <UserExc> => e` binding to the exception subclass's object type. */
+int class_is_exc_subclass(Compiler *c, int ci);
+
+/* The class index a rescue arm specializes its bound variable to: exactly one
+   named user exception subclass that carries ivars, else -1 (#1415). */
+static int rescue_arm_spec_cid(Compiler *c, int rescue_id) {
+  int nexc = 0;
+  const int *exc = nt_arr(c->nt, rescue_id, "exceptions", &nexc);
+  if (nexc != 1) return -1;
+  const char *en = nt_type(c->nt, exc[0]);
+  if (!en || (strcmp(en, "ConstantReadNode") && strcmp(en, "ConstantPathNode"))) return -1;
+  const char *enm = nt_str(c->nt, exc[0], "name");
+  int xc = enm ? comp_class_index(c, enm) : -1;
+  if (xc >= 0 && class_is_exc_subclass(c, xc) && c->classes[xc].nivars > 0) return xc;
+  return -1;
+}
+
 void compute_reachable(Compiler *c) {
   /* Build per-scope call sets (CallNode names, not entering nested DefNodes). */
   char ***scope_calls = calloc((size_t)c->nscopes, sizeof(char **));
@@ -1147,7 +1165,14 @@ void analyze_program(Compiler *c) {
   rewrite_const_alias_receivers(c);
   register_ffi_decls(c);
 
-  /* rescue variables (`rescue => e`) are typed as exception objects */
+  /* rescue variables (`rescue => e`) are typed as exception objects. When the
+     arm names exactly one user exception subclass that carries ivars, type the
+     binding as that object instead so `e.<ivar>` reads resolve and the carried
+     object's fields are reachable (#1415); otherwise plain TY_EXCEPTION.
+     A name reused across rescue arms (`rescue A => e` ... `rescue B => e`)
+     interns to one LocalVar, so it may only specialize when every arm binding
+     it agrees on the same class -- otherwise the slot would collapse onto one
+     of the types and mis-read the others. */
   for (int id = 0; id < c->nt->count; id++) {
     const char *ty = nt_type(c->nt, id);
     if (!ty || strcmp(ty, "RescueNode")) continue;
@@ -1155,8 +1180,22 @@ void analyze_program(Compiler *c) {
     if (ref < 0 || strcmp(nt_type(c->nt, ref) ? nt_type(c->nt, ref) : "", "LocalVariableTargetNode")) continue;
     const char *nm = nt_str(c->nt, ref, "name");
     if (!nm) continue;
-    LocalVar *lv = scope_local_intern(comp_scope_of(c, ref), nm);
-    lv->type = TY_EXCEPTION;
+    Scope *vsc = comp_scope_of(c, ref);
+    LocalVar *lv = scope_local_intern(vsc, nm);
+    int mine = rescue_arm_spec_cid(c, id);
+    /* unanimity check across every same-name rescue arm in the same scope */
+    int unanimous = mine;
+    for (int id2 = 0; id2 < c->nt->count && unanimous >= 0; id2++) {
+      if (id2 == id) continue;
+      const char *ty2 = nt_type(c->nt, id2);
+      if (!ty2 || strcmp(ty2, "RescueNode")) continue;
+      int ref2 = nt_ref(c->nt, id2, "reference");
+      if (ref2 < 0 || !nt_type(c->nt, ref2) || strcmp(nt_type(c->nt, ref2), "LocalVariableTargetNode")) continue;
+      const char *nm2 = nt_str(c->nt, ref2, "name");
+      if (!nm2 || strcmp(nm2, nm) || comp_scope_of(c, ref2) != vsc) continue;
+      if (rescue_arm_spec_cid(c, id2) != mine) unanimous = -1;
+    }
+    lv->type = unanimous >= 0 ? ty_object(unanimous) : TY_EXCEPTION;
     lv->is_block_param = 1;  /* set externally; don't reset in the fixpoint */
   }
 
@@ -1930,7 +1969,14 @@ void analyze_program(Compiler *c) {
     if (!ci->name || !strcmp(ci->name, "Toplevel")) continue;
     if (ci->nivars < 1 || ci->nivars > 8) continue;
     if (ci->nwriters > 0) continue;
-    if (ci->parent >= 0) continue;                 /* explicit superclass */
+    if (ci->parent >= 0) continue;                 /* explicit user superclass */
+    /* A class with any superclass node -- including a builtin like
+       StandardError -- is not a standalone leaf, so it can't be a value
+       type. The parent check above only catches user superclasses (a
+       builtin parent leaves ci->parent == -1); without this, an Exception
+       subclass with a scalar ivar was wrongly returned by value and never
+       got a struct (#1415). */
+    if (ci->def_node >= 0 && nt_ref(c->nt, ci->def_node, "superclass") >= 0) continue;
     int scalar = 1;
     for (int j = 0; j < ci->nivars; j++) {
       TyKind t = ci->ivar_types[j];

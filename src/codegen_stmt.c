@@ -1823,8 +1823,30 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
 
   g_rescue_cls = clsbuf; g_rescue_msg = msgbuf;
   if (ref >= 0 && nt_type(nt, ref) && !strcmp(nt_type(nt, ref), "LocalVariableTargetNode")) {
+    /* If the analyzer specialized this binding to a user exception subclass
+       object (one arm, one class, no name collision -- see the rescue-var
+       typing in analyze_program), bind the original carried object so its
+       ivars survive the raise (#1415). The carried slot is at sp_exc_top (the
+       just-popped frame, same index _rmsg reads). A degenerate no-object raise
+       of that class falls back to a freshly built subclass struct so ivar
+       reads stay in-bounds rather than NULL-deref. */
+    int spec_cid = -1;
+    {
+      LocalVar *vlv = scope_local(comp_scope_of(c, ref), nt_str(nt, ref, "name"));
+      if (vlv && ty_is_object(vlv->type)) {
+        int xc = ty_object_class(vlv->type);
+        if (xc >= 0 && class_is_exc_subclass(c, xc)) spec_cid = xc;
+      }
+    }
     emit_indent(b, indent);
-    buf_printf(b, "lv_%s = sp_exc_new_for_catch(_rcls_%d, _rmsg_%d);\n", nt_str(nt, ref, "name"), rc, rc);
+    if (spec_cid >= 0) {
+      const char *xn = c->classes[spec_cid].name;
+      buf_printf(b, "lv_%s = sp_exc_obj[sp_exc_top] ? (sp_%s *)sp_exc_obj[sp_exc_top]"
+                    " : (sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
+                 nt_str(nt, ref, "name"), xn, xn, xn, rc, rc);
+    }
+    else
+      buf_printf(b, "lv_%s = sp_exc_new_for_catch(_rcls_%d, _rmsg_%d);\n", nt_str(nt, ref, "name"), rc, rc);
   }
   if (resultvar) {
     const char *sv = g_result_var; g_result_var = resultvar;

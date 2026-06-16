@@ -1102,7 +1102,24 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   /* Exception subclasses share sp_Exception as their underlying type. */
   int cid = comp_class_index(c, ci->name);
   if (cid >= 0 && class_is_exc_subclass(c, cid)) {
-    /* struct is forward-declared as typedef sp_Exception in codegen_program */
+    /* An ivar-less exception subclass is forward-declared as
+       `typedef sp_Exception` and needs no struct of its own. One with
+       ivars gets a dedicated struct whose leading members mirror
+       sp_Exception (cls_name/parent_cls_name/msg) -- a common initial
+       sequence -- so every `(sp_Exception *)` cast in the raise/rescue
+       and message machinery stays valid, with the ivar fields after (#1415). */
+    if (ci->nivars == 0) return;
+    buf_printf(b, "struct sp_%s_s {\n", ci->name);
+    buf_puts(b, "  const char *cls_name;\n");
+    buf_puts(b, "  const char *parent_cls_name;\n");
+    buf_puts(b, "  const char *msg;\n");
+    for (int i = 0; i < ci->nivars; i++) {
+      TyKind t = ci->ivar_types[i];
+      buf_puts(b, "  ");
+      emit_ctype(c, t == TY_UNKNOWN ? TY_INT : t, b);
+      buf_printf(b, " iv_%s;\n", ci->ivars[i] + 1);
+    }
+    buf_puts(b, "};\n");
     return;
   }
   /* the typedef is forward-declared for every class first (see codegen_program)
@@ -1133,10 +1150,15 @@ int class_needs_scan(ClassInfo *ci) {
    through an unscanned ivar would be swept out from under the object
    (poly ivars holding tree children were the canonical case). */
 void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
-  (void)c;
-  if (!class_needs_scan(ci)) return;
+  int cid = comp_class_index(c, ci->name);
+  int is_exc_iv = cid >= 0 && ci->nivars > 0 && class_is_exc_subclass(c, cid);
+  /* An ivar-bearing exception subclass always needs a scan: even with no
+     heap ivar, its `msg` (a managed string in the dedicated struct) must
+     be marked or it is swept while the exception is in flight. */
+  if (!class_needs_scan(ci) && !is_exc_iv) return;
   buf_printf(b, "static void sp_%s_scan(void *p) {\n", ci->name);
   buf_printf(b, "  sp_%s *o = (sp_%s *)p;\n", ci->name, ci->name);
+  if (is_exc_iv) buf_puts(b, "  sp_mark_string(o->msg);\n");
   for (int i = 0; i < ci->nivars; i++) {
     TyKind t = ci->ivar_types[i];
     const char *iv = ci->ivars[i] + 1;
@@ -1222,9 +1244,27 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   if (class_is_exc_subclass(c, cid)) {
     const char *cn2 = class_ruby_name(c, cid); if (!cn2) cn2 = ci->name;
     const char *par = exc_builtin_parent(c, cid);
-    buf_printf(b, ") {\n  sp_%s *self = sp_exc_new_sub(\"%s\", \"%s\", (&(\"\\xff\")[1]));\n",
-               ci->name, cn2, par);
-    buf_printf(b, "  SP_GC_ROOT(self);\n");
+    if (ci->nivars == 0) {
+      buf_printf(b, ") {\n  sp_%s *self = sp_exc_new_sub(\"%s\", \"%s\", (&(\"\\xff\")[1]));\n",
+                 ci->name, cn2, par);
+      buf_printf(b, "  SP_GC_ROOT(self);\n");
+    }
+    else {
+      /* ivar-bearing exception subclass: allocate the dedicated struct
+         (sp_exc_new_sub would only size the 3-field base). The leading
+         members mirror sp_Exception so the raise/message machinery's casts
+         work; the ivars live after and are set by initialize. */
+      buf_printf(b, ") {\n  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s_scan);\n",
+                 ci->name, ci->name, ci->name, ci->name);
+      buf_puts(b, "  memset(self, 0, sizeof(*self));\n");
+      buf_printf(b, "  self->cls_name = \"%s\";\n", cn2);
+      buf_printf(b, "  self->parent_cls_name = \"%s\";\n", par);
+      buf_puts(b, "  self->msg = (&(\"\\xff\")[1]);\n");
+      buf_printf(b, "  SP_GC_ROOT(self);\n");
+      for (int i = 0; i < ci->nivars; i++)
+        if (ci->ivar_types[i] == TY_POLY)
+          buf_printf(b, "  self->iv_%s = sp_box_nil();\n", ci->ivars[i] + 1);
+    }
   }
   else {
   buf_printf(b, ") {\n  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
@@ -2204,7 +2244,7 @@ char *codegen_program(const NodeTable *nt) {
      a class struct may embed a pointer to a class defined later. */
   for (int i = 0; i < c->nclasses; i++) {
     if (is_builtin_reopen(c->classes[i].name)) continue;
-    if (class_is_exc_subclass(c, i))
+    if (class_is_exc_subclass(c, i) && c->classes[i].nivars == 0)
       buf_printf(&b, "typedef sp_Exception sp_%s;\n", c->classes[i].name);
     else
       buf_printf(&b, "typedef struct sp_%s_s sp_%s;\n", c->classes[i].name, c->classes[i].name);

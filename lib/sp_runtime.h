@@ -4442,6 +4442,13 @@ static const char *sp_exc_msg[SP_EXC_STACK_MAX];
 static volatile int sp_exc_top = 0;
 static const char *sp_exc_cls[SP_EXC_STACK_MAX];
 static volatile const char *sp_last_exc_cls = sp_str_empty;
+/* The raised exception OBJECT, carried alongside (cls,msg) so a user
+   exception subclass keeps its ivars across raise -> rescue (#1415).
+   NULL for a bare string/builtin raise, which reconstructs on catch.
+   sp_pending_exc_obj is set by sp_raise_exc just before the longjmp and
+   consumed into the per-frame slot by sp_raise_cls. */
+static void *sp_exc_obj[SP_EXC_STACK_MAX];
+static void *sp_pending_exc_obj = NULL;
 /* ---- Native backtrace formatting (spinel --debug) ---------------------- */
 /* True for sp_<name> symbols that are runtime helpers, not user Ruby methods.
    A denylist of the lowercase runtime prefixes; user methods are sp_<rubyname>
@@ -4579,7 +4586,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
 #if SP_BT_AVAILABLE
   if (sp_bt_enabled) sp_bt_n = backtrace(sp_bt_buf, 256);
 #endif
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
+  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, "unhandled exception: %s\n", msg); exit(1); }
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
 
 /* Issue #781: bridge between the regex compile-error path (which lives
@@ -4625,7 +4632,13 @@ static void sp_re_startup_error_handler(const char *msg) {
   longjmp(sp_re_startup_jmp, 1);
 }
 extern void sp_re_set_error_handler(void (*fn)(const char *msg));
-static void sp_mark_in_flight_exceptions(void) { for (int i = 0; i < sp_exc_top; i++) sp_mark_string(sp_exc_msg[i]); }
+static void sp_mark_in_flight_exceptions(void) {
+  for (int i = 0; i < sp_exc_top; i++) {
+    sp_mark_string(sp_exc_msg[i]);
+    if (sp_exc_obj[i]) sp_gc_mark(sp_exc_obj[i]);  /* carried subclass object + its ivars */
+  }
+  if (sp_pending_exc_obj) sp_gc_mark(sp_pending_exc_obj);
+}
 
 /* sp_Exception: first-class exception object. cls_name is a pointer
    to the per-class const string literal emitted by codegen
@@ -4656,6 +4669,19 @@ static sp_Exception *sp_exc_new_sub(const char *cls_name, const char *parent_cls
   if (!msg || !msg[0]) e->msg = cls_name ? cls_name : "RuntimeError";
   return e;
 }
+/* Allocate a zeroed exception-subclass struct of `sz` bytes with the base
+   {cls_name, parent_cls_name, msg} prefix set, for the degenerate catch path
+   where a user subclass with ivars was raised without a carried object
+   (#1415). Its ivar fields stay zero (nil/0). msg is the only heap field, so
+   the base scan suffices. */
+static void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {
+  sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, sp_exc_gc_scan);
+  memset(e, 0, sz);
+  e->cls_name = cls_name ? cls_name : "RuntimeError";
+  e->msg = (msg && msg[0]) ? msg : e->cls_name;
+  if (sp_user_exc_parent_fn) e->parent_cls_name = sp_user_exc_parent_fn(e->cls_name);
+  return e;
+}
 /* Accept `volatile` pointers: LV slots holding sp_Exception * are
    declared volatile when they live across setjmp, so callers may
    pass volatile-qualified pointers in. The pointee itself isn't
@@ -4672,6 +4698,9 @@ static const char *sp_exc_message(volatile sp_Exception *ve) {
 static void sp_raise_exc(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
   if (!e) sp_raise("(nil exception)");
+  /* Carry the object so a user subclass keeps its ivars across the
+     longjmp; sp_raise_cls moves it into the current frame's slot. */
+  sp_pending_exc_obj = (void *)e;
   sp_raise_cls(e->cls_name, e->msg);
 }
 /* Create an exception for a `rescue => e` binding: like sp_exc_new but
