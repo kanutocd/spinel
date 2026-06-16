@@ -4,8 +4,12 @@ Spinel compiles Ruby source code into standalone native executables.
 It performs whole-program type inference and generates optimized C code,
 achieving significant speedups over CRuby.
 
-Spinel is **self-hosting**: the compiler backend is written in Ruby and
-compiles itself into a native binary.
+The compiler is a **single self-contained C binary**: it parses Ruby (via
+libprism), infers types across the whole program, emits C, and invokes the
+system `cc` to produce a native executable -- no Ruby runtime and no chained
+helper binaries at compile time. (Spinel was previously written in a
+self-hosting Ruby subset; that backend is preserved in-tree as a regression
+oracle -- see [History](#history).)
 
 ## How It Works
 
@@ -13,39 +17,34 @@ compiles itself into a native binary.
 Ruby (.rb)
     |
     v
-spinel_parse           Parse with Prism (libprism), serialize AST
-    |                  (C binary, or CRuby + Prism gem as fallback)
+parse (libprism)       Parse with Prism, linked in as a C library
+    |                  (a CRuby + Prism-gem path produces the same AST)
     v
-AST text file (.ast)
+text AST -> NodeTable  Loaded into an in-memory node table
     |
     v
-spinel_analyze         Whole-program type inference (self-hosted)
-    |                  Walks AST to fixpoint: param / return / ivar
-    |                  types, value-type detection, DCE markers,
-    |                  per-node inferred-type cache.
+analyze                Whole-program type inference (src/analyze*.c).
+    |                  Walks the AST to a fixpoint: param / return / ivar
+    |                  types, value-type detection, dead-code markers,
+    |                  a per-node inferred-type cache.
     v
-IR text file (.ir)
-    |
-    v
-spinel_codegen         C code generation (self-hosted)
-    |                  Consumes .ast + .ir, emits one C file.
+codegen                C code generation (src/codegen*.c). Reads the AST
+    |                  plus the analysis just computed in the same process,
+    |                  emits one C file.
     v
 C source (.c)
     |
     v
-cc -O2 -Ilib -lm      Standard C compiler + runtime header
+cc -O2 -Ilib -lm      System C compiler + runtime
     |
     v
 Native binary           Standalone, no runtime dependencies
 ```
 
-The analyze / codegen split is by design -- they live in separate
-binaries (`spinel_analyze`, `spinel_codegen`) that share no in-memory
-state. Everything analyze decides is serialized through the IR file;
-codegen reconstructs its inferred view from that contract. See
-[docs/ANALYZE-IR.md](docs/ANALYZE-IR.md) for the per-record format
-and [docs/AST.md](docs/AST.md) for the AST format the analyze stage
-consumes.
+Analyze and codegen run in one process and share the in-memory model:
+codegen reads the types analyze just inferred directly, with no
+serialization step in between. See [docs/AST.md](docs/AST.md) for the
+text AST format the parser emits and the analyzer consumes.
 
 ## Quick Start
 
@@ -116,51 +115,39 @@ overflow (e.g. a `q = q * k` accumulator) are still auto-promoted to Bigint;
 ### RBS type signatures
 
 Spinel can read RBS files to seed the analyzer. When invoked with
-`--rbs DIR`, the `spinel` wrapper runs `spinel_rbs_extract` over a
-directory of `*.rbs` files (the same layout `rbs` and Steep use) and
-passes the resulting seed file to `spinel_analyze` as a positional
-argument. Seeds are advisory — inference still runs on top and
+`--rbs DIR`, `spinel` runs `spinel_rbs_extract` over a directory of
+`*.rbs` files (the same layout `rbs` and Steep use) and feeds the
+resulting seed into the analyzer. Seeds are advisory — inference still runs on top and
 widens on observed contradiction, so a wrong or unrepresentable seed
 is at worst a no-op. See [docs/RBS-EXTRACT.md](docs/RBS-EXTRACT.md)
 for the supported subset.
 
-## Self-Hosting
+## Self-Hosting (legacy oracle)
 
-Spinel compiles its own backend. Both `spinel_analyze.rb` and
-`spinel_codegen.rb` are written in a Ruby subset that compiles through
-the same pipeline that compiles user code. The bootstrap chain
-exercises each side in both dimensions (IR fixpoint, C fixpoint):
+Spinel began as a compiler written in a Ruby subset that compiled
+itself. The C compiler has since replaced that backend, but the
+self-hosting Ruby implementation is kept in-tree (under `legacy/`) as a
+**regression oracle**. `make bootstrap` exercises its 4-way self-host
+fixpoint -- the Ruby backend, compiled by the previous generation,
+must reproduce byte-identical IR and C across two generations of both
+the analyze and codegen sides:
 
 ```
-CRuby + spinel_parse(.rb)     → analyze.ast / codegen.ast
-CRuby + spinel_analyze.rb     → analyze1.ir, codegen1.ir
-CRuby + spinel_codegen.rb     → analyze1.c, codegen1.c    → bin1 (analyze + codegen)
-
-bin1 + analyze.ast            → analyze2.ir
-bin1 + analyze.ast + .ir      → analyze2.c                → bin2 (analyze)
-bin1 + codegen.ast            → codegen2.ir
-bin1 + codegen.ast + .ir      → codegen2.c                → bin2 (codegen)
-
-bin2 + analyze.ast            → analyze3.ir
-bin2 + analyze.ast + .ir      → analyze3.c
-bin2 + codegen.ast            → codegen3.ir
-bin2 + codegen.ast + .ir      → codegen3.c
-
-analyze2.ir == analyze3.ir    (analyze.rb: IR fixpoint OK)
-analyze2.c  == analyze3.c     (analyze.rb: C  fixpoint OK)
-codegen2.ir == codegen3.ir    (codegen.rb: IR fixpoint OK)
-codegen2.c  == codegen3.c     (codegen.rb: C  fixpoint OK)
+analyze2.ir == analyze3.ir    (analyze: IR fixpoint OK)
+analyze2.c  == analyze3.c     (analyze: C  fixpoint OK)
+codegen2.ir == codegen3.ir    (codegen: IR fixpoint OK)
+codegen2.c  == codegen3.c     (codegen: C  fixpoint OK)
 ```
 
-All four `==` checks have to hold for `make bootstrap` to declare
-success. Any change that affects deterministic output -- record order,
-default-value handling, hash iteration -- breaks one of them, and the
-bootstrap stops with a clear `analyze.rb: IR fixpoint FAIL` (or the
-matching codegen / C variant) so the regression surfaces immediately.
+Any change that affects deterministic output -- record order,
+default-value handling, hash iteration -- breaks one of these checks.
+The bootstrap is no longer part of the standard gate (the C build is
+checked by `make test` / `make bench` / `make optcarrot`); it remains
+available for verifying the legacy backend still round-trips.
 
 ## Benchmarks
 
-384 tests pass. 52 benchmarks pass.
+886 tests pass. 57 benchmarks pass.
 Geometric mean: **~7.8x faster** than Ruby 4.0.4 with `--yjit` across
 the 28 benchmarks below. Baseline is CRuby 4.0.4 (stable), run with
 `--disable-gems` and with `--yjit` for the JIT column. Each timing is
@@ -344,13 +331,9 @@ Whole-program type inference drives several compile-time optimizations:
   -fdata-sections` and linked with `--gc-sections`; each unused
   runtime function is stripped from the final binary.
 - **Iterative inference early exit**: the param/return/ivar fixed-point
-  loop stops as soon as a signature of the three refined arrays stops
-  changing. Most programs converge in 1-2 iterations instead of the
-  full 4, cutting bootstrap time by ~14%.
-- **`parse_id_list` byte walk**: the AST-field list parser (called
-  ~120 K times during self-compile) walks bytes manually via
-  `s.bytes[i]` instead of `s.split(",")`, dropping N+1 allocations
-  per call to 2.
+  loop stops as soon as a signature over the refined tables stops
+  changing. Most programs converge in a couple of iterations, keeping
+  compile time low.
 - **Warning-free build**: generated C compiles cleanly at the default
   warning level across every test and benchmark; the harness uses
   `-Werror` so regressions surface immediately.
@@ -358,129 +341,95 @@ Whole-program type inference drives several compile-time optimizations:
 ## Architecture
 
 ```
-spinel                Single binary: compiler + cc driver (symlink to build/spinel)
-spinel_parse.c        C frontend: libprism → text AST (1_608 lines)
-spinel_analyze.rb     Type inference: AST → IR (21_162 lines, self-hosted)
-spinel_codegen.rb     C emission: AST + IR → C (30_411 lines, self-hosted)
-lib/sp_runtime.h      Runtime library header (1_537 lines)
-lib/sp_bigint.c       Arbitrary precision integers (5_400 lines)
-lib/regexp/           Built-in regexp engine
-test/                 384 feature tests
-benchmark/            52 benchmarks
-docs/                 Format specs (AST, IR, FFI, sp_Class design)
+spinel                Single binary: parse + analyze + codegen + cc driver
+                      (repo-root symlink to build/spinel)
+src/spinel_parse.c    Frontend: libprism → text AST
+src/node_table.c      AST loader: text AST → in-memory NodeTable
+src/analyze*.c        Whole-program type inference
+src/codegen*.c        C code generation
+src/main.c            CLI driver: pipeline + cc invocation
+lib/sp_runtime.h      Runtime library header (GC, arrays, hashes, strings)
+lib/sp_*.c            Out-of-line runtime (bigint, GC, fiber, I/O, time, ...)
+lib/regexp/           Built-in regexp engine; all linked into libspinel_rt.a
+legacy/               Former self-hosting Ruby backend (regression oracle)
+test/                 886 feature tests
+benchmark/            57 benchmarks
+docs/                 Format specs (AST, FFI, sp_Class design)
 Makefile              Build automation
 ```
 
-The two backend stages -- `spinel_analyze.rb` and `spinel_codegen.rb`
--- are both written in the Ruby subset that Spinel itself can compile:
+The analyzer and code generator are C (`src/analyze*.c`,
+`src/codegen*.c`) sharing a common `Compiler` over the in-memory
+`NodeTable`. The pipeline accepts the Ruby subset Spinel targets:
 classes, `def`, `attr_accessor`, `if`/`case`/`while`,
-`each`/`map`/`select`, `yield`, `begin`/`rescue`, String/Array/Hash
-operations, File I/O.
+`each`/`map`/`select`, `yield`, blocks (including `...` argument
+forwarding), `begin`/`rescue`, String/Array/Hash operations, File I/O.
 
-No dynamic metaprogramming or `eval` in either backend. Compile-time class-body
+No dynamic metaprogramming or `eval`. Compile-time class-body
 declarations with compile-time-known literal inputs are supported for
 Struct-style method synthesis.
 
-### What spinel_analyze does
+### What analyze does
 
-The analyze stage owns whole-program type inference. It's a sequence
-of passes over the AST, each one filling in or refining one piece of
-the static model:
+The analyze stage (`analyze_program`) owns whole-program type
+inference. It's a sequence of passes over the AST, each one filling in
+or refining one piece of the static model:
 
-1. **`collect_all`** -- single walk that registers every class,
-   module, top-level method, instance method, class method, ivar
-   declaration, FFI declaration, regexp literal, and constant. After
-   this pass the parallel tables (`@cls_names`, `@meth_names`,
-   `@cls_ivar_names`, ...) carry every name the program defines.
+1. **Registration** -- a walk that registers every class, module,
+   top-level method, instance/class method, ivar, FFI declaration,
+   regexp literal, and constant, then resolves parents, includes,
+   prepends, attr/alias declarations and inherited members. After
+   this the compiler's tables carry every name the program defines.
 
-2. **Per-scope call-site widening** -- `infer_main_call_types`,
-   `infer_function_body_call_types`, `infer_class_body_call_types`,
-   `infer_ieval_body_call_types`. Walks each scope's call sites and
-   feeds the arg types into the callee's param-type slots via
-   `unify_call_types`. The unifier widens to `poly` only when two
-   call sites disagree -- the conservative direction.
+2. **Call-site widening** -- each scope's call sites feed their arg
+   types into the callee's param slots. The unifier widens to `poly`
+   only when two call sites disagree -- the conservative direction.
 
-3. **Iterative refinement loop (≤ 4 rounds)** --
-   `infer_all_returns`, `infer_function_body_call_types`,
-   `infer_class_body_call_types`, `infer_ivar_types_from_writers`,
-   `infer_param_array_type_from_body`,
-   `narrow_param_types_from_body_method_calls`,
-   `narrow_param_hash_types_from_body_writes`,
-   `widen_cmeths_via_hash_each_blocks` (#424),
-   `detect_poly_params`. The loop terminates when
-   `inference_signature` -- a fingerprint over return types, ivar
-   types, param types, cmeth ptypes -- stops changing. Most programs
-   converge in 1-2 rounds; the cap at 4 catches pathological cases
-   without exploding compile time.
+3. **Iterative refinement loop** -- return types, ivar types from
+   writers, param types (array / hash / string specializations),
+   block-param types, default-param types, and `for`/bigint loop
+   locals are re-inferred to a fixpoint. The loop terminates when a
+   signature over those tables stops changing; most programs converge
+   in a couple of rounds.
 
-4. **Post-loop fixups** -- `fix_nil_ivar_self_refs` (e.g. `@left =
-   nil` on an attr_accessor inside `class Node` resolves to
-   `obj_Node?`), `fix_lambda_return_types`, then re-run the inference
-   passes so dependent types pick up the corrections.
+4. **Feature detection** -- value-type detection (which small
+   immutable classes become stack structs), GC need, symbol
+   collection, proc-capture marking, and reachability. These set the
+   flags that gate runtime-helper emission and mark classes / methods
+   for dead-code elimination.
 
-5. **`refine_all_module_ivar_types`** -- with stable param types in
-   hand, module-level `@@h[k] = v` ivar writes can now refine the
-   hash variant from the placeholder `str_int_hash` default to the
-   actual key/value shape.
+5. **Node-type annotation** -- a final pass fills a per-node
+   inferred-type cache that codegen reads directly while emitting,
+   avoiding any re-inference at emit time.
 
-6. **Feature detection** -- `pre_detect_bigint`, `detect_features`,
-   `detect_value_types`, `recalc_needs_gc`, `collect_sym_names`,
-   `scan_toplevel_ivars`, `compute_live_cls_methods`,
-   `compute_live_instance_methods`. Sets the `@needs_*` flags that
-   gate runtime helper emission and marks classes / methods for DCE.
+### What codegen does
 
-7. **`precompute_all_scope_decls`** -- runs the multi-pass local-decl
-   refinement per method / cmeth / ieval / main scope and stores the
-   result in `@nd_scope_names[bid]` / `@nd_scope_types[bid]` so
-   codegen doesn't have to re-run `scan_locals`.
+The codegen stage runs in the same process on the same `Compiler`,
+then emits one C file:
 
-8. **`annotate_all_node_types`** -- post-order walks every reachable
-   AST node, calls `infer_type`, fills `@nd_inferred_type[nid]`.
-   Codegen's own `infer_type` hits this cache > 99 % of the time at
-   emit; only block-body expressions (whose scope is
-   iterator-specific) and a few `@current_class_idx`-dependent arms
-   fall through.
+- It emits the preamble (`#include "sp_runtime.h"`, the per-program
+  runtime helpers gated on the analysis flags, the sp_Class tables for
+  hierarchy-using programs, the symbol intern table, class structs and
+  constructors, forward declarations), walks every reachable method /
+  class-method body to emit its definition, then emits `int main()`.
 
-9. **`dump_analysis_buf`** -- serializes the result. See
-   [docs/ANALYZE-IR.md](docs/ANALYZE-IR.md) for the line-oriented
-   text format that lands in the `.ir` file.
+- Per-program runtime helpers are gated. A `puts "hi"` program emits a
+  handful of lines of C; a program that touches Method instances, hash
+  literals, the class hierarchy, etc. gets the matching runtime blocks.
 
-### What spinel_codegen does
-
-The codegen stage reads `.ast` + `.ir`, then emits one C file:
-
-- `load_analysis_buf` reconstructs every analysis-derived ivar from
-  the IR. After this, `@cls_names`, `@meth_return_types`,
-  `@nd_inferred_type`, `@nd_scope_names`, etc. are populated as if
-  the analyze passes had just run.
-
-- `generate_code` emits the standard preamble (`#include
-  "sp_runtime.h"`, the per-program runtime helpers gated on
-  `@needs_*` flags, the sp_Class tables for hierarchy-using
-  programs, the symbol intern table, class structs and constructors,
-  forward declarations), then walks every reachable method / cmeth
-  body to emit its `static inline` definition, then emits
-  `int main()`.
-
-- Per-program runtime helpers are gated. A `puts "hi"` program emits
-  ~10 lines of C; a program that touches Method instances, hash
-  literals, the class hierarchy, etc. gets the matching runtime
-  blocks. The gating ladder is set by pre-scan passes in
-  `generate_code` so the gates have the right value before the
-  emission decisions land.
-
-The runtime (`lib/sp_runtime.h`) contains GC, array/hash/string
-implementations, and all runtime support as a single header file.
-Generated C includes this header, and the linker pulls only the
-needed parts from `libspinel_rt.a` (bigint + regexp engine).
+The runtime is split between a header (`lib/sp_runtime.h`: GC,
+array/hash/string implementations, inline hot paths) and out-of-line
+sources (`lib/sp_*.c`, `lib/regexp/`) archived into `libspinel_rt.a`.
+Generated C includes the header and links the archive; `--gc-sections`
+drops every unused runtime function from the final binary.
 
 The parser has two implementations:
-- **spinel_parse.c** links libprism directly (no CRuby needed)
+- **src/spinel_parse.c** links libprism directly (no CRuby needed)
 - **spinel_parse.rb** uses the Prism gem (CRuby fallback)
 
-Both produce identical AST output. The `spinel` wrapper prefers the
-C binary if available. `require_relative` is resolved at parse time
-by inlining the referenced file.
+Both produce identical AST output; the C path is the default.
+`require_relative` is resolved at parse time by inlining the
+referenced file.
 
 ## Building
 
@@ -509,8 +458,10 @@ rubygems.org and extracts its C sources to `vendor/prism`. If you
 already have the prism gem installed, the build auto-detects it; you
 can also point at a custom location with `PRISM_DIR=/path/to/prism`.
 
-CRuby is needed only for the initial bootstrap. After `make`, the
-entire pipeline runs without Ruby.
+CRuby is not needed to build or run the C compiler -- only as an
+optional parser fallback (the Prism-gem path), to run the legacy
+self-host oracle, and in the test harness, which compares Spinel's
+output against CRuby on the same source.
 
 ## Portability
 
@@ -524,9 +475,11 @@ spinel app.rb -c -o app.c   # specify output path
 spinel app.rb -S            # print the C to stdout
 ```
 
-The output is one self-contained `.c` file that compiles against
-`lib/sp_runtime.h`. The two together are everything a downstream
-consumer needs — no link to `libspinel`.
+The output is one self-contained `.c` file. A downstream consumer
+compiles it against the `lib/` headers (`sp_runtime.h` and friends) and
+links `libspinel_rt.a` (the out-of-line runtime: bigint, regexp, GC,
+fiber, I/O); `--gc-sections` then drops whatever the program doesn't
+use. No CRuby and no `spinel` binary are needed on the target machine.
 
 The runtime is POSIX-flavoured but covers every platform CI exercises:
 
@@ -589,7 +542,7 @@ Workflow:
   in the commit message.
 - If the work was assisted by an AI, add a `Co-Authored-By:` trailer
   for the assistant alongside any human co-authors. The maintainer's
-  own AI-assisted commits use `Co-Authored-By: Claude Opus 4.7`.
+  own AI-assisted commits use `Co-Authored-By: Claude Opus 4.8`.
 
 Adjacent ecosystem (community-built, not part of this repo):
 
@@ -599,9 +552,13 @@ Adjacent ecosystem (community-built, not part of this repo):
 
 ## History
 
-Spinel was originally implemented in C (18K lines, branch `c-version`),
-then rewritten in Ruby (branch `ruby-v1`), and finally rewritten in a
-self-hosting Ruby subset (current `master`).
+Spinel was originally implemented in C (branch `c-version`), then
+rewritten in Ruby (branch `ruby-v1`), then rewritten again in a
+self-hosting Ruby subset (preserved on the `self-host` branch). The
+current `master` is a fresh C implementation of the analyze and codegen
+stages, which builds far faster than the self-hosted backend while
+producing equivalent output; the self-hosting Ruby version remains
+in-tree as a regression oracle (see [Self-Hosting](#self-hosting-legacy-oracle)).
 
 ## License
 
