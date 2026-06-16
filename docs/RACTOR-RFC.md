@@ -145,9 +145,18 @@ split across `lib/sp_gc.c`, `lib/sp_fiber.c`, and the header `lib/sp_runtime.h`.
 ## Verification
 
 - The `__thread` storage-class conversion is behavior-neutral: the full
-  existing test suite (831 `.rb` tests) passes unchanged, single-threaded.
+  existing test suite passes unchanged, single-threaded (896 pass / 0 fail /
+  0 error with the two Ractor tests; CI green on ubuntu-gcc/clang + macOS-clang).
 - `test/ractor_basic.rb` exercises `Ractor.new` / `receive` / `yield` /
-  `send` / `<<` / `take` end-to-end and prints `42` twice.
+  `send` / `<<` / `take` end-to-end and prints `42` twice; `test/ractor_messages.rb`
+  round-trips String / Symbol / poly+typed Array messages.
+- Clean under `SPINEL_GC_VERIFY=1`, **ThreadSanitizer** and **AddressSanitizer**
+  (run binaries under `setarch -R` for TSan on this aarch64 box), and **valgrind
+  memcheck + helgrind** report 0 leaks / 0 data races. Each Ractor's private GC
+  and string heaps are freed on thread exit (`sp_gc_thread_teardown` +
+  `sp_gc_str_teardown_hook`); the `sp_Ractor` control structs are retained in a
+  process-lifetime registry (a detached worker plus a GC-untracked handle have
+  no safe mid-run free point) so they stay reachable rather than leaking.
 - The isolation rule rejects a block that captures a mutable outer local with
   `Ractor::IsolationError`.
 

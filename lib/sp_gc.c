@@ -27,6 +27,7 @@ __thread int sp_gc_cycle = 0;
 void (*sp_gc_mark_suspended_fibers_hook)(void) = NULL;
 void (*sp_gc_mark_globals_hook)(void) = NULL;
 void (*sp_gc_str_sweep_hook)(void) = NULL;
+void (*sp_gc_str_teardown_hook)(void) = NULL;
 
 /* ---- Collector-private globals ----
    The heap/mark-stack/verify-snapshot state is per-thread; sp_gc_verify and
@@ -101,6 +102,8 @@ void sp_gc_thread_teardown(void){
   sp_gc_bytes=0;sp_gc_old_bytes=0;
   if(sp_gc_mark_stack){free(sp_gc_mark_stack);sp_gc_mark_stack=NULL;sp_gc_mark_top=0;}
   if(sp_gc_vsnap){free(sp_gc_vsnap);sp_gc_vsnap=NULL;sp_gc_vsnap_n=0;sp_gc_vsnap_cap=0;}
+  /* Also free this thread's string heap (static to the generated TU). */
+  if(sp_gc_str_teardown_hook)sp_gc_str_teardown_hook();
 }
 
 /* Issue #1302: optional RSS ceiling via SPINEL_MAX_HEAP_MB; checked only

@@ -679,6 +679,16 @@ else {
   sp_str_lcache_clear();
 }
 
+/* Ractor exit: free this thread's entire string heap unconditionally (unlike
+   sp_str_sweep, which keeps marked strings). Installed into
+   sp_gc_str_teardown_hook so sp_gc_thread_teardown reaches it. */
+static void sp_str_heap_free_all(void) {
+  sp_str_hdr *h = sp_str_heap;
+  while (h) { sp_str_hdr *n = h->next; free(h); h = n; }
+  sp_str_heap = NULL;
+  sp_str_lcache_clear();
+}
+
 /* GC-aware Time trampolines. The libspinel_rt format helpers write
    into a local buffer; we sp_str_dup_external the result so the GC
    tracks the lifetime. strftime returns 0 -- never overruns the buffer
@@ -5689,6 +5699,7 @@ static sp_RbVal sp_ractor_deserialize(sp_RactorBlob b) {
 static void sp_ractor_codec_install(void) {
   sp_ractor_serialize_hook = sp_ractor_serialize;
   sp_ractor_deserialize_hook = sp_ractor_deserialize;
+  sp_gc_str_teardown_hook = sp_str_heap_free_all;
 }
 
 #ifdef __APPLE__

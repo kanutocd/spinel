@@ -55,6 +55,9 @@ void sp_gc_enforce_mem_limit(void);
 void sp_oom_die(void);
 /* Free this thread's private GC heaps on Ractor exit (see lib/sp_gc.c). */
 void sp_gc_thread_teardown(void);
+/* Installed by the generated TU: frees this thread's string heap on Ractor
+   exit (sp_str_heap is static to the TU, so the collector reaches it by hook). */
+extern void (*sp_gc_str_teardown_hook)(void);
 
 /* ---- Embedder callbacks supplied by the generated TU ----
  * The collector cannot own the program's roots or string heap (they are

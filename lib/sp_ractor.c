@@ -33,9 +33,24 @@ struct sp_Ractor {
   void          (*body)(sp_Ractor *);
   sp_RactorQueue  inbox;
   sp_RactorQueue  outbox;
+  sp_Ractor      *reg_next;   /* process-lifetime registry link */
 };
 
 __thread sp_Ractor *sp_ractor_current = NULL;
+
+/* A Ractor handle is shared between its creator (which keeps it in a
+   GC-untracked local) and its detached worker thread, so neither side has a
+   safe point to free it mid-run. Rather than leak it, every Ractor is linked
+   into this process-lifetime registry at creation and reclaimed by the OS at
+   exit -- so it stays reachable (no "definitely lost" under valgrind) without
+   a refcount/join protocol. The list is only ever appended to. */
+static pthread_mutex_t sp_ractor_reg_mtx = PTHREAD_MUTEX_INITIALIZER;
+static sp_Ractor      *sp_ractor_reg_head = NULL;
+static void sp_ractor_register(sp_Ractor *r) {
+  pthread_mutex_lock(&sp_ractor_reg_mtx);
+  r->reg_next = sp_ractor_reg_head; sp_ractor_reg_head = r;
+  pthread_mutex_unlock(&sp_ractor_reg_mtx);
+}
 
 static void sp_rq_init(sp_RactorQueue *q) {
   pthread_mutex_init(&q->mtx, NULL);
@@ -123,6 +138,7 @@ sp_Ractor *sp_Ractor_new(void (*body)(sp_Ractor *)) {
   r->body = body;
   sp_rq_init(&r->inbox);
   sp_rq_init(&r->outbox);
+  sp_ractor_register(r);   /* retained for the process lifetime */
   if (pthread_create(&r->thread, NULL, sp_ractor_trampoline, r) != 0)
     sp_raise_cls("Ractor::Error", "failed to spawn Ractor thread");
   pthread_detach(r->thread);
