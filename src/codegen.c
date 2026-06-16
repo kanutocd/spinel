@@ -814,6 +814,33 @@ void emit_fiber_new(Compiler *c, int id, Buf *b) {
   free(caps.v);
 }
 
+/* Does a proc body reference `self` -- explicitly, via an ivar, via `super`, or
+   via a receiverless call that dispatches on an instance method of class_id?
+   Such a block, when it escapes inlining into a real _proc_N(void*, ...), emits
+   `self` with no parameter or capture for it (#1436). Recurses into nested
+   blocks too: a nested block's self is forwarded from this proc's, so this proc
+   must capture it. Over-approximation is harmless -- the readback is followed by
+   `(void)self;`. */
+static int proc_body_uses_self(Compiler *c, int id, int class_id) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(c->nt, id);
+  if (!ty) return 0;
+  if (!strcmp(ty, "SelfNode")) return 1;
+  if (!strncmp(ty, "InstanceVariable", 16)) return 1;
+  if (!strcmp(ty, "SuperNode") || !strcmp(ty, "ForwardingSuperNode")) return 1;
+  if (!strcmp(ty, "CallNode") && nt_ref(c->nt, id, "receiver") < 0) {
+    const char *nm = nt_str(c->nt, id, "name");
+    if (nm && comp_method_in_chain(c, class_id, nm, NULL) >= 0) return 1;
+  }
+  int nr = nt_num_refs(c->nt, id);
+  for (int i = 0; i < nr; i++)
+    if (proc_body_uses_self(c, nt_ref_at(c->nt, id, i), class_id)) return 1;
+  int na = nt_num_arrs(c->nt, id);
+  for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(c->nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (proc_body_uses_self(c, ids[k], class_id)) return 1; }
+  return 0;
+}
+
 /* Lower a `proc {}` / `lambda {}` / `Proc.new {}` / `->(){}` literal: emit a
    standalone `static mrb_int _proc_N(void *cap, mrb_int argc, mrb_int *args)`
    (sp_proc_call's ABI) into g_procs, and emit the boxing `sp_proc_new_meta(...)`
@@ -917,6 +944,13 @@ else if (orecv >= 0 && onm) {
 
   int pid = ++g_proc_counter;
   int ncap = caps.n;
+  /* A block that references self and escapes into a real proc must capture self
+     through _cap (#1436). Only for a pointer (heap-object) instance self -- a
+     class-method self or a by-value self is a different shape, left as-is. */
+  int cap_self = bs && bs->class_id >= 0 && !bs->is_cmethod &&
+                 !c->classes[bs->class_id].is_value_type &&
+                 proc_body_uses_self(c, body, bs->class_id);
+  const char *self_cls = cap_self ? c->classes[bs->class_id].name : NULL;
 
   /* parameter metadata for Proc#parameters: kinds (:req for lambdas, :opt for
      procs) + names, as interned symbol ids (pre-interned in analyze). */
@@ -936,14 +970,16 @@ else if (orecv >= 0 && onm) {
      the cap struct itself first (sp_Proc_scan does not), then each cell --
      matching the sp_hashproc convention; marking only the cells would leave
      the cap struct unreachable and free it out from under the proc. */
-  if (ncap > 0) {
+  if (ncap > 0 || cap_self) {
     buf_printf(&g_procs, "typedef struct {");
     for (int i = 0; i < ncap; i++) buf_printf(&g_procs, " mrb_int *%s;", caps.v[i]);
+    if (cap_self) buf_puts(&g_procs, " void *__self;");
     buf_printf(&g_procs, " } _proc_cap_%d;\n", pid);
     buf_printf(&g_procs, "static void _proc_cap_scan_%d(void *p) {\n", pid);
     buf_printf(&g_procs, "  sp_gc_mark(p);\n");
     buf_printf(&g_procs, "  _proc_cap_%d *_c = (_proc_cap_%d *)p;\n", pid, pid);
     for (int i = 0; i < ncap; i++) buf_printf(&g_procs, "  if (_c->%s) sp_gc_mark((void *)_c->%s);\n", caps.v[i], caps.v[i]);
+    if (cap_self) buf_puts(&g_procs, "  if (_c->__self) sp_gc_mark(_c->__self);\n");
     buf_puts(&g_procs, "}\n");
   }
 
@@ -964,9 +1000,15 @@ else if (orecv >= 0 && onm) {
   Buf *pb = &g_procs;
   buf_printf(pb, "static mrb_int _proc_%d(void *_cap, mrb_int argc, mrb_int *args) {\n", pid);
   buf_puts(pb, "    SP_GC_SAVE();\n");
-  if (ncap == 0) buf_puts(pb, "    (void)_cap;\n");
+  if (ncap == 0 && !cap_self) buf_puts(pb, "    (void)_cap;\n");
   buf_puts(pb, "    (void)args;\n");
   buf_puts(pb, "    (void)argc;\n");
+  /* Captured instance self, read back from _cap (#1436). (void) guards the
+     over-approximating use-of-self detection. */
+  if (cap_self) {
+    buf_printf(pb, "    sp_%s *self = (sp_%s *)((_proc_cap_%d *)_cap)->__self;\n", self_cls, self_cls, pid);
+    buf_puts(pb, "    (void)self;\n");
+  }
   /* Lambda: enforce strict arity (required params only -- no optionals/rest yet). */
   if (is_lambda) buf_printf(pb, "    sp_proc_lambda_arity_check(argc, %d, 0, FALSE);\n", arity);
   for (int k = 0; k < arity; k++) {
@@ -1034,7 +1076,7 @@ else if (orecv >= 0 && onm) {
   g_cap_struct = sv_cap_struct; g_cap_names = sv_cap_names; g_ensure_depth = sv_ensure_depth;
   g_result_poly = sv_rp;
 
-  if (ncap == 0) {
+  if (ncap == 0 && !cap_self) {
     buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, NULL, NULL, %d, %s, %d, %s)",
                pid, arity, is_lambda ? "TRUE" : "FALSE", arity, meta_args);
   }
@@ -1050,6 +1092,8 @@ else if (orecv >= 0 && onm) {
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "SP_GC_ROOT(_capv_%d);\n", pid);
       for (int i = 0; i < ncap; i++) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->%s = _cell_%s;\n", pid, caps.v[i], caps.v[i]); }
+      /* Capture the enclosing instance self by pointer (#1436). */
+      if (cap_self) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->__self = (void *)%s;\n", pid, sv_self ? sv_self : "self"); }
     }
     buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, _capv_%d, _proc_cap_scan_%d, %d, %s, %d, %s)",
                pid, pid, pid, arity, is_lambda ? "TRUE" : "FALSE", arity, meta_args);
