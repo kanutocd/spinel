@@ -1854,6 +1854,29 @@ int first_block_call_args(Compiler *c, int si) {
   return -1;
 }
 
+/* Arguments node of the first receiverless `instance_exec(args, &<blk>)` in
+   scope `si` that forwards the scope's own block param, or -1. A receiverless
+   instance_exec invokes the block with `args` (self is unchanged by the
+   rebind), so it types the block exactly like a yield of `args`. */
+int first_ie_exec_args(Compiler *c, int si) {
+  Scope *m = &c->scopes[si];
+  if (!m->blk_param || !m->blk_param[0]) return -1;
+  for (int id = 0; id < c->nt->count; id++) {
+    if (c->nscope[id] != si) continue;
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || strcmp(ty, "CallNode") || nt_ref(c->nt, id, "receiver") >= 0) continue;
+    const char *nm = nt_str(c->nt, id, "name");
+    if (!nm || strcmp(nm, "instance_exec")) continue;
+    int blk = nt_ref(c->nt, id, "block");
+    if (blk < 0 || !nt_type(c->nt, blk) || strcmp(nt_type(c->nt, blk), "BlockArgumentNode")) continue;
+    int expr = nt_ref(c->nt, blk, "expression");
+    if (expr < 0 || !nt_type(c->nt, expr) || strcmp(nt_type(c->nt, expr), "LocalVariableReadNode")) continue;
+    const char *en = nt_str(c->nt, expr, "name");
+    if (en && !strcmp(en, m->blk_param)) return nt_ref(c->nt, id, "arguments");
+  }
+  return -1;
+}
+
 int a_proc_params_node(Compiler *c, int create); /* forward decl */
 
 /* Follow a chain of pure `...` forwarders (a method whose whole body is a
@@ -2263,6 +2286,7 @@ int infer_block_params(Compiler *c) {
       if (yld_mi >= 0 && c->scopes[yld_mi].yields) {
         int yn = first_yield(c, yld_mi);
         int ya = yn >= 0 ? nt_ref(nt, yn, "arguments") : first_block_call_args(c, yld_mi);
+        if (ya < 0) ya = first_ie_exec_args(c, yld_mi);  /* instance_exec(args, &b) */
         int yc = 0;
         const int *yargs = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
         Scope *bs = comp_scope_of(c, block);

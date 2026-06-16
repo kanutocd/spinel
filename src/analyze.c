@@ -448,7 +448,9 @@ int ie_implicit_self_class(Compiler *c, int id) {
   int blk = nt_ref(nt, id, "block");
   if (blk < 0) return -1;
   const char *bty = nt_type(nt, blk);
-  if (!bty || strcmp(bty, "BlockNode")) return -1;
+  /* A literal block, or a `&b` forward of the enclosing method's block (which
+     resolves to the literal active where the method inlines). */
+  if (!bty || (strcmp(bty, "BlockNode") && strcmp(bty, "BlockArgumentNode"))) return -1;
   Scope *s = comp_scope_of(c, id);
   if (!s || s->class_id < 0 || s->is_cmethod) return -1;
   return s->class_id;

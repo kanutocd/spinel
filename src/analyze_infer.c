@@ -404,6 +404,23 @@ TyKind infer_call(Compiler *c, int id) {
   if (ie_kind) {
     int blk = nt_ref(nt, id, "block");
     if (blk >= 0) {
+      const char *bty = nt_type(nt, blk);
+      if (bty && !strcmp(bty, "BlockArgumentNode")) {
+        /* `instance_exec(args, &b)` forwards the enclosing method's block; the
+           value it produces is that method's own forwarded-block value across
+           call sites (the method inlines per site, splicing the literal). */
+        Scope *encl = comp_scope_of(c, id);
+        int emi = encl ? (int)(encl - c->scopes) : -1;
+        if (emi >= 0) {
+          TyKind ft = yield_value_type(c, emi);
+          if (ft != TY_UNKNOWN && ft != TY_VOID) return ft;
+        }
+        /* The forwarded block's value isn't statically pinned here (its call
+           sites may not be typed yet during the fixpoint). It is a real boxed
+           value, not nil -- poly keeps the result a scalar carrier so the
+           enclosing method stays inlinable and the splice yields it per site. */
+        return TY_POLY;
+      }
       int body = nt_ref(nt, blk, "body");
       int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
       if (bn > 0) { TyKind bt = infer_type(c, bb[bn - 1]); return bt == TY_VOID ? TY_NIL : bt; }

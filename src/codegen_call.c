@@ -1845,6 +1845,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     ie_tramp = comp_trampoline_kind(c, ty_object_class(comp_ntype(c, recv)), name, NULL);
   if (ie_direct || ie_tramp) {
     int blk = nt_ref(nt, id, "block");
+    /* `instance_exec(args, &b)` forwarding the enclosing (now-inlined) method's
+       block param: the real block is the literal active at the inline splice,
+       so resolve the BlockArgumentNode to it (as `inner(&block)` does). */
+    if (blk >= 0 && nt_type(nt, blk) && !strcmp(nt_type(nt, blk), "BlockArgumentNode"))
+      blk = g_block_id;
     TyKind rtype = ie_self_cls >= 0 ? ty_object(ie_self_cls) : comp_ntype(c, recv);
     if (blk >= 0 && ty_is_object(rtype) &&
         (ie_tramp || comp_method_in_chain(c, ty_object_class(rtype), name, NULL) < 0)) {
@@ -9063,15 +9068,20 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
 
   if (as_expr) buf_puts(b, "({\n");
   else { emit_indent(b, indent); buf_puts(b, "{\n"); }
-  /* instance method: bind self to the receiver (a pointer) */
+  /* instance method: bind self to the receiver. A heap object is a pointer; a
+     value-type receiver is a by-value struct, so copy it and dereference its
+     ivars with `.` (value types are immutable, so the copy is transparent). */
+  const char *saved_deref = g_self_deref;
   if (recv >= 0 && recv_class >= 0) {
+    int self_is_val = c->classes[recv_class].is_value_type;
     int st = ++g_tmp;
     emit_indent(b, indent + 1);
-    buf_printf(b, "sp_%s *_t%d = ", c->classes[recv_class].name, st);
+    buf_printf(b, "sp_%s %s_t%d = ", c->classes[recv_class].name, self_is_val ? "" : "*", st);
     emit_expr(c, recv, b);
     buf_puts(b, ";\n");
     snprintf(selfbuf, sizeof selfbuf, "_t%d", st);
     g_self = selfbuf;
+    g_self_deref = self_is_val ? "." : "->";
   }
   int din = indent + 1;
 
@@ -9149,6 +9159,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_nren = saved_nren;
   g_block_id = saved_block;
   g_self = saved_self;
+  g_self_deref = saved_deref;
   g_block_param_name = saved_bpn;
   g_yield_block_fallback = saved_yfb;
   return 1;
