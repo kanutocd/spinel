@@ -34,9 +34,32 @@ class Logger
   end
 end
 
+class Counter
+  @count = 0
+  def self.bump
+    @count = @count + 1
+    nil
+  end
+  def self.count
+    @count
+  end
+  # Void method (returns nil in every path): the early `return bump` discards
+  # bump's (void) value, but the side effect must still run -- codegen emits
+  # `(void)(bump()); return;`, not a bare `return;` that would drop the call.
+  def self.tick(run)
+    return bump if run
+    nil
+  end
+end
+
 Db.open
 p Db.pool.n
 Db.close
 p Db.pool.nil?
 Logger.log("")
 Logger.log("hi")
+
+Counter.tick(false)
+p Counter.count
+Counter.tick(true)
+p Counter.count

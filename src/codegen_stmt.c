@@ -1691,6 +1691,19 @@ static void emit_unbox_node(Compiler *c, TyKind t, int node, Buf *b) {
   emit_expr(c, node, b);
 }
 
+/* A literal whose evaluation has no side effects -- used to decide whether a
+   discarded `return <expr>` in a void function needs `(void)(<expr>)` to keep
+   the side effects or can collapse to a bare `return;`. Callers unwrap parens
+   first. */
+static int node_is_pure_literal(const NodeTable *nt, int node) {
+  const char *ty = nt_type(nt, node);
+  return ty && (!strcmp(ty, "NilNode") || !strcmp(ty, "IntegerNode") ||
+                !strcmp(ty, "FloatNode") || !strcmp(ty, "StringNode") ||
+                !strcmp(ty, "SymbolNode") || !strcmp(ty, "TrueNode") ||
+                !strcmp(ty, "FalseNode") || !strcmp(ty, "RationalNode") ||
+                !strcmp(ty, "ImaginaryNode"));
+}
+
 void emit_return(Compiler *c, int id, Buf *b, int indent) {
   int args = nt_ref(c->nt, id, "arguments");
   int n = 0;
@@ -1739,12 +1752,8 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
     /* void function: a `return <expr>` (typically `return nil`) discards its
        value. Evaluate a non-literal expr for side effects, then a bare return,
        so the generated C doesn't `return <value>` from a void function. */
-    const char *aty = nt_type(c->nt, a[0]);
-    int trivial = aty && (!strcmp(aty, "NilNode") || !strcmp(aty, "IntegerNode") ||
-                          !strcmp(aty, "FloatNode") || !strcmp(aty, "StringNode") ||
-                          !strcmp(aty, "SymbolNode") || !strcmp(aty, "TrueNode") ||
-                          !strcmp(aty, "FalseNode"));
-    if (!trivial) { buf_puts(b, "(void)("); emit_expr(c, a[0], b); buf_puts(b, "); "); }
+    int vn = unwrap_parens(c, a[0]);
+    if (!node_is_pure_literal(c->nt, vn)) { buf_puts(b, "(void)("); emit_expr(c, vn, b); buf_puts(b, "); "); }
     buf_puts(b, "return;\n");
   }
   else if (n > 0) {
@@ -1759,10 +1768,14 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
     buf_puts(b, ";\n");
   }
   else if (g_ret_type == TY_POLY) buf_puts(b, "return sp_box_nil();\n");
-  else if (g_ret_type == TY_VOID || g_ret_type == TY_UNKNOWN) buf_puts(b, "return;\n");
+  else if (g_ret_type == TY_VOID) buf_puts(b, "return;\n");
+  /* TY_UNKNOWN is emitted as an int C return type (main(), or a never-inferred
+     method), so its bare return is `return 0;`, not the void `return;`. */
+  else if (g_ret_type == TY_UNKNOWN) buf_puts(b, "return 0;\n");
   /* bare `return` is Ruby nil: emit the return type's nil representation, not a
      bare `return;` (illegal in a non-void C function -- e.g. `Db.close` returns
-     a nullable DbPool*, where nil is NULL). */
+     a nullable DbPool*, where nil is NULL). default_value already yields the
+     by-value nil form for struct types (e.g. (sp_Range){0}). */
   else if (g_ret_type == TY_INT) buf_puts(b, "return SP_INT_NIL;\n");
   else if (g_ret_type == TY_FLOAT) buf_puts(b, "return sp_float_nil();\n");
   else if (g_ret_type == TY_STRING) buf_puts(b, "return NULL;\n");
