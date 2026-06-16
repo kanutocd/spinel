@@ -342,8 +342,8 @@ rbs-seed-test: $(SPINEL) spinel_rbs_extract$(EXE)
 	$(SPINEL) test/rbs-seed/nested_ivar.rb --rbs test/rbs-seed/sig \
 	  -c --no-line-map -o "$$tmp/out.c" 2>/dev/null; \
 	ok=1; \
-	grep -q 'const char \* iv_label' "$$tmp/out.c" || ok=0; \
-	if grep -q 'sp_RbVal iv_label' "$$tmp/out.c"; then ok=0; fi; \
+	grep -Eq 'const char[[:space:]]+\*[[:space:]]*iv_label' "$$tmp/out.c" || ok=0; \
+	if grep -Eq 'sp_RbVal[[:space:]]+iv_label' "$$tmp/out.c"; then ok=0; fi; \
 	$(CC) -fsyntax-only -Ilib "$$tmp/out.c" 2>/dev/null || ok=0; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "rbs-seed-test: pass"; \

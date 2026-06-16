@@ -985,7 +985,8 @@ static void class_qualified_name(Compiler *c, int ci, char *out, size_t cap) {
     if (j && j + 1 < cap) out[j++] = '_';
     for (const char *p = nm; *p && j + 1 < cap; p++) out[j++] = *p;
   }
-  out[j < cap ? j : (cap ? cap - 1 : 0)] = '\0';
+  /* The loop only advances j while j + 1 < cap, so j < cap here. */
+  if (cap) out[j] = '\0';
 }
 
 /* Class index for a seed `class` line, normalizing `::` to the `_` form used
