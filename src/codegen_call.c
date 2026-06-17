@@ -166,6 +166,25 @@ static void emit_ie_param_default(Compiler *c, TyKind t, Buf *b) {
   buf_puts(b, default_value(t));
 }
 
+/* Print "spinel: <file>:<line>: warning: " for node `id` when
+   SPINEL_WARN_UNRESOLVED is set, so a call/constant that silently degrades to
+   nil/0 (where CRuby would raise or do real work) can be audited. Returns 1
+   when a warning line was started -- the caller appends its message + newline.
+   Zero runtime/codegen effect: opt-in stderr only. */
+static int warn_unresolved_pos(Compiler *c, int id) {
+  if (!getenv("SPINEL_WARN_UNRESOLVED")) return 0;
+  const NodeTable *nt = c->nt;
+  int ln = (int)nt_int(nt, id, "node_line", 0);
+  const char *file = nt->source_file;
+  if (ln > 0) {
+    const char *f = nt_file_path(nt, (int)nt_int(nt, id, "node_file", 0));
+    if (f && *f) file = f;
+  }
+  if (!file || !*file) file = "source.rb";
+  fprintf(stderr, "spinel: %s:%d: warning: ", file, ln);
+  return 1;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   /* `require` / `require_relative` is a compile-time directive: top-level ones
@@ -2671,8 +2690,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_puts(b, ")");
         return;
       }
-      /* unrecognized stdlib class .new (Pathname, OpenStruct, IPAddr, etc.): emit 0 */
-      if (cn) { buf_puts(b, "0LL"); return; }
+      /* unrecognized stdlib class .new (Pathname, OpenStruct, IPAddr, etc.): emit 0.
+         The object is inert -- methods on it later degrade to nil -- so a program
+         that actually uses it diverges silently from CRuby. Surface the site under
+         SPINEL_WARN_UNRESOLVED (no behaviour change). */
+      if (cn) {
+        if (warn_unresolved_pos(c, id))
+          fprintf(stderr, "unresolved constant '%s' in '%s.new' -> inert 0 "
+                          "(methods on the result degrade to nil)\n", cn, cn);
+        buf_puts(b, "0LL");
+        return;
+      }
     }
   }
 
@@ -8694,6 +8722,17 @@ else {
     TyKind grt = comp_ntype(c, recv);
     if (grt == TY_POLY || grt == TY_NIL || grt == TY_INT || grt == TY_UNKNOWN) {
       TyKind ret = comp_ntype(c, id);
+      /* Opt-in visibility: this call silently becomes nil/0 where CRuby would
+         raise NoMethodError. The degradation is deliberate (a dead poly-dispatch
+         arm or an inference gap), but it can also hide a genuine missing method.
+         SPINEL_WARN_UNRESOLVED lists every such site so a port can be audited
+         without changing runtime behaviour. */
+      if (warn_unresolved_pos(c, id)) {
+        const char *nm = nt_str(nt, id, "name");
+        fprintf(stderr, "unresolved call '%s' on %s receiver -> nil "
+                        "(CRuby would raise NoMethodError)\n",
+                nm ? nm : "?", ty_name(grt));
+      }
       buf_puts(b, (is_scalar_ret(ret) && ret != TY_UNKNOWN) ? default_value(ret) : "sp_box_nil()");
       return;
     }
