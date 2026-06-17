@@ -38,9 +38,10 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
   int block = nt_ref(nt, id, "block");
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
-  int is_sel = !strcmp(name, "select") || !strcmp(name, "filter");
-  int is_rej = !strcmp(name, "reject");
-  int is_map = !strcmp(name, "map") || !strcmp(name, "collect");
+  TyIterShape shp = ty_iter_shape(name);
+  int is_sel = shp == TY_ITER_SELECT;
+  int is_rej = shp == TY_ITER_REJECT;
+  int is_map = shp == TY_ITER_MAP;
   if (!is_map && !is_sel && !is_rej) return 0;
   TyKind rt = comp_ntype(c, recv);
   const char *hn = ty_hash_cname(rt);
@@ -1521,7 +1522,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   if (!name || recv < 0) return 0;
   TyKind rt = comp_ntype(c, recv);
   /* array.each_slice(n).map { |x, y, ...| } chain: unroll into a direct slice loop */
-  if ((!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (ty_iter_shape(name) == TY_ITER_MAP &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_slice") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1592,7 +1593,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     }
   }
   /* array.each_cons(n).map { |pair| } or { |a,b| } or { |(a,b)| } chain */
-  if ((!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (ty_iter_shape(name) == TY_ITER_MAP &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_cons") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1679,7 +1680,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   }
 
   /* array.each_cons(n).with_index(off).map { |pair, i| } or { |(a,b), i| } chain */
-  if ((!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (ty_iter_shape(name) == TY_ITER_MAP &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "with_index") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1790,7 +1791,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   if (rt == TY_POLY) {
     /* poly-typed receiver (e.g. `arr = nil` default): iterate via
        sp_poly_arr_len / sp_poly_arr_get and build a typed result array */
-    int is_map2 = !strcmp(name, "map") || !strcmp(name, "collect");
+    int is_map2 = ty_iter_shape(name) == TY_ITER_MAP;
     if (!is_map2) return 0;
     TyKind restype2 = comp_ntype(c, id);
     int res_poly2 = (restype2 == TY_POLY_ARRAY);
@@ -1857,9 +1858,10 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   const char *k = range_recv ? "Int" : (rt == TY_POLY_ARRAY ? "Poly" : array_kind(rt));
   if (!k) return 0;
 
-  int is_map = !strcmp(name, "map") || !strcmp(name, "collect");
-  int is_sel = !strcmp(name, "select") || !strcmp(name, "filter");
-  int is_rej = !strcmp(name, "reject");
+  TyIterShape shp = ty_iter_shape(name);
+  int is_map = shp == TY_ITER_MAP;
+  int is_sel = shp == TY_ITER_SELECT;
+  int is_rej = shp == TY_ITER_REJECT;
   if (!is_map && !is_sel && !is_rej) return 0;
 
   TyKind restype = comp_ntype(c, id);
