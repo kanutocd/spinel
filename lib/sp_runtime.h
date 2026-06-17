@@ -5845,10 +5845,10 @@ static sp_RbVal sp_ractor_deser_val(sp_RacRd *r) {
       size_t n = sp_racrd_sz(r); sp_StrPolyHash *h = sp_StrPolyHash_new(); SP_GC_ROOT(h);
       for (size_t i = 0; i < n; i++) {
         size_t kl = sp_racrd_sz(r);
-        char *kb = (char *)malloc(kl ? kl : 1); if (!kb) sp_oom_die();
-        sp_racrd_read(r, kb, kl);
+        if (r->pos + kl > r->len) { sp_raise_cls("Ractor::Error", "truncated Ractor message"); }
+        const char *k = sp_str_from_bytes(r->p + r->pos, kl); r->pos += kl;
+        sp_RbVal kroot = sp_box_str(k); SP_GC_ROOT_RBVAL(kroot);   /* keep key alive across value deser; no malloc to leak */
         sp_RbVal val = sp_ractor_deser_val(r); SP_GC_ROOT_RBVAL(val);
-        const char *k = sp_str_from_bytes(kb, kl); free(kb);   /* key built after value: no unrooted-key GC window */
         sp_StrPolyHash_set(h, k, val);
       }
       return sp_box_obj(h, SP_BUILTIN_STR_POLY_HASH);
@@ -5859,8 +5859,8 @@ static sp_RbVal sp_ractor_deser_val(sp_RacRd *r) {
         size_t kl = sp_racrd_sz(r);
         char *kb = (char *)malloc(kl + 1); if (!kb) sp_oom_die();
         sp_racrd_read(r, kb, kl); kb[kl] = 0;
+        sp_sym k = sp_sym_intern(kb); free(kb);   /* sym is immediate: intern + free before deser, nothing to leak on raise */
         sp_RbVal val = sp_ractor_deser_val(r); SP_GC_ROOT_RBVAL(val);
-        sp_sym k = sp_sym_intern(kb); free(kb);
         sp_SymPolyHash_set(h, k, val);
       }
       return sp_box_obj(h, SP_BUILTIN_SYM_POLY_HASH);

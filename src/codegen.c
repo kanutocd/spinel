@@ -914,6 +914,8 @@ void emit_ractor_new(Compiler *c, int id, Buf *b) {
       int inner = nt_ref(nt, bp_node, "parameters");
       int pn = inner >= 0 ? inner : bp_node;
       int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+      if (rn > SP_RACTOR_MAX_BP)
+        unsupported(c, id, "Ractor.new with more than 16 block parameters");
       for (int i = 0; i < rn && nbp < SP_RACTOR_MAX_BP; i++) {
         const char *p = nt_str(nt, reqs[i], "name");
         if (p) bparams[nbp++] = p;
@@ -1010,6 +1012,8 @@ void emit_ractor_new(Compiler *c, int id, Buf *b) {
     int ta = ++g_tmp;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_RactorBlob *_t%d = (sp_RactorBlob *)malloc(sizeof(sp_RactorBlob) * %d);\n", ta, argc);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "if (!_t%d) sp_oom_die();\n", ta);
     for (int i = 0; i < argc; i++) {
       Buf vb = {0};
       if (comp_ntype(c, argv[i]) == TY_POLY) emit_expr(c, argv[i], &vb);

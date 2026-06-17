@@ -145,7 +145,11 @@ static void *sp_ractor_trampoline(void *arg) {
    sp_ractor_spawn_arg(). Pass args=NULL, argc=0 for a plain Ractor.new {}. */
 sp_Ractor *sp_Ractor_new_args(void (*body)(sp_Ractor *), sp_RactorBlob *args, int argc) {
   sp_Ractor *r = (sp_Ractor *)calloc(1, sizeof(sp_Ractor));
-  if (!r) sp_raise_cls("Ractor::Error", "failed to allocate Ractor");
+  if (!r) {
+    /* Ownership of args transferred to us; free it before unwinding. */
+    if (args) { for (int i = 0; i < argc; i++) free(args[i].data); free(args); }
+    sp_raise_cls("Ractor::Error", "failed to allocate Ractor");
+  }
   r->body = body;
   r->spawn_args = args;
   r->spawn_argc = argc;
