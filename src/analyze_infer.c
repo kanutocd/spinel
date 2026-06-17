@@ -1568,7 +1568,11 @@ else {
         const char *a0ty = nt_type(nt, argv[0]);
         int an0 = 0;
         if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
-        if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) return TY_INT_ARRAY;
+        if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) {
+          /* empty `[]`: element type from how the memo is filled, else int. */
+          TyKind me = ewo_memo_elem_type(c, id);
+          return (me != TY_UNKNOWN) ? ty_array_of(me) : TY_INT_ARRAY;
+        }
       }
       return at;
     }

@@ -2059,6 +2059,115 @@ int desugar_implicit_send(Compiler *c) {
   }
   return changed;
 }
+
+/* Resolve a forwarded callable reference (`&inline_lambda` / `&proc_var` /
+   `&method(:m)`) to the body statements and parameters of its definition.
+   Returns 1 with *out_body / *out_pn set, else 0. Mirrors fwd_callable_arity's
+   resolution but exposes the body so a caller can inspect how a param is used. */
+static int fwd_callable_def(Compiler *c, int ref, int *out_body, int *out_pn) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  const char *ty = nt_type(nt, ref);
+  if (!ty) return 0;
+  if (!strcmp(ty, "CallNode") && nt_str(nt, ref, "name") &&
+      !strcmp(nt_str(nt, ref, "name"), "method")) {
+    int mi = method_obj_target_mi(c, ref);
+    if (mi < 0) return 0;
+    int dn = c->scopes[mi].def_node;
+    *out_body = c->scopes[mi].body;
+    *out_pn = dn >= 0 ? nt_ref(nt, dn, "parameters") : -1;
+    return *out_body >= 0;
+  }
+  int create = -1;
+  if (!strcmp(ty, "LambdaNode") || is_proc_create(c, ref)) create = ref;
+  else if (!strcmp(ty, "LocalVariableReadNode")) {
+    const char *vn = nt_str(nt, ref, "name");
+    Scope *sc = vn ? comp_scope_of(c, ref) : NULL;
+    for (int w = 0; vn && w < nt->count; w++) {
+      const char *wty = nt_type(nt, w);
+      if (!wty || strcmp(wty, "LocalVariableWriteNode")) continue;
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || strcmp(wn, vn) || comp_scope_of(c, w) != sc) continue;
+      int val = nt_ref(nt, w, "value");
+      if (val >= 0 && is_proc_create(c, val)) { create = val; break; }
+    }
+  }
+  if (create < 0) return 0;
+  *out_body = a_proc_body(c, create);
+  *out_pn = a_proc_params_node(c, create);
+  return *out_body >= 0;
+}
+
+/* Unify into *acc the element type pushed onto a local named `memo` (`memo << e`
+   / `memo.push(e)`) anywhere in the subtree rooted at `id`. */
+static void ewo_scan_pushes(Compiler *c, int id, const char *memo, TyKind *acc) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (id < 0) return;
+  const char *ty = nt_type(nt, id);
+  if (ty && !strcmp(ty, "CallNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    int rcv = nt_ref(nt, id, "receiver");
+    const char *rty = rcv >= 0 ? nt_type(nt, rcv) : NULL;
+    if (nm && rty && !strcmp(rty, "LocalVariableReadNode") &&
+        nt_str(nt, rcv, "name") && !strcmp(nt_str(nt, rcv, "name"), memo) &&
+        (!strcmp(nm, "<<") || !strcmp(nm, "push"))) {
+      int args = nt_ref(nt, id, "arguments");
+      int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      for (int k = 0; k < an; k++) *acc = ty_unify(*acc, infer_type(c, argv[k]));
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) { int ch = nt_ref_at(nt, id, i); if (ch >= 0) ewo_scan_pushes(c, ch, memo, acc); }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (ids[k] >= 0) ewo_scan_pushes(c, ids[k], memo, acc); }
+}
+
+/* The element type an `each_with_object([])` array accumulator is filled with,
+   inferred from how its memo param (block param 1) is used. Scans the block body
+   for pushes onto memo; when the body merely forwards to a callable
+   (`callable.call(elem, memo)` -- the value-forwarding desugar), follows into the
+   callable's definition and scans its 2nd param the same way. Returns the unified
+   pushed element type, or TY_UNKNOWN when no push is found (callers keep the
+   empty-`[]` int_array default). */
+TyKind ewo_memo_elem_type(Compiler *c, int callid) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int block = nt_ref(nt, callid, "block");
+  const char *bty = block >= 0 ? nt_type(nt, block) : NULL;
+  if (!bty || strcmp(bty, "BlockNode")) return TY_UNKNOWN;  /* not yet a literal block */
+  const char *memo = block_param_name(c, block, 1);
+  int body = nt_ref(nt, block, "body");
+  if (!memo || body < 0) return TY_UNKNOWN;
+
+  /* Direct: the block body itself fills memo. */
+  TyKind acc = TY_UNKNOWN;
+  ewo_scan_pushes(c, body, memo, &acc);
+  if (acc != TY_UNKNOWN) return acc;
+
+  /* Forwarded: a single `callable.call(elem, memo)` -- follow into the callable. */
+  int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+  if (bn != 1 || !bb) return TY_UNKNOWN;
+  int call = bb[0];
+  if (!nt_type(nt, call) || strcmp(nt_type(nt, call), "CallNode")) return TY_UNKNOWN;
+  if (!nt_str(nt, call, "name") || strcmp(nt_str(nt, call, "name"), "call")) return TY_UNKNOWN;
+  int rcv = nt_ref(nt, call, "receiver");
+  int cargs = nt_ref(nt, call, "arguments");
+  int cn = 0; const int *cargv = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cn) : NULL;
+  if (rcv < 0 || cn < 1 || !cargv) return TY_UNKNOWN;
+  int last = cargv[cn - 1];
+  if (!nt_type(nt, last) || strcmp(nt_type(nt, last), "LocalVariableReadNode")) return TY_UNKNOWN;
+  if (!nt_str(nt, last, "name") || strcmp(nt_str(nt, last, "name"), memo)) return TY_UNKNOWN;
+
+  int cb_body = -1, cb_pn = -1;
+  if (!fwd_callable_def(c, rcv, &cb_body, &cb_pn) || cb_pn < 0) return TY_UNKNOWN;
+  int rn = 0; const int *reqs = nt_arr(nt, cb_pn, "requireds", &rn);
+  if (rn < 2 || !reqs) return TY_UNKNOWN;  /* the callable's memo is its 2nd param */
+  const char *cb_memo = nt_str(nt, reqs[1], "name");
+  if (!cb_memo) return TY_UNKNOWN;
+  TyKind acc2 = TY_UNKNOWN;
+  ewo_scan_pushes(c, cb_body, cb_memo, &acc2);
+  return acc2;
+}
+
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -2096,8 +2205,21 @@ int desugar_value_callable_forwards(Compiler *c) {
        the pair array by the call-site argument inference (a container arg
        overrides the bare-int default). */
     TyKind pty[4];
-    int arity = ty_block_yield(rt, name, pty, 4);
-    if (arity < 1) continue;  /* not a context-free iterator (or recv unresolved) */
+    int arity;
+    if (!strcmp(name, "each_with_object")) {
+      /* each_with_object(init) { |elem, memo| }: two params, the element and the
+         accumulator. Array receivers only (a `{}` hash memo is unsupported even
+         for a literal block). The memo type is recovered from how the callable
+         fills it (ewo_memo_elem_type) by infer_block_params, so seed it UNKNOWN;
+         the wrap_pair / hash logic below does not apply. */
+      if (!ty_is_array(rt)) continue;
+      arity = 2;
+      pty[0] = ty_array_elem(rt);
+      pty[1] = TY_UNKNOWN;
+    } else {
+      arity = ty_block_yield(rt, name, pty, 4);
+      if (arity < 1) continue;  /* not a context-free iterator (or recv unresolved) */
+    }
 
     /* Hash forwarding. A Method object takes any hash iterator's yield directly
        through its array ABI (the [k,v] pair as one array for `each`, the bare
@@ -3064,15 +3186,26 @@ int infer_block_params(Compiler *c) {
         const int *ewobj_argv = ewobj_args >= 0 ? nt_arr(nt, ewobj_args, "arguments", &ewobj_argc) : NULL;
         if (ewobj_argc > 0 && ewobj_argv) {
           TyKind at = infer_type(c, ewobj_argv[0]);
+          int from_usage = 0;
           if (at == TY_UNKNOWN) {
             const char *a0ty = nt_type(nt, ewobj_argv[0]);
             int an0 = 0;
             if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, ewobj_argv[0], "elements", &an0);
-            if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) at = TY_INT_ARRAY;
+            if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) {
+              /* empty `[]`: the accumulator element type comes from how the memo
+                 is filled (`memo << e`), following a forwarded callable's body. */
+              TyKind me = ewo_memo_elem_type(c, id);
+              if (me != TY_UNKNOWN) { at = ty_array_of(me); from_usage = 1; }
+              else at = TY_INT_ARRAY;
+            }
           }
           if (at != TY_UNKNOWN) {
             LocalVar *ap = scope_local_intern(es, p1_name); ap->is_block_param = 1;
-            TyKind am = ty_unify(ap->type, at);
+            /* A usage-derived type overrides the bare int_array guess (the
+               no-evidence default) so an early guess can't widen a later
+               str/poly memo to poly_array; otherwise unify. */
+            TyKind am = (from_usage && (ap->type == TY_UNKNOWN || ap->type == TY_INT_ARRAY))
+                        ? at : ty_unify(ap->type, at);
             if (am != ap->type) { ap->type = am; changed = 1; }
           }
         }
