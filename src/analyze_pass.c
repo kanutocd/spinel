@@ -1983,6 +1983,35 @@ static int forwarding_yield_target(Compiler *c, int mi, int depth) {
    forward whose expression names the enclosing method's block param) is left to
    the inline-forward path. Runs in the inference fixpoint; once a call is
    rewritten its block is a BlockNode, so it is never revisited. */
+/* Required-param count of a forwarded callable expression `ex`, or -1 if it
+   cannot be determined statically. Chooses the hash-pair calling convention: a
+   1-param callable receives the [k,v] pair as one array, a 2-param one is called
+   positionally (matching CRuby's proc auto-splat of the yielded pair). */
+static int fwd_callable_arity(Compiler *c, int ex) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  const char *exty = nt_type(nt, ex);
+  if (!exty) return -1;
+  int create = -1;
+  if (!strcmp(exty, "LambdaNode") || is_proc_create(c, ex)) create = ex;
+  else if (!strcmp(exty, "LocalVariableReadNode")) {
+    const char *vn = nt_str(nt, ex, "name");
+    Scope *sc = vn ? comp_scope_of(c, ex) : NULL;
+    for (int w = 0; vn && w < nt->count; w++) {
+      const char *wty = nt_type(nt, w);
+      if (!wty || strcmp(wty, "LocalVariableWriteNode")) continue;
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || strcmp(wn, vn) || comp_scope_of(c, w) != sc) continue;
+      int val = nt_ref(nt, w, "value");
+      if (val >= 0 && is_proc_create(c, val)) { create = val; break; }
+    }
+  }
+  if (create < 0) return -1;
+  int pn = a_proc_params_node(c, create);
+  if (pn < 0) return -1;
+  int rn = 0; nt_arr(nt, pn, "requireds", &rn);
+  return rn;
+}
+
 /* `send(:m, args)` / `__send__("m", args)` / `public_send(:m, args)` with NO
    explicit receiver -> a direct implicit-self call to `m` with the remaining
    args. The literal symbol/string name resolves statically, the same model as
@@ -2030,7 +2059,6 @@ int desugar_implicit_send(Compiler *c) {
   }
   return changed;
 }
-
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -2061,15 +2089,31 @@ int desugar_value_callable_forwards(Compiler *c) {
     int encl = c->nscope[id];
     TyKind rt = infer_type(c, recv);
     /* Hash `each`/`each_pair` yields the [k,v] pair, forwarded as a single array
-       argument `c.call([k, v])` (built below). This is reliable for a method
-       object, whose array-ABI trampoline takes the pair directly; a proc/lambda
-       *value* would need its param's pair-array type inferred from the synthetic
-       call (proc-param array-input inference, not yet supported), so those hash
-       cases are left to their own path rather than forwarded incorrectly. */
-    if (ty_is_hash(rt) && ct != TY_METHOD) continue;
+       argument `c.call([k, v])` (built below) -- correct for every arity: a
+       1-param callable gets the pair, a 2-param proc auto-splats it, a 2-param
+       lambda raises exactly as CRuby's `Hash#each(&lambda)` does. A Method object
+       takes the pair via its array ABI; a proc/lambda value's param is typed as
+       the pair array by the call-site argument inference (a container arg
+       overrides the bare-int default). */
     TyKind pty[4];
     int arity = ty_block_yield(rt, name, pty, 4);
     if (arity < 1) continue;  /* not a context-free iterator (or recv unresolved) */
+
+    /* Hash forwarding. A Method object takes any hash iterator's yield directly
+       through its array ABI (the [k,v] pair as one array for `each`, the bare
+       key/value for `each_key`/`each_value`). A proc/lambda VALUE is reliable
+       only for the `each` pair forwarded to a single param, whose pair-array
+       type the call-site inference recovers (a container overriding the bare-int
+       default). Every other hash + proc/lambda combination -- inline lambdas
+       (cloned, no write to type from), multi-param procs (CRuby auto-splat), and
+       the scalar `each_key`/`each_value` yields -- needs cross-procedural param
+       typing not yet modeled, so decline to the pre-existing path. */
+    int wrap_pair = 0;
+    if (ty_is_hash(rt)) {
+      if (ct == TY_METHOD) wrap_pair = (arity == 2);
+      else if (arity == 2 && simple_ref && fwd_callable_arity(c, ex) == 1) wrap_pair = 1;
+      else continue;
+    }
 
     int base = nt->count;
     int proc_clone = nt_clone_subtree(nt, ex);  /* re-read the proc per element */
@@ -2093,9 +2137,7 @@ int desugar_value_callable_forwards(Compiler *c) {
     nt_node_set_ref(nt, bparams, "parameters", params);
 
     int callargs = nt_new_node(nt, "ArgumentsNode");
-    /* hash each/each_pair (2 yielded params) forwards the [k, v] pair as one
-       array argument; element iterators forward their values positionally. */
-    if (ty_is_hash(rt) && arity == 2) {
+    if (wrap_pair) {
       int pairarr = nt_new_node(nt, "ArrayNode");
       nt_node_set_arr(nt, pairarr, "elements", reads, 2);
       nt_node_set_arr(nt, callargs, "arguments", &pairarr, 1);
@@ -2437,7 +2479,14 @@ int infer_block_params(Compiler *c) {
         if (!lv) continue;
         TyKind at = infer_type(c, argv[k]);
         if (at == TY_UNKNOWN || at == lv->type) continue;
-        TyKind merged = ty_unify(lv->type, at);
+        /* A container arg (array/hash/string/object) overrides a bare int param:
+           the int is the proc/lambda default, which would otherwise unify with a
+           container to POLY (a scalar) and lose the container type -- breaking a
+           forwarded `&proc` into a poly/hash iterator, whose param is the pair
+           array or element. A genuine multi-type param still converges to POLY
+           via the other call site's unify. */
+        int at_container = ty_is_array(at) || ty_is_hash(at) || at == TY_STRING || ty_is_object(at);
+        TyKind merged = (lv->type == TY_INT && at_container) ? at : ty_unify(lv->type, at);
         if (merged != lv->type) { lv->type = merged; changed = 1; }
       }
     }
