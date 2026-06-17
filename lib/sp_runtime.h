@@ -431,8 +431,9 @@ static char *sp_str_alloc(size_t len) {
   sp_str_hdr *h = (sp_str_hdr *)malloc(total);
   if (!h) sp_oom_die();
   h->next = sp_str_heap;
-  h->size = total;
-  h->len = len;
+  h->size = (uint32_t)total;
+  h->len = (uint32_t)len;
+  h->hash = 0;
   sp_str_heap = h;
   /* Don't fold string-heap pressure into sp_gc_bytes : the
      threshold heuristic in sp_gc_alloc is keyed on heap survivors, and
@@ -472,7 +473,9 @@ static inline void sp_str_set_len(char *s, size_t len) {
   if (!s) return;
   unsigned char marker = ((unsigned char *)s)[-1];
   if (marker == 0xfe || marker == 0xfc) {
-    (((sp_str_hdr *)(s - 1)) - 1)->len = len;
+    sp_str_hdr *hd = ((sp_str_hdr *)(s - 1)) - 1;
+    hd->len = (uint32_t)len;
+    hd->hash = 0;  /* length change implies content change: invalidate cached hash */
   }
 }
 
@@ -1182,7 +1185,27 @@ static sp_StrArray*sp_StrArray_sort(sp_StrArray*a){sp_StrArray*b=sp_StrArray_dup
 static sp_StrArray*sp_StrArray_shuffle(sp_StrArray*a){sp_StrArray*r=sp_StrArray_new();sp_StrArray_replace(r,a);sp_StrArray_shuffle_bang(r);return r;}
 static const char *sp_StrArray_sample(sp_StrArray*a){if(a->len<=0)return sp_str_empty;return a->data[(mrb_int)(rand()%a->len)];}
 
-static inline uint64_t sp_str_hash(const char*s){uint64_t h=14695981039346656037ULL;while(*s){h^=(unsigned char)*s++;h*=1099511628211ULL;}return h;}
+static inline uint64_t sp_str_hash_compute(const char*s){uint64_t h=14695981039346656037ULL;while(*s){h^=(unsigned char)*s++;h*=1099511628211ULL;}return h;}
+/* Cold path: compute (and, for a heap/heap-frozen string, cache) the FNV
+   hash. Kept out-of-line so sp_str_hash's inline fast path -- a cached-hash
+   read -- stays tiny and doesn't bloat every call site's code layout. */
+static SP_NOINLINE uint64_t sp_str_hash_miss(const char*s,unsigned char m){
+  if(m==0xfe||m==0xfc||m==0xf1){
+    sp_str_hdr*hd=((sp_str_hdr*)(s-1))-1;
+    uint64_t h=sp_str_hash_compute(s);
+    hd->hash=h?h:1;
+    return hd->hash;
+  }
+  return sp_str_hash_compute(s);
+}
+static inline uint64_t sp_str_hash(const char*s){
+  unsigned char m=((const unsigned char*)s)[-1];
+  if(m==0xfe||m==0xfc||m==0xf1){
+    uint64_t cached=(((sp_str_hdr*)(s-1))-1)->hash;
+    if(cached)return cached;
+  }
+  return sp_str_hash_miss(s,m);
+}
 static void sp_StrIntHash_fin(void*p){sp_StrIntHash*h=(sp_StrIntHash*)p;free(h->keys);free(h->vals);free(h->order);}
 static void sp_StrIntHash_scan(void*p){sp_StrIntHash*h=(sp_StrIntHash*)p;for(mrb_int i=0;i<h->cap;i++){if(h->keys[i])sp_mark_string(h->keys[i]);}}
 /* default_v is SP_INT_NIL for a hash with no explicit default ({} / {k=>v}),
@@ -1216,7 +1239,10 @@ static mrb_bool sp_StrIntHash_eq(sp_StrIntHash*a,sp_StrIntHash*b){if(!a||!b)retu
 /* GC.stat snapshot: String=>Integer hash over the collector globals.
    full_runs derives from sp_gc_cycle / SP_GC_FULL_INTERVAL (the major
    collection cadence). */
-static sp_StrIntHash*sp_gc_stat(void){sp_StrIntHash*h=sp_StrIntHash_new();sp_StrIntHash_set(h,"bytes",(mrb_int)sp_gc_bytes);sp_StrIntHash_set(h,"old_bytes",(mrb_int)sp_gc_old_bytes);sp_StrIntHash_set(h,"threshold",(mrb_int)sp_gc_threshold);sp_StrIntHash_set(h,"cycle",(mrb_int)sp_gc_cycle);sp_StrIntHash_set(h,"full_runs",(mrb_int)(sp_gc_cycle/SP_GC_FULL_INTERVAL));return h;}
+/* Keys are spinel rodata literals (SPL: 0xff marker prefix) so the str-hash
+   header cache's s[-1] read is in-bounds -- a bare C literal here would
+   overread (and could alias a heap marker on some rodata layouts). */
+static sp_StrIntHash*sp_gc_stat(void){sp_StrIntHash*h=sp_StrIntHash_new();sp_StrIntHash_set(h,SPL("bytes"),(mrb_int)sp_gc_bytes);sp_StrIntHash_set(h,SPL("old_bytes"),(mrb_int)sp_gc_old_bytes);sp_StrIntHash_set(h,SPL("threshold"),(mrb_int)sp_gc_threshold);sp_StrIntHash_set(h,SPL("cycle"),(mrb_int)sp_gc_cycle);sp_StrIntHash_set(h,SPL("full_runs"),(mrb_int)(sp_gc_cycle/SP_GC_FULL_INTERVAL));return h;}
 
 static void sp_StrStrHash_fin(void*p){sp_StrStrHash*h=(sp_StrStrHash*)p;free(h->keys);free(h->vals);free(h->order);}
 static void sp_StrStrHash_scan(void*p){sp_StrStrHash*h=(sp_StrStrHash*)p;for(mrb_int i=0;i<h->cap;i++){if(h->keys[i]){sp_mark_string(h->keys[i]);sp_mark_string(h->vals[i]);}}if(h->default_v)sp_mark_string(h->default_v);}
@@ -1929,7 +1955,12 @@ static inline mrb_int sp_str_setbyte(const char *s, mrb_int i, mrb_int v) {
     return v;
   }
   unsigned char m = ((const unsigned char *)s)[-1];
-  if (m == 0xfe || m == 0xfc || m == 0xfd) {
+  if (m == 0xfe || m == 0xfc) {
+    (((sp_str_hdr *)(s - 1)) - 1)->hash = 0;  /* invalidate cached key hash */
+    ((char *)s)[i] = (char)v;
+    return v;
+  }
+  if (m == 0xfd) {
     ((char *)s)[i] = (char)v;
     return v;
   }
@@ -2640,8 +2671,13 @@ static const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *
     if (n <= 0 || caps[0] < 0) break;
     size_t before = caps[0] - pos;
     int mlen = caps[1] - caps[0];
-    char keybuf[64];
-    char *key = mlen < (int)sizeof(keybuf) ? keybuf : (char *)malloc(mlen + 1);
+    /* Lay a 0xff (rodata-literal) marker byte right before the transient key
+       so sp_str_hash's s[-1] read is in-bounds and routes to the plain
+       (non-caching) path -- this buffer has no sp_str_hdr to cache into. */
+    char keybuf[65]; keybuf[0] = (char)0xff;
+    char *kbuf = mlen + 1 < (int)sizeof(keybuf) ? keybuf : (char *)malloc(mlen + 2);
+    if (kbuf != keybuf) kbuf[0] = (char)0xff;
+    char *key = kbuf + 1;
     memcpy(key, str + caps[0], mlen);
     key[mlen] = 0;
     const char *rep = sp_StrStrHash_has_key(h, key) ? sp_StrStrHash_get(h, key) : "";
@@ -2649,7 +2685,7 @@ static const char *sp_re_gsub_str_str_hash(mrb_regexp_pattern *pat, const char *
     if (olen + before + rlen >= cap) { cap = (olen + before + rlen) * 2 + 64; out = (char *)realloc(out, cap); }
     memcpy(out + olen, str + pos, before); olen += before;
     memcpy(out + olen, rep, rlen); olen += rlen;
-    if (key != keybuf) free(key);
+    if (kbuf != keybuf) free(kbuf);
     if (caps[0] == caps[1]) {
  /* Zero-width match: keep the source char at this position and step
     past it (see sp_re_gsub for the rationale). */
@@ -2682,8 +2718,12 @@ static const char *sp_re_sub_str_str_hash(mrb_regexp_pattern *pat, const char *s
   int n = re_exec(pat, str, slen, 0, caps, 64);
   if (n <= 0 || caps[0] < 0) return str;
   int mlen = caps[1] - caps[0];
-  char keybuf[64];
-  char *key = mlen < (int)sizeof(keybuf) ? keybuf : (char *)malloc(mlen + 1);
+  /* 0xff marker before the transient key: keeps sp_str_hash's s[-1] read
+     in-bounds and on the non-caching path (no sp_str_hdr behind this buffer). */
+  char keybuf[65]; keybuf[0] = (char)0xff;
+  char *kbuf = mlen + 1 < (int)sizeof(keybuf) ? keybuf : (char *)malloc(mlen + 2);
+  if (kbuf != keybuf) kbuf[0] = (char)0xff;
+  char *key = kbuf + 1;
   memcpy(key, str + caps[0], mlen);
   key[mlen] = 0;
   const char *rep = (h && sp_StrStrHash_has_key(h, key)) ? sp_StrStrHash_get(h, key) : "";
@@ -2695,7 +2735,7 @@ static const char *sp_re_sub_str_str_hash(mrb_regexp_pattern *pat, const char *s
   memcpy(out + caps[0], rep, rlen);
   memcpy(out + caps[0] + rlen, str + caps[1], rest);
   out[total] = 0;
-  if (key != keybuf) free(key);
+  if (kbuf != keybuf) free(kbuf);
   return out;
 }
 
