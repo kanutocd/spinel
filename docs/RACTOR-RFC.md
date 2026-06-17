@@ -1,7 +1,8 @@
 # RFC: A Minimal Ractor for Spinel
 
-Status: **experimental / Milestone 2** (working; ported to the C compiler in
-`src/`). This document is both the design
+Status: **experimental / Milestone 3** (working; ported to the C compiler in
+`src/`; message codec spans immediates/Symbol/String/Array/Hash; Ractor.new
+spawn arguments). This document is both the design
 rationale and the record of what currently ships. It proposes whether to
 graduate to a full implementation (see *Path forward*).
 
@@ -119,13 +120,15 @@ split across `lib/sp_gc.c`, `lib/sp_fiber.c`, and the header `lib/sp_runtime.h`.
 
 ## Deliberate divergences (where "minimal" buys simplicity)
 
-1. **Value codec covers immediates, Symbol, String, and Arrays** (poly + typed
-   int/float/string), deep-copied through a heap-neutral malloc'd blob
-   (`sp_ractor_serialize`/`_deserialize`, installed via a hook because the
-   rebuild allocators are static to the generated TU). Hashes, plain objects,
-   Procs, Fibers, and IO raise `Ractor::Error` at the boundary — extending the
-   codec to those (and to nested objects) is the main follow-up. Symbols travel
-   by name and are re-interned in the receiver's per-Ractor table.
+1. **Value codec covers immediates, Symbol, String, Arrays, and Hashes** (poly
+   + typed variants), deep-copied recursively through a heap-neutral malloc'd
+   blob (`sp_ractor_serialize`/`_deserialize`, installed via a hook because the
+   rebuild allocators are static to the generated TU). Plain objects, Procs,
+   Fibers, and IO raise `Ractor::Error` at the boundary — extending the codec to
+   user objects is the main follow-up. Symbols travel by name and are
+   re-interned in the receiver's per-Ractor table; hashes are normalised to a
+   poly hash on rebuild. The same codec seeds `Ractor.new(args) { |params| }`
+   spawn arguments.
 2. **FIFO mailbox / outgoing queue** (mutex + condvar, grows on demand), so a
    Ractor may `receive` several messages and a sender need not block per slot.
 3. **`@@cvars` / `$globals` are `__thread`** → isolated per Ractor, rather than
@@ -162,9 +165,11 @@ split across `lib/sp_gc.c`, `lib/sp_fiber.c`, and the header `lib/sp_runtime.h`.
 
 ## Path forward (if this graduates)
 
-In rough dependency order: extend `sp_deep_copy` to strings → arrays → hashes →
-objects (symbols travel by name, re-interned on receive); make the mailbox
-unbounded; thread-local-ize `@@cvars`/`$globals` with a class-body initializer
-replay on the child; add spawn args and shareable-by-value capture; and a
-`Ractor::Port`-style multi-consumer surface. None of these change the core
-partition above — they extend it.
+Done since the original RFC: the codec now spans strings → symbols → arrays →
+hashes (M2/M3b), the mailbox is an unbounded FIFO, and `Ractor.new(args){|p|}`
+spawn arguments are deep-copied in (M3a). Remaining, in rough dependency order:
+extend the codec to **user objects / structs** (the last big container gap);
+replay class-body `@@cvar`/`$gvar` initializers in a child (they are `__thread`,
+hence empty in a child today); shareable-by-value frozen captures; and a
+`Ractor::Port`-style multi-consumer surface. None change the core partition
+above — they extend it.
