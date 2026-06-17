@@ -473,6 +473,18 @@ void emit_expr(Compiler *c, int id, Buf *b) {
         buf_printf(b, "; %s; })", ref3);
       }
     }
+    /* a pointer-backed ivar (object/array/hash/fiber/proc/...) reads falsy
+       when NULL, so `@x ||= v` is `if (!@x) @x = v` and `@x &&= v` is
+       `if (@x) @x = v`. Falling through to a bare read dropped the init when
+       this or-write was the RHS of a poly-receiver setter switch (#1447). */
+    else if (ty_is_object(ivt3) || ty_is_array(ivt3) || ty_is_hash(ivt3) ||
+             ivt3 == TY_FIBER || ivt3 == TY_PROC || ivt3 == TY_IO ||
+             ivt3 == TY_STRINGIO || ivt3 == TY_STRINGSCANNER ||
+             ivt3 == TY_MATCHDATA || ivt3 == TY_EXCEPTION || ivt3 == TY_REGEX) {
+      buf_printf(b, "({ if (%s%s) %s = ", is_or ? "!" : "", ref3, ref3);
+      emit_expr(c, v, b);
+      buf_printf(b, "; %s; })", ref3);
+    }
     else if (!is_or) {
       buf_printf(b, "({ %s = ", ref3);
       emit_expr(c, v, b);
