@@ -2400,6 +2400,35 @@ else {
   buf_printf(b, " _t%d; })", t);
 }
 
+/* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
+   g_pre temp and roots it before the call. A fresh allocation passed straight
+   into a callee that allocates before it roots the parameter -- the canonical
+   case being the `{}` for `def initialize(attrs = {})` into sp_<C>_new, which
+   SP_POOL_NEWs (can GC) before sp_<C>_initialize roots lv_attrs (#1445) -- would
+   otherwise be collected mid-call (use-after-free / SIGSEGV@0x0). This is the
+   #1052-deferred "fresh temp passed straight into a call" shape. emit_args_filled
+   (the .new / super arg path) emitted args inline; normal method calls already
+   hoist+root via emit_dispatch. Rooting in the caller's frame keeps the value
+   alive across the whole call. A scalar (int/float/...) arg needs no root and is
+   emitted inline. */
+static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
+  LocalVar *p = scope_local(m, m->pnames[idx]);
+  TyKind pt = p ? p->type : TY_UNKNOWN;
+  int poly = (pt == TY_POLY);
+  if (!poly && !needs_root(pt)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+  Buf ab; memset(&ab, 0, sizeof ab);
+  emit_arg_or_default(c, m, idx, provided, &ab);
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, pt, g_pre);
+  buf_printf(g_pre, " _t%d = %s;\n", t, ab.p ? ab.p : default_value(pt));
+  emit_indent(g_pre, g_indent);
+  if (poly) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", t);
+  else buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+  buf_printf(out, "_t%d", t);
+  free(ab.p);
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -2423,7 +2452,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, out);
         else buf_puts(out, txt);
       }
-      else emit_arg_or_default(c, m, i, -1, out);
+      else emit_arg_rooted(c, m, i, -1, out);
     }
     return;
   }
@@ -2549,9 +2578,9 @@ else if (m->rest_idx >= 0 && m->npost_rest > 0 && i > m->rest_idx) {
       int post_j = i - m->rest_idx - 1;  /* 0-based index in posts */
       int argv_idx = pos_argc - m->npost_rest + post_j;
       if (argv && argv_idx >= 0 && argv_idx < pos_argc)
-        emit_arg_or_default(c, m, i, argv[argv_idx], out);
+        emit_arg_rooted(c, m, i, argv[argv_idx], out);
       else
-        emit_arg_or_default(c, m, i, -1, out);
+        emit_arg_rooted(c, m, i, -1, out);
     }
 else if (splat_tmp >= 0 && i >= splat_idx) {
       /* this param comes from the splatted array at offset (i - splat_idx) */
@@ -2561,7 +2590,7 @@ else {
       /* Check if this param has a keyword match (lookup by param name in kwh). */
       int kv = kwh >= 0 ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
-        emit_arg_or_default(c, m, i, kv, out);
+        emit_arg_rooted(c, m, i, kv, out);
       }
       else if (ds_hash_tmp >= 0 && m->pnames[i]) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
@@ -2619,7 +2648,7 @@ else {
         buf_printf(out, "_t%d", krhash);
       }
       else if (i < pos_argc) {
-        emit_arg_or_default(c, m, i, argv[i], out);
+        emit_arg_rooted(c, m, i, argv[i], out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -2630,7 +2659,7 @@ else {
         LocalVar *p = scope_local(m, m->pnames[i]);
         TyKind pt = p ? p->type : TY_INT;
         int use_kwh = (kwh >= 0 && ty_is_hash(pt));
-        emit_arg_or_default(c, m, i, use_kwh ? kwh : -1, out);
+        emit_arg_rooted(c, m, i, use_kwh ? kwh : -1, out);
       }
     }
   }
