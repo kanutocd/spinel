@@ -367,6 +367,19 @@ static __thread size_t sp_gc_threshold = 256*1024;
 /* ---- String GC ---- */
 /* __thread: each Ractor owns a private string heap. */
 static __thread sp_str_hdr *sp_str_heap = NULL;
+/* String-heap collection trigger (matz/spinel#1450). Strings live on a separate
+   malloc'd heap and are reaped only by sp_str_sweep, which runs from
+   sp_gc_collect -- which only fires on OBJECT-heap pressure (sp_gc_bytes). A
+   string-only workload (e.g. an HTTP server building responses, or a tight
+   `s = s + x` loop) thus never triggers a collection and RSS grows without
+   bound. Drive collection off the string heap's own live-byte count, with a
+   SEPARATE threshold so string bytes are NOT refolded into sp_gc_bytes (doing
+   so over-fired the object heuristic -- the reason they were excluded; see the
+   comment in sp_str_alloc). */
+static __thread size_t sp_str_heap_bytes = 0;       /* live string-heap bytes */
+static __thread size_t sp_str_threshold = 256*1024; /* mirrors sp_gc_threshold init */
+static __thread size_t sp_str_threshold_init = 256*1024; /* recompute floor; lowered to 2048 under SPINEL_GC_STRESS so stress mode survives a collection (mirrors sp_gc_threshold_init) */
+static __thread int sp_str_stress_checked = 0;
 #define SPL(s) (&("\xff" s)[1])
 static const char sp_str_empty_data[] = "\xff";
 #define sp_str_empty (sp_str_empty_data + 1)
@@ -428,6 +441,21 @@ static inline mrb_bool sp_encoding_eq(sp_Encoding a,sp_Encoding b){const char*an
 
 static char *sp_str_alloc(size_t len) {
   size_t total = sizeof(sp_str_hdr) + 1 + len + 1;
+  /* String-heap pressure drives its own collection (see sp_str_heap_bytes).
+     Collect BEFORE the new allocation, like sp_gc_alloc, so the string being
+     built isn't yet live during the sweep. Operands of the calling op (e.g. the
+     arguments to sp_str_concat) must be reachable across this point -- they are
+     for rooted locals; the codegen's SP_GC_ROOT discipline is what keeps them
+     so. Threshold recompute mirrors sp_gc_alloc's. */
+  if (!sp_str_stress_checked) { sp_str_stress_checked = 1; const char *e = getenv("SPINEL_GC_STRESS"); if (e && *e && *e != '0') { sp_str_threshold = 2048; sp_str_threshold_init = 2048; } }
+  if (sp_str_heap_bytes > sp_str_threshold) {
+    size_t before = sp_str_heap_bytes;
+    sp_gc_collect();                 /* runs sp_str_sweep, which decrements sp_str_heap_bytes */
+    size_t freed = before - sp_str_heap_bytes;
+    if (freed < before/4) sp_str_threshold = before*2;
+    else if (sp_str_heap_bytes > 0) { sp_str_threshold = sp_str_heap_bytes*4; if (sp_str_threshold < sp_str_threshold_init) sp_str_threshold = sp_str_threshold_init; }
+    else sp_str_threshold = sp_str_threshold_init;
+  }
   sp_str_hdr *h = (sp_str_hdr *)malloc(total);
   if (!h) sp_oom_die();
   h->next = sp_str_heap;
@@ -435,6 +463,7 @@ static char *sp_str_alloc(size_t len) {
   h->len = (uint32_t)len;
   h->hash = 0;
   sp_str_heap = h;
+  sp_str_heap_bytes += total;
   /* Don't fold string-heap pressure into sp_gc_bytes : the
      threshold heuristic in sp_gc_alloc is keyed on heap survivors, and
      the str-heap mark-sweep that runs alongside (sp_str_sweep,
@@ -674,8 +703,7 @@ static void sp_str_sweep(void) {
     }
 else {
       *pp = h->next;
-      /* String allocs no longer fold into sp_gc_bytes (see
-         sp_str_alloc); the matching subtract here drops too. */
+      sp_str_heap_bytes -= h->size;   /* keep the string-heap live-byte count in step */
       free(h);
     }
   }
@@ -689,6 +717,7 @@ static void sp_str_heap_free_all(void) {
   sp_str_hdr *h = sp_str_heap;
   while (h) { sp_str_hdr *n = h->next; free(h); h = n; }
   sp_str_heap = NULL;
+  sp_str_heap_bytes = 0;
   sp_str_lcache_clear();
 }
 
@@ -1824,7 +1853,10 @@ else {
   free(buf); free(fcps); free(tcps);
   return r;
 }
-static const char*sp_str_delete(const char*s,const char*chars){if(!s)return sp_str_empty;if(!chars)return s;int negate=0;const char*csp=chars;if(*csp=='^'&&*(csp+1)){negate=1;csp++;}size_t setn;uint32_t*set=sp_utf8_decode_charset(csp,&setn);size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);int in_set=sp_utf8_set_has(set,setn,cp);if(negate)in_set=!in_set;if(!in_set){memcpy(r+n,p,cn);n+=cn;}p+=cn;}r[n]=0;sp_str_set_len(r,n);free(set);return r;}
+/* Build into a malloc temp and read all of `s` BEFORE the result sp_str_alloc:
+   that allocation can now trigger a string-heap collection, which would sweep
+   an unrooted `s` mid-copy (the read-first pattern sp_str_tr/sp_str_format use). */
+static const char*sp_str_delete(const char*s,const char*chars){if(!s)return sp_str_empty;if(!chars)return s;int negate=0;const char*csp=chars;if(*csp=='^'&&*(csp+1)){negate=1;csp++;}size_t setn;uint32_t*set=sp_utf8_decode_charset(csp,&setn);size_t bl=strlen(s);char*buf=(char*)malloc(bl+1);if(!buf)sp_oom_die();size_t n=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);int in_set=sp_utf8_set_has(set,setn,cp);if(negate)in_set=!in_set;if(!in_set){memcpy(buf+n,p,cn);n+=cn;}p+=cn;}buf[n]=0;free(set);char*r=sp_str_alloc(n);memcpy(r,buf,n+1);free(buf);return r;}
 /* Issue #921: shrink the heap-string header length to match the
    squeezed payload — the alloc gives bl+1 bytes, the squeezed
    write fills n<=bl, leaving the header's stored length stale.
@@ -1838,7 +1870,7 @@ static const char*sp_str_squeeze_chars(const char*s,const char*cs){if(!s)return 
 /* Multi-arg delete/squeeze: delete (or squeeze runs of) characters that
    are in the INTERSECTION of all n charset args, mirroring
    sp_str_count_n. Each arg is a charset spec (^negation, a-z ranges). */
-static const char*sp_str_delete_n(const char*s,const char**chars,mrb_int n){if(!s)return sp_str_empty;if(n<=0)return s;size_t*setns=(size_t*)malloc(n*sizeof(size_t));uint32_t**sets=(uint32_t**)malloc(n*sizeof(uint32_t*));int*negs=(int*)malloc(n*sizeof(int));for(mrb_int i=0;i<n;i++){if(!chars[i])sp_raise_cls("TypeError","no implicit conversion of nil into String");const char*cs=chars[i];negs[i]=0;if(*cs=='^'&&*(cs+1)){negs[i]=1;cs++;}sets[i]=sp_utf8_decode_charset(cs,&setns[i]);}size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t m=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);int all=1;for(mrb_int i=0;i<n;i++){int in_set=sp_utf8_set_has(sets[i],setns[i],cp);if(negs[i])in_set=!in_set;if(!in_set){all=0;break;}}if(!all){memcpy(r+m,p,cn);m+=cn;}p+=cn;}r[m]=0;sp_str_set_len(r,m);for(mrb_int i=0;i<n;i++)free(sets[i]);free(sets);free(setns);free(negs);return r;}
+static const char*sp_str_delete_n(const char*s,const char**chars,mrb_int n){if(!s)return sp_str_empty;if(n<=0)return s;size_t*setns=(size_t*)malloc(n*sizeof(size_t));uint32_t**sets=(uint32_t**)malloc(n*sizeof(uint32_t*));int*negs=(int*)malloc(n*sizeof(int));for(mrb_int i=0;i<n;i++){if(!chars[i])sp_raise_cls("TypeError","no implicit conversion of nil into String");const char*cs=chars[i];negs[i]=0;if(*cs=='^'&&*(cs+1)){negs[i]=1;cs++;}sets[i]=sp_utf8_decode_charset(cs,&setns[i]);}size_t bl=strlen(s);char*buf=(char*)malloc(bl+1);if(!buf)sp_oom_die();size_t m=0;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);int all=1;for(mrb_int i=0;i<n;i++){int in_set=sp_utf8_set_has(sets[i],setns[i],cp);if(negs[i])in_set=!in_set;if(!in_set){all=0;break;}}if(!all){memcpy(buf+m,p,cn);m+=cn;}p+=cn;}buf[m]=0;for(mrb_int i=0;i<n;i++)free(sets[i]);free(sets);free(setns);free(negs);char*r=sp_str_alloc(m);memcpy(r,buf,m+1);free(buf);return r;}
 static const char*sp_str_squeeze_n(const char*s,const char**chars,mrb_int n){if(!s)return sp_str_empty;if(n<=0)return sp_str_squeeze(s);size_t*setns=(size_t*)malloc(n*sizeof(size_t));uint32_t**sets=(uint32_t**)malloc(n*sizeof(uint32_t*));int*negs=(int*)malloc(n*sizeof(int));for(mrb_int i=0;i<n;i++){if(!chars[i])sp_raise_cls("TypeError","no implicit conversion of nil into String");const char*cs=chars[i];negs[i]=0;if(*cs=='^'&&*(cs+1)){negs[i]=1;cs++;}sets[i]=sp_utf8_decode_charset(cs,&setns[i]);}size_t bl=strlen(s);char*r=sp_str_alloc_raw(bl+1);size_t m=0;uint32_t prev=0xFFFFFFFFu;const char*p=s;while(*p){uint32_t cp;int cn=sp_utf8_decode(p,&cp);int all=1;for(mrb_int i=0;i<n;i++){int in_set=sp_utf8_set_has(sets[i],setns[i],cp);if(negs[i])in_set=!in_set;if(!in_set){all=0;break;}}if(!all){memcpy(r+m,p,cn);m+=cn;prev=0xFFFFFFFFu;}else if(cp!=prev){memcpy(r+m,p,cn);m+=cn;prev=cp;}p+=cn;}r[m]=0;sp_str_set_len(r,m);for(mrb_int i=0;i<n;i++)free(sets[i]);free(sets);free(setns);free(negs);return r;}
 
 /* Forward decl from sp_crypto.h (libspinel_rt.a). Used by
