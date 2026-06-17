@@ -2836,6 +2836,8 @@ static const char *sp_exc_message(volatile struct sp_Exception_s *ve);
 #define SP_BUILTIN_FIBER         (-22) /* sp_Fiber * boxed into poly slot */
 #define SP_BUILTIN_IO            (-23) /* sp_File * (File/IO handle) boxed into poly slot */
 #define SP_BUILTIN_METHOD        (-24) /* sp_BoundMethod * boxed into poly slot */
+/* SP_BUILTIN_FOREIGN_PTR (-25) is defined in sp_gc.h (the inline mark helper
+   must see it to skip tracing opaque FFI pointers). */
 /* sp_RbVal is defined in sp_gc.h (the mark helpers dispatch on its tag). */
 static sp_RbVal sp_box_int(mrb_int v) { sp_RbVal r; r.tag = SP_TAG_INT; r.cls_id = 0; r.v.i = v; return r; }
 static sp_RbVal sp_box_str(const char *v) { sp_RbVal r; r.tag = SP_TAG_STR; r.cls_id = 0; r.v.s = v; return r; }
@@ -2940,6 +2942,9 @@ else {
   return buf;
 }
 static sp_RbVal sp_box_nullable_obj(void *p, int cls_id) { return p ? sp_box_obj(p, cls_id) : sp_box_nil(); }
+/* An opaque foreign/FFI pointer: boxed with SP_BUILTIN_FOREIGN_PTR so the
+   collector skips it (it is not a sp_gc_alloc allocation). NULL -> nil. */
+static sp_RbVal sp_box_foreign_ptr(void *p) { return p ? sp_box_obj(p, SP_BUILTIN_FOREIGN_PTR) : sp_box_nil(); }
 /* Built-in pointer boxes — share SP_TAG_OBJ with a reserved negative
    cls_id so the dispatch path is uniform. */
 static sp_RbVal sp_box_int_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_INT_ARRAY); }

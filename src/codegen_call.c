@@ -3153,8 +3153,8 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_puts(b, "("); buf_puts(b, call_buf.p); buf_puts(b, ", (mrb_int)0)");
         }
         else if (is_ptr_ret) {
-          /* wrap void* in a poly sp_RbVal */
-          buf_printf(b, "sp_box_obj((void *)(%s), SP_BUILTIN_OBJECT)", call_buf.p);
+          /* wrap the foreign void* in a poly sp_RbVal that the GC won't trace */
+          buf_printf(b, "sp_box_foreign_ptr((void *)(%s))", call_buf.p);
         }
         else if (is_str_ret) {
           buf_printf(b, "sp_str_dup_external(%s)", call_buf.p);
@@ -3180,7 +3180,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             bi = fbi; break;
           }
         if (bi >= 0) {
-          buf_printf(b, "sp_box_obj((void *)sp_ffi_buf_%s_%s, SP_BUILTIN_OBJECT)",
+          buf_printf(b, "sp_box_foreign_ptr((void *)sp_ffi_buf_%s_%s)",
                      c->ffi_buf_mods[bi], c->ffi_buf_names[bi]);
           return;
         }
@@ -3205,7 +3205,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
               TyKind at = comp_ntype(c, argv[0]);
               if (at == TY_POLY) { emit_expr(c, argv[0], b); buf_puts(b, ").v.p"); }
               else emit_expr(c, argv[0], b);
-              buf_printf(b, " + %d)); _t%d ? sp_box_obj(_t%d, SP_BUILTIN_OBJECT) : sp_box_nil(); })", off, rt3, rt3);
+              buf_printf(b, " + %d)); sp_box_foreign_ptr(_t%d); })", off, rt3);
             }
             else {
               /* `+ off` must apply to the char* (byte offset), not the typed

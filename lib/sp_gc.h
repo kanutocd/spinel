@@ -25,6 +25,12 @@
 #define SP_TAG_SYM 6
 #define SP_TAG_CLASS 7
 #define SP_TAG_ENCODING 8
+/* SP_TAG_OBJ cls_id sentinel for an opaque foreign/FFI pointer (e.g. a
+   ffi_read_ptr / ffi func ptr return). It is NOT a sp_gc_alloc allocation, so
+   the collector must not trace it -- sp_mark_rbval skips it. Kept here (not with
+   the other SP_BUILTIN_* in sp_runtime.h) so the inline mark helper can see it.
+   Value is the next free slot below SP_BUILTIN_METHOD (-24). */
+#define SP_BUILTIN_FOREIGN_PTR (-25)
 typedef struct { int tag; int cls_id; union { mrb_int i; const char *s; mrb_float f; mrb_bool b; void *p; } v; } sp_RbVal;
 
 /* ---- Collector globals shared with the generated TU ----
@@ -79,7 +85,7 @@ static inline void sp_mark_string(const char *s) {
 }
 static inline void sp_mark_rbval(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) sp_mark_string(v.v.s);
-  else if (v.tag == SP_TAG_OBJ) sp_gc_mark(v.v.p);
+  else if (v.tag == SP_TAG_OBJ && v.cls_id != SP_BUILTIN_FOREIGN_PTR) sp_gc_mark(v.v.p);
 }
 /* Closure-cell content markers. A captured non-int local is laundered into the
    pointer-sized mrb_int cell as (uintptr_t)<ptr>; the cell's GC scan marks the
