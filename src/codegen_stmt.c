@@ -1177,6 +1177,34 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
 }
 
 /* case/when -> an if / else-if chain. Statement form. */
+/* True if the subtree contains a `break` that targets the ENCLOSING loop
+   (i.e. not captured by a nested loop or block-bearing iterator). Used to
+   decide whether a `case` may lower to a C `switch`: a Ruby `break` inside a
+   `when` must break the loop, but a C `break` inside a `switch` only exits the
+   switch -- so a case whose when-bodies break the loop must use the if-else
+   form instead, where C `break` correctly targets the loop. */
+static int subtree_has_loop_break(Compiler *c, int root) {
+  if (root < 0) return 0;
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, root);
+  if (ty) {
+    if (!strcmp(ty, "BreakNode")) return 1;
+    /* nested loops / block-bearing iterators capture their own break/next */
+    if (!strcmp(ty, "WhileNode") || !strcmp(ty, "UntilNode") || !strcmp(ty, "ForNode"))
+      return 0;
+    if (!strcmp(ty, "CallNode") && nt_ref(nt, root, "block") >= 0)
+      return 0;
+  }
+  int nr = nt_num_refs(nt, root);
+  for (int i = 0; i < nr; i++) if (subtree_has_loop_break(c, nt_ref_at(nt, root, i))) return 1;
+  int na = nt_num_arrs(nt, root);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *el = nt_arr_at(nt, root, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_has_loop_break(c, el[j])) return 1;
+  }
+  return 0;
+}
+
 void emit_case(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -1210,7 +1238,13 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
         if (!cty || strcmp(cty, "IntegerNode")) { all_int = 0; break; }
       }
     }
-    if (all_int) {
+    /* A C switch can't host a Ruby `break` that targets the enclosing loop
+       (C break exits the switch, not the loop). If any arm breaks the loop,
+       fall through to the if-else form below where break works correctly. */
+    int has_lbreak = (else_clause >= 0) && subtree_has_loop_break(c, nt_ref(nt, else_clause, "statements"));
+    for (int w = 0; w < nw && !has_lbreak; w++)
+      if (subtree_has_loop_break(c, nt_ref(nt, whens[w], "statements"))) has_lbreak = 1;
+    if (all_int && !has_lbreak) {
       emit_indent(b, indent);
       if (pt == TY_POLY) buf_printf(b, "switch (sp_poly_to_i(_t%d)) {\n", t);
       else buf_printf(b, "switch (_t%d) {\n", t);
@@ -1579,15 +1613,45 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
       g_hoist_len_var = hbuf; g_hoist_len_recv = hn;
     }
   }
-  emit_indent(b, indent);
-  buf_puts(b, "while (");
-  if (is_until) buf_puts(b, "!(");
-  emit_cond(c, pred, b);
-  if (is_until) buf_puts(b, ")");
-  buf_puts(b, ") {\n");
-  emit_loop_body(c, body, b, indent + 1);
-  emit_indent(b, indent);
-  buf_puts(b, "}\n");
+  /* Capture the predicate and any expression preludes it needs (method-call
+     temps etc.) into local buffers. A loop condition like
+     `advance while ident_continue_byte?(byte)` evaluates a method call
+     (`byte`, which reads mutable state) every iteration -- but emit_cond
+     routes that call's setup through g_pre, which is normally flushed ONCE
+     before the statement. For a loop that hoists the call out of the loop, so
+     the condition never re-evaluates (infinite loop / stuck position). Re-emit
+     the preludes INSIDE the loop and break on the (negated) condition so the
+     condition is recomputed each iteration. Conditions with no prelude keep
+     the plain `while (cond)` form. */
+  Buf cpre;  memset(&cpre, 0, sizeof cpre);
+  Buf ccond; memset(&ccond, 0, sizeof ccond);
+  Buf *sv_pre = g_pre; int sv_ind = g_indent;
+  g_pre = &cpre; g_indent = indent + 1;
+  emit_cond(c, pred, &ccond);
+  g_pre = sv_pre; g_indent = sv_ind;
+  if (cpre.p && cpre.p[0]) {
+    emit_indent(b, indent); buf_puts(b, "while (1) {\n");
+    buf_puts(b, cpre.p);
+    emit_indent(b, indent + 1);
+    buf_puts(b, "if (");
+    if (!is_until) buf_puts(b, "!(");
+    buf_puts(b, ccond.p ? ccond.p : "0");
+    if (!is_until) buf_puts(b, ")");
+    buf_puts(b, ") break;\n");
+    emit_loop_body(c, body, b, indent + 1);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+  } else {
+    emit_indent(b, indent);
+    buf_puts(b, "while (");
+    if (is_until) buf_puts(b, "!(");
+    buf_puts(b, ccond.p ? ccond.p : "");
+    if (is_until) buf_puts(b, ")");
+    buf_puts(b, ") {\n");
+    emit_loop_body(c, body, b, indent + 1);
+    emit_indent(b, indent);
+    buf_puts(b, "}\n");
+  }
+  free(cpre.p); free(ccond.p);
   g_hoist_len_var = sv_hvar; g_hoist_len_recv = sv_hrecv;
 }
 
