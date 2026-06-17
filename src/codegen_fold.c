@@ -1554,7 +1554,18 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d += _t%d) {\n",
                        ti_es, ti_es, k, ta_es, ti_es, ts_es);
-            if (np_es > 1) {
+            if (block_param_is_multi(c, block, 0)) {
+              /* |(a, b)| destructuring: assign each leaf from the slice */
+              int lc_es = block_param_multi_count(c, block, 0);
+              for (int li = 0; li < lc_es; li++) {
+                const char *ln = block_param_multi_leaf(c, block, 0, li);
+                if (!ln) continue;
+                emit_indent(g_pre, g_indent + 1);
+                buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d + %d);\n",
+                           rename_local(ln), k, ta_es, ti_es, li);
+              }
+            }
+            else if (np_es > 1) {
               for (int pj = 0; pj < np_es; pj++) {
                 const char *pn = block_param_name(c, block, pj); if (!pn) break;
                 emit_indent(g_pre, g_indent + 1);
