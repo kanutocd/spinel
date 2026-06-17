@@ -286,8 +286,14 @@ void emit_call(Compiler *c, int id, Buf *b) {
       return;
     }
     if (crt == TY_CURRY && (!strcmp(name, "[]") || !strcmp(name, "call") || !strcmp(name, "()")) && argc == 1) {
+      /* The application that reaches the proc's arity realizes the curry to its
+         (int) result; earlier applications return another curry. */
+      int complete = 0; TyKind cret = TY_UNKNOWN;
+      int realize = curry_apply_info(c, id, &complete, &cret) && complete && cret == TY_INT;
+      if (realize) buf_puts(b, "sp_curry_to_int(");
       buf_puts(b, "sp_curry_apply("); emit_expr(c, recv, b); buf_puts(b, ", (mrb_int)(");
       emit_expr(c, argv[0], b); buf_puts(b, "))");
+      if (realize) buf_puts(b, ")");
       return;
     }
     if (crt == TY_INT && !strcmp(name, "quo") && argc == 1) {

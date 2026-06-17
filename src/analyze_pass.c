@@ -2168,6 +2168,68 @@ TyKind ewo_memo_elem_type(Compiler *c, int callid) {
   return acc2;
 }
 
+/* The arity and body-return type of the proc a curry was built from. */
+static int curry_proc_base(Compiler *c, int recv, int *arity, TyKind *ret) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int body = -1, pn = -1;
+  if (!fwd_callable_def(c, recv, &body, &pn)) return 0;
+  int rn = 0; if (pn >= 0) nt_arr(nt, pn, "requireds", &rn);
+  *arity = rn;
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  *ret = bn > 0 ? infer_type(c, bb[bn - 1]) : TY_NIL;
+  return 1;
+}
+
+/* Walk a curry chain to its base proc, counting args applied through `node`
+   (`proc.curry` -> 0, each `[arg]` / `.call(arg)` adds 1, a var resolves to its
+   assigned curry expression). Sets *applied, *arity, *ret on success. */
+static int curry_chain(Compiler *c, int node, int *applied, int *arity, TyKind *ret, int depth) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (depth > 64) return 0;  /* guard against cyclic var assignments (a=b; b=a) */
+  const char *ty = nt_type(nt, node);
+  if (!ty) return 0;
+  if (!strcmp(ty, "CallNode")) {
+    const char *nm = nt_str(nt, node, "name");
+    int recv = nt_ref(nt, node, "receiver");
+    if (!nm || recv < 0) return 0;
+    if (!strcmp(nm, "curry")) {
+      if (!curry_proc_base(c, recv, arity, ret)) return 0;
+      *applied = 0;
+      return 1;
+    }
+    if (!strcmp(nm, "[]") || !strcmp(nm, "call") || !strcmp(nm, "()")) {
+      if (!curry_chain(c, recv, applied, arity, ret, depth + 1)) return 0;
+      (*applied)++;
+      return 1;
+    }
+    return 0;
+  }
+  if (!strcmp(ty, "LocalVariableReadNode")) {
+    const char *vn = nt_str(nt, node, "name");
+    Scope *sc = vn ? comp_scope_of(c, node) : NULL;
+    for (int w = 0; vn && w < nt->count; w++) {
+      if (!nt_type(nt, w) || strcmp(nt_type(nt, w), "LocalVariableWriteNode")) continue;
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || strcmp(wn, vn) || comp_scope_of(c, w) != sc) continue;
+      int val = nt_ref(nt, w, "value");
+      if (val >= 0) return curry_chain(c, val, applied, arity, ret, depth + 1);
+    }
+    return 0;
+  }
+  return 0;
+}
+
+/* Does applying one more arg at curry-application `node` reach the base proc's
+   arity (completing it)? Sets *out_ret to the proc's return type. Returns 1 when
+   `node` is a recognized curry chain. */
+int curry_apply_info(Compiler *c, int node, int *out_complete, TyKind *out_ret) {
+  int applied = 0, arity = 0; TyKind ret = TY_UNKNOWN;
+  if (!curry_chain(c, node, &applied, &arity, &ret, 0)) return 0;
+  *out_complete = (arity > 0 && applied >= arity);
+  *out_ret = ret;
+  return 1;
+}
+
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;

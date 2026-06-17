@@ -289,10 +289,17 @@ TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "+") || !strcmp(name, "-") || !strcmp(name, "*")) return TY_COMPLEX;
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
   }
-  /* Proc#curry and curry application via []. */
+  /* Proc#curry and curry application via []. A curried call stays TY_CURRY until
+     it reaches the proc's arity, when it realizes to the proc's return type (the
+     runtime accumulates int args, so completion typing covers int-returning
+     procs; partial applications and other returns remain TY_CURRY). */
   if (rt == TY_PROC && !strcmp(name, "curry")) return TY_CURRY;
-  if (rt == TY_CURRY && (!strcmp(name, "[]") || !strcmp(name, "call") || !strcmp(name, "()")))
+  if (rt == TY_CURRY && (!strcmp(name, "[]") || !strcmp(name, "call") || !strcmp(name, "()"))) {
+    int complete = 0; TyKind cret = TY_UNKNOWN;
+    if (curry_apply_info(c, id, &complete, &cret) && complete && cret == TY_INT)
+      return TY_INT;
     return TY_CURRY;
+  }
 
   if (rt == TY_INT && !strcmp(name, "quo")) return TY_RATIONAL;
   if (rt == TY_RATIONAL) {
