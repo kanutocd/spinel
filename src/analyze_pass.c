@@ -2110,9 +2110,19 @@ int desugar_value_callable_forwards(Compiler *c) {
        typing not yet modeled, so decline to the pre-existing path. */
     int wrap_pair = 0;
     if (ty_is_hash(rt)) {
-      if (ct == TY_METHOD) wrap_pair = (arity == 2);
-      else if (arity == 2 && simple_ref && fwd_callable_arity(c, ex) == 1) wrap_pair = 1;
-      else continue;
+      if (ct == TY_METHOD) {
+        wrap_pair = (arity == 2);  /* each: pair as array; each_key/value: bare value */
+      } else {
+        /* a proc/lambda (value or inline): the call-site inference types its
+           params from the forwarded call. `each` to a 1-param callable gets the
+           [k,v] pair as one array; to a 2-param one, k and v positionally
+           (auto-splat by arity); each_key/each_value pass the bare key/value. */
+        int cpc = fwd_callable_arity(c, ex);
+        if (arity == 2 && cpc == 1) wrap_pair = 1;
+        else if (arity == 2 && cpc == 2) wrap_pair = 0;
+        else if (arity == 1) wrap_pair = 0;
+        else continue;  /* arity-2 with unresolved callable arity */
+      }
     }
 
     int base = nt->count;
@@ -2217,6 +2227,30 @@ int desugar_enum_chain_to_a(Compiler *c) {
     Scope *bs = comp_scope_of(c, blocknode);
     LocalVar *lv = scope_local_intern(bs, pn); lv->is_block_param = 1;
     changed = 1;
+  }
+  return changed;
+}
+
+/* Propagate `proc.call(args)` argument types onto the proc literal `create`'s
+   required params: a concrete arg overrides a param still at its bare-int
+   default (the fallback guess, no real evidence), otherwise unify. Returns 1 if
+   any param type changed. Shared by the local-proc and inline-lambda call sites. */
+static int cs_type_params(Compiler *c, int create, const int *argv, int argc) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int pn = a_proc_params_node(c, create);
+  if (pn < 0) return 0;
+  int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
+  Scope *bs = comp_scope_of(c, create);
+  int changed = 0;
+  for (int k = 0; k < rn && k < argc; k++) {
+    const char *p = nt_str(nt, reqs[k], "name");
+    if (!p) continue;
+    LocalVar *lv = scope_local(bs, p);
+    if (!lv) continue;
+    TyKind at = infer_type(c, argv[k]);
+    if (at == TY_UNKNOWN || at == lv->type) continue;
+    TyKind merged = (lv->type == TY_INT) ? at : ty_unify(lv->type, at);
+    if (merged != lv->type) { lv->type = merged; changed = 1; }
   }
   return changed;
 }
@@ -2451,15 +2485,23 @@ int infer_block_params(Compiler *c) {
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || infer_type(c, recv) != TY_PROC) continue;
     const char *rty = nt_type(nt, recv);
-    if (!rty || strcmp(rty, "LocalVariableReadNode")) continue;
-    const char *varname = nt_str(nt, recv, "name");
-    if (!varname) continue;
+    if (!rty) continue;
     int call_args = nt_ref(nt, id, "arguments");
     int argc = 0; const int *argv = NULL;
     if (call_args >= 0) argv = nt_arr(nt, call_args, "arguments", &argc);
     if (argc == 0) continue;
+    /* The receiver is itself a proc/lambda literal -- e.g. a desugared inline
+       `&->(x){...}` clone, whose params no var write would let us find -- so type
+       its own params directly from the call args. */
+    if (!strcmp(rty, "LambdaNode") || is_proc_create(c, recv)) {
+      if (cs_type_params(c, recv, argv, argc)) changed = 1;
+      continue;
+    }
+    if (strcmp(rty, "LocalVariableReadNode")) continue;
+    const char *varname = nt_str(nt, recv, "name");
+    if (!varname) continue;
     Scope *call_scope = comp_scope_of(c, id);
-    /* Find proc literal(s) assigned to varname in the same scope */
+    /* otherwise a local holding a proc: type the proc literal assigned to it */
     for (int w = 0; w < nt->count; w++) {
       const char *wty = nt_type(nt, w);
       if (!wty || strcmp(wty, "LocalVariableWriteNode")) continue;
@@ -2468,27 +2510,7 @@ int infer_block_params(Compiler *c) {
       if (comp_scope_of(c, w) != call_scope) continue;
       int val = nt_ref(nt, w, "value");
       if (val < 0 || !is_proc_create(c, val)) continue;
-      int pn = a_proc_params_node(c, val);
-      if (pn < 0) continue;
-      int rn = 0; const int *reqs = nt_arr(nt, pn, "requireds", &rn);
-      Scope *bs = comp_scope_of(c, val);
-      for (int k = 0; k < rn && k < argc; k++) {
-        const char *p = nt_str(nt, reqs[k], "name");
-        if (!p) continue;
-        LocalVar *lv = scope_local(bs, p);
-        if (!lv) continue;
-        TyKind at = infer_type(c, argv[k]);
-        if (at == TY_UNKNOWN || at == lv->type) continue;
-        /* A container arg (array/hash/string/object) overrides a bare int param:
-           the int is the proc/lambda default, which would otherwise unify with a
-           container to POLY (a scalar) and lose the container type -- breaking a
-           forwarded `&proc` into a poly/hash iterator, whose param is the pair
-           array or element. A genuine multi-type param still converges to POLY
-           via the other call site's unify. */
-        int at_container = ty_is_array(at) || ty_is_hash(at) || at == TY_STRING || ty_is_object(at);
-        TyKind merged = (lv->type == TY_INT && at_container) ? at : ty_unify(lv->type, at);
-        if (merged != lv->type) { lv->type = merged; changed = 1; }
-      }
+      if (cs_type_params(c, val, argv, argc)) changed = 1;
     }
   }
 
