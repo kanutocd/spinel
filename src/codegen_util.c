@@ -97,6 +97,7 @@ Buf g_procs;
 Buf g_proc_protos;
 int g_proc_counter = 0;
 int g_needs_proc_poly_retslot = 0; /* any proc returns TY_POLY via _sp_proc_poly_ret */
+int g_needs_proc_poly_argslot = 0; /* any proc takes a TY_POLY arg via _sp_proc_poly_args */
 /* Fiber body functions accumulate here (similar to g_procs but void(*)(sp_Fiber*)). */
 int g_fiber_counter = 0;
 char **g_re_src; int *g_re_flg; int g_re_count, g_re_cap;

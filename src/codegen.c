@@ -1074,8 +1074,21 @@ else if (orecv >= 0 && onm) {
     LocalVar *lv = scope_local(bs, p);
     TyKind pt = lv ? lv->type : TY_INT;
     buf_puts(pb, "    "); emit_ctype(c, pt, pb); buf_printf(pb, " lv_%s = ", p);
-    /* a heap-pointer param is laundered back from the mrb_int slot */
-    if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%d];\n", k); }
+    /* a heap-pointer param is laundered back from the mrb_int slot; a TY_POLY
+       (sp_RbVal) param doesn't fit the slot, so it rides the _sp_proc_poly_args
+       side-channel the call site published before the call. */
+    if (pt == TY_POLY) {
+      /* the side-channel array holds 16 slots (the proc-call ABI cap) */
+      if (k < 16) {
+        if (!g_needs_proc_poly_argslot) {
+          g_needs_proc_poly_argslot = 1;
+          buf_puts(&g_proc_protos, "static sp_RbVal _sp_proc_poly_args[16];\n");
+        }
+        buf_printf(pb, "_sp_proc_poly_args[%d];\n", k);
+      }
+      else buf_puts(pb, "0;\n");
+    }
+    else if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%d];\n", k); }
     else buf_printf(pb, "args[%d];\n", k);
   }
   for (int i = 0; i < locals.n; i++) {
@@ -2673,6 +2686,7 @@ char *codegen_program(const NodeTable *nt) {
   memset(&g_procs, 0, sizeof g_procs);
   memset(&g_proc_protos, 0, sizeof g_proc_protos);
   g_needs_proc_poly_retslot = 0;
+  g_needs_proc_poly_argslot = 0;
 
   comp_free(c);
   return b.p;

@@ -143,6 +143,7 @@ extern Buf g_procs;
 extern Buf g_proc_protos;
 extern int g_proc_counter;
 extern int g_needs_proc_poly_retslot; /* any proc returns TY_POLY via _sp_proc_poly_ret */
+extern int g_needs_proc_poly_argslot; /* any proc takes a TY_POLY arg via _sp_proc_poly_args */
 /* Fiber body functions accumulate here (similar to g_procs but void(*)(sp_Fiber*)). */
 extern int g_fiber_counter;
 
