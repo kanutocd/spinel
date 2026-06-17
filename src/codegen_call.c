@@ -1324,8 +1324,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       return;
     }
     if (!strcmp(name, "backtrace")) {
-      /* spinel does not capture stack frames: an empty array */
-      buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), sp_StrArray_new())");
+      /* the stack captured at the most recent raise (sp_bt_buf); the substrate
+         is live in --debug builds and empty in release, same as Kernel#caller. */
+      buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), sp_backtrace_captured())");
       return;
     }
     if (argc == 1 && (!strcmp(name, "is_a?") || !strcmp(name, "kind_of?") || !strcmp(name, "instance_of?"))) {
