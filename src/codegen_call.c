@@ -2690,15 +2690,19 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_puts(b, ")");
         return;
       }
-      /* unrecognized stdlib class .new (Pathname, OpenStruct, IPAddr, etc.): emit 0.
-         The object is inert -- methods on it later degrade to nil -- so a program
-         that actually uses it diverges silently from CRuby. Surface the site under
-         SPINEL_WARN_UNRESOLVED (no behaviour change). */
+      /* `.new` on a constant Spinel could not resolve -- not a user class, not a
+         builtin/stdlib class handled above (Mutex, Thread, etc. return earlier).
+         It is either a genuine undefined constant or a real stdlib class Spinel
+         doesn't implement (Pathname, OpenStruct, IPAddr, ...). Either way the
+         object can't work, so raise NameError rather than silently degrade to an
+         inert 0 whose methods then return nil (a program that used it would
+         diverge from CRuby with no signal). Mirrors the value-position read of an
+         unresolved constant. The raise expression is int-typed, so an ivar slot
+         assigned from it still compiles. */
       if (cn) {
-        if (warn_unresolved_pos(c, id))
-          fprintf(stderr, "unresolved constant '%s' in '%s.new' -> inert 0 "
-                          "(methods on the result degrade to nil)\n", cn, cn);
-        buf_puts(b, "0LL");
+        TyKind nret = comp_ntype(c, id);
+        buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), %s)",
+                   cn, (is_scalar_ret(nret) && nret != TY_UNKNOWN) ? default_value(nret) : "sp_box_nil()");
         return;
       }
     }

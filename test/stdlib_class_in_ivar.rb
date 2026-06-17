@@ -1,13 +1,11 @@
-# A stdlib class with no Spinel struct (Mutex, Pathname, OpenStruct,
-# IPAddr, ...) stored in an instance variable previously made analyze
-# type the ivar `obj_<Class>` and codegen emit an undeclared
-# `sp_<Class> *` field, failing the C build with `unknown type name`.
+# A `.new` on a stdlib class Spinel does not implement (Pathname, OpenStruct,
+# IPAddr, ...) used to silently degrade to an inert 0 -- the object's methods
+# then returned nil, so a program that actually used it diverged from CRuby with
+# no signal. It now raises NameError instead: if it can't work, it fails loudly.
 #
-# Fix: when a constructor's target class has no struct (not a
-# user-defined class), type the slot as int — codegen already lowers
-# the unresolved `.new` to integer 0 — so the field compiles. The
-# stdlib object itself is inert (its methods stay unresolved), so the
-# assertions below only observe ivars that don't depend on it.
+# A class Spinel models as a no-op (Mutex, single-threaded) and user-defined
+# classes are unaffected. The ivar slot still compiles either way (the raise
+# expression is int-typed, so no undeclared `sp_<Class> *` field is emitted).
 require 'thread'
 require 'pathname'
 require 'ostruct'
@@ -15,7 +13,7 @@ require 'ipaddr'
 
 class WithMutex
   def initialize
-    @lock = Mutex.new
+    @lock = Mutex.new   # special-cased no-op; works
     @n = 5
   end
   def n
@@ -25,7 +23,7 @@ end
 
 class WithPathname
   def initialize
-    @path = Pathname.new('/tmp')
+    @path = Pathname.new('/tmp')   # unsupported stdlib class -> raises here
     @v = 7
   end
   def v
@@ -33,36 +31,10 @@ class WithPathname
   end
 end
 
-class WithOpenStruct
-  def initialize
-    @os = OpenStruct.new(a: 1)
-    @w = 9
-  end
-  def w
-    @w
-  end
-end
-
-class WithIPAddr
-  def initialize
-    @ip = IPAddr.new('1.2.3.4')
-    @z = 11
-  end
-  def z
-    @z
-  end
-end
-
+# A Mutex ivar works (single-threaded no-op); another ivar reads fine.
 puts WithMutex.new.n          #=> 5
-puts WithPathname.new.v       #=> 7
-puts WithOpenStruct.new.w     #=> 9
-puts WithIPAddr.new.z         #=> 11
 
-# Local (not ivar) constructor of an unresolved class also compiles.
-local_obj = Mutex.new
-puts "local ok"
-
-# A user-defined class is unaffected — it keeps its obj_<Class> slot.
+# A user-defined class is unaffected.
 class Point
   def initialize(x)
     @x = x
@@ -82,4 +54,21 @@ class Holder
 end
 
 puts Holder.new.px            #=> 42
+
+# Constructing the unsupported-stdlib holder raises (loud), not a silent inert 0.
+begin
+  WithPathname.new
+  puts "no raise"
+rescue NameError
+  puts "pathname raised"
+end
+
+# A direct `.new` on an unsupported stdlib class raises too.
+begin
+  OpenStruct.new
+  puts "no raise"
+rescue NameError
+  puts "openstruct raised"
+end
+
 puts "done"
