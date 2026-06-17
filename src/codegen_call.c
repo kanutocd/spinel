@@ -2021,7 +2021,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           /* `{ _1.method }`: _1.._N bind like positional block params. */
           int maxn = (int)nt_int(nt, bp_node, "maximum", 0);
           for (int p = 0; p < maxn; p++) {
-            char pn[8]; snprintf(pn, sizeof pn, "_%d", p + 1);
+            char pn[16]; snprintf(pn, sizeof pn, "_%d", p + 1);
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "lv_%s = ", rename_local(pn));
             if (is_exec) {
@@ -3332,7 +3332,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         memcpy(_abase, name, (size_t)_ablen); _abase[_ablen] = '\0';
         int _arc = ty_object_class(_art), _adefc = -1;
         if (comp_writer_in_chain(c, _arc, _abase, &_adefc)) {
-          char _aivn[256]; snprintf(_aivn, sizeof _aivn, "@%s", _abase);
+          char _aivn[258]; snprintf(_aivn, sizeof _aivn, "@%s", _abase);
           int _aiv = comp_ivar_index(&c->classes[_adefc < 0 ? _arc : _adefc], _aivn);
           TyKind _aivt = _aiv >= 0 ? c->classes[_adefc < 0 ? _arc : _adefc].ivar_types[_aiv] : TY_UNKNOWN;
           buf_puts(b, "(("); emit_expr(c, recv, b); buf_printf(b, ")->iv_%s = ", _abase);
