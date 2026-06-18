@@ -2081,6 +2081,11 @@ else {
     if (!strcmp(name, "next_float") || !strcmp(name, "prev_float") ||
         !strcmp(name, "abs") || !strcmp(name, "magnitude") ||
         !strcmp(name, "modulo") || !strcmp(name, "to_f")) return TY_FLOAT;
+    /* clamp with float bounds returns a float (matches codegen in codegen_call.c);
+       a mixed/int bound can return the Integer bound, so leave that poly. */
+    if (!strcmp(name, "clamp") && argc == 2 &&
+        infer_type(c, argv[0]) == TY_FLOAT && infer_type(c, argv[1]) == TY_FLOAT)
+      return TY_FLOAT;
     if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) {
       /* value-based return type: ndigits > 0 (literal) -> Float, else Integer */

@@ -2438,6 +2438,14 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "prev_float")) buf_printf(b, "nextafter(%s, -INFINITY)", r);
       else if (!strcmp(name, "magnitude")) buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "modulo") && argc == 1) { buf_printf(b, "fmod(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      /* Float#clamp with float bounds always yields a float (the returned bound
+         is itself a float), so emit only when both bounds are float-typed; the
+         mixed-bound case (int bound returned as Integer) is poly and left alone.
+         Mirrors the inference condition in analyze_infer.c. */
+      else if (!strcmp(name, "clamp") && argc == 2 &&
+               comp_ntype(c, argv[0]) == TY_FLOAT && comp_ntype(c, argv[1]) == TY_FLOAT) {
+        buf_printf(b, "sp_float_clamp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+      }
       else if (!strcmp(name, "coerce") && argc == 1) {
         TyKind a0 = comp_ntype(c, argv[0]);
         int ta = ++g_tmp, o = ++g_tmp;

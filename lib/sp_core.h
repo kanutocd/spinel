@@ -26,6 +26,7 @@ intptr_t sp_lcm(intptr_t a, intptr_t b);
 intptr_t sp_powmod(intptr_t base, intptr_t exp, intptr_t mod);
 intptr_t sp_ceildiv(intptr_t a, intptr_t b);
 intptr_t sp_int_clamp(intptr_t v, intptr_t lo, intptr_t hi);
+double sp_float_clamp(double v, double lo, double hi);
 intptr_t sp_int_sqrt(intptr_t n);
 intptr_t sp_ipow10(intptr_t p);
 intptr_t sp_int_round(intptr_t v, intptr_t nd);
