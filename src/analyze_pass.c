@@ -1983,6 +1983,54 @@ static int forwarding_yield_target(Compiler *c, int mi, int depth) {
    forward whose expression names the enclosing method's block param) is left to
    the inline-forward path. Runs in the inference fixpoint; once a call is
    rewritten its block is a BlockNode, so it is never revisited. */
+/* `send(:m, args)` / `__send__("m", args)` / `public_send(:m, args)` with NO
+   explicit receiver -> a direct implicit-self call to `m` with the remaining
+   args. The literal symbol/string name resolves statically, the same model as
+   the textual `recv.send(:m)` receiver rewrite in spinel_parse.c; a non-literal
+   name (`send(meth)`) has no static target and is left alone. Done on the AST,
+   not textually, so a `send(:` inside a string or comment can't be mis-matched
+   (the bare token has no `.` anchor). #1261. */
+int desugar_implicit_send(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (!nt_type(nt, id) || strcmp(nt_type(nt, id), "CallNode")) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;        /* implicit self only */
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (strcmp(nm, "send") && strcmp(nm, "__send__") &&
+                strcmp(nm, "public_send"))) continue;
+    int args = nt_ref(nt, id, "arguments");
+    if (args < 0) continue;
+    int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
+    if (argc < 1 || !argv) continue;
+    const char *a0ty = nt_type(nt, argv[0]);
+    const char *mname = NULL;
+    if (a0ty && !strcmp(a0ty, "SymbolNode")) mname = nt_str(nt, argv[0], "value");
+    else if (a0ty && !strcmp(a0ty, "StringNode")) mname = nt_str(nt, argv[0], "content");
+    if (!mname || !*mname) continue;                      /* non-literal name: leave it */
+    if (!strcmp(mname, "send") || !strcmp(mname, "__send__") ||
+        !strcmp(mname, "public_send")) continue;          /* don't re-trigger next pass */
+    int nrest = argc - 1;
+    if (nrest > 64) continue;                             /* absurd arity: leave it */
+    int rest[64];
+    for (int k = 0; k < nrest; k++) rest[k] = argv[k + 1];  /* copy before realloc */
+    char namebuf[256];
+    snprintf(namebuf, sizeof namebuf, "%s", mname);        /* copy before realloc */
+    int base = nt->count;
+    int newargs = nt_new_node(nt, "ArgumentsNode");
+    if (newargs < 0) continue;
+    nt_node_set_arr(nt, newargs, "arguments", rest, nrest);
+    nt_node_set_str(nt, id, "name", namebuf);              /* retarget the call */
+    nt_node_set_ref(nt, id, "arguments", newargs);         /* drop the name arg */
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  return changed;
+}
+
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
