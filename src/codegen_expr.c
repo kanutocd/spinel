@@ -1,9 +1,36 @@
 #include "codegen_internal.h"
 
+/* Adjacent string literals joined by `\`-continuation (or `+`-folded at parse
+   time) produce an InterpolatedStringNode whose own parts are themselves
+   InterpolatedStringNodes. Flatten the part tree into one list of leaf parts
+   (StringNode / EmbeddedStatementsNode) so the format/arg assembly below sees a
+   single flat sequence and emits one sp_sprintf call. */
+static void interp_flatten(const NodeTable *nt, int id, int **out, int *n, int *cap) {
+  int pn = 0;
+  const int *parts = nt_arr(nt, id, "parts", &pn);
+  for (int k = 0; k < pn; k++) {
+    int pid = parts[k];
+    const char *pty = nt_type(nt, pid);
+    if (pty && !strcmp(pty, "InterpolatedStringNode")) {
+      interp_flatten(nt, pid, out, n, cap);
+      continue;
+    }
+    if (*n >= *cap) {
+      int ncap = *cap ? *cap * 2 : 8;
+      int *grown = realloc(*out, (size_t)ncap * sizeof(int));
+      if (!grown) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      *out = grown; *cap = ncap;
+    }
+    (*out)[(*n)++] = pid;
+  }
+}
+
 void emit_interp(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int n = 0;
-  const int *parts = nt_arr(nt, id, "parts", &n);
+  int *flat = NULL, fcap = 0;
+  interp_flatten(nt, id, &flat, &n, &fcap);
+  const int *parts = flat;
   Buf fmt; memset(&fmt, 0, sizeof fmt);
   Buf argbuf; memset(&argbuf, 0, sizeof argbuf);
   Buf decls; memset(&decls, 0, sizeof decls);  /* rooted %s-arg temp decls */
@@ -121,10 +148,10 @@ void emit_interp(Compiler *c, int id, Buf *b) {
         /* a bare empty array literal interpolates as "[]" */
         int en = 0; nt_arr(nt, expr, "elements", &en);
         if (en == 0) { buf_puts(&fmt, "%s"); buf_puts(&conv, "\"[]\""); }
-        else { free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p); unsupported(c, pid, "interpolation value"); }
+        else { free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p); free(flat); unsupported(c, pid, "interpolation value"); }
       }
       else {
-        free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p);
+        free(fmt.p); free(argbuf.p); free(decls.p); free(conv.p); free(flat);
         unsupported(c, pid, "interpolation value");
       }
       #undef EMIT_IV
@@ -145,7 +172,7 @@ else {
       nargs++;
     }
     else {
-      free(fmt.p); free(argbuf.p);
+      free(fmt.p); free(argbuf.p); free(flat);
       unsupported(c, pid, "interpolation part");
     }
   }
@@ -169,7 +196,7 @@ else {
     buf_printf(b, "({ %ssp_sprintf(\"%s\"%s); })",
                decls.p, fmt.p ? fmt.p : "", argbuf.p ? argbuf.p : "");
   }
-  free(fmt.p); free(argbuf.p); free(decls.p);
+  free(fmt.p); free(argbuf.p); free(decls.p); free(flat);
 }
 
 /* ---- expression ---- */
