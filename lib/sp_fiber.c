@@ -94,6 +94,13 @@ static sp_FiberStore *sp_FiberStore_new(void) {
   s->cap = 8; s->len = 0;
   s->keys = (sp_sym *)malloc(sizeof(sp_sym) * s->cap);
   s->vals = (sp_RbVal *)malloc(sizeof(sp_RbVal) * s->cap);
+  if (!s->keys || !s->vals) {
+    /* If one side succeeded, release it now rather than waiting for the
+       finalizer -- and NULL both so that finalizer's free stays a no-op. */
+    free(s->keys); free(s->vals);
+    s->keys = NULL; s->vals = NULL;
+    sp_raise_cls("NoMemoryError", "failed to allocate fiber storage");
+  }
   return s;
 }
 static sp_RbVal sp_FiberStore_get(sp_FiberStore *s, sp_sym k) {
@@ -103,9 +110,16 @@ static sp_RbVal sp_FiberStore_get(sp_FiberStore *s, sp_sym k) {
 static void sp_FiberStore_set(sp_FiberStore *s, sp_sym k, sp_RbVal v) {
   for (mrb_int i = 0; i < s->len; i++) if (s->keys[i] == k) { s->vals[i] = v; return; }
   if (s->len == s->cap) {
-    s->cap *= 2;
-    s->keys = (sp_sym *)realloc(s->keys, sizeof(sp_sym) * s->cap);
-    s->vals = (sp_RbVal *)realloc(s->vals, sizeof(sp_RbVal) * s->cap);
+    /* Grow each array into a temp and commit only on success, so a failed
+       realloc leaves the store intact (the old buffer survives) instead of
+       NULL-deref'ing on the write below or double-freeing a moved buffer. */
+    mrb_int nc = s->cap * 2;
+    sp_sym *nk = (sp_sym *)realloc(s->keys, sizeof(sp_sym) * nc);
+    if (!nk) sp_raise_cls("NoMemoryError", "failed to grow fiber storage");
+    s->keys = nk;
+    sp_RbVal *nv = (sp_RbVal *)realloc(s->vals, sizeof(sp_RbVal) * nc);
+    if (!nv) sp_raise_cls("NoMemoryError", "failed to grow fiber storage");
+    s->vals = nv; s->cap = nc;
   }
   s->keys[s->len] = k; s->vals[s->len] = v; s->len++;
 }
