@@ -1756,10 +1756,40 @@ int cmethod_has_bare_new(Compiler *c, int mi) {
   return 0;
 }
 
+/* Does the inherited cls method `mi` (defined on def_cls), run as a class method
+   of `ci`, reach a bare cmethod call that resolves to a DIFFERENT method for ci
+   -- directly, or TRANSITIVELY through a non-overriding intermediate cmethod?
+   E.g. `last_row` calls `all_rows` (which ci does not override) calls
+   `table_name` (which ci does): `last_row` reaches an override and so must be
+   specialized for ci too, or its implicit-self chain stays bound to the base and
+   the override is skipped (#1451). The depth cap bounds the walk and doubles as a
+   cycle guard for mutually-recursive cmethods. */
+static int cmethod_reaches_override(Compiler *c, int mi, int ci, int def_cls, int depth) {
+  if (depth > 64) return 0;
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    if (c->nscope[id] != mi) continue;
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;   /* receiverless only */
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !strcmp(nm, "new")) continue;          /* direct `new` is the caller's has_new path */
+    int sub_def = -1;
+    int mci = comp_cmethod_in_chain(c, ci, nm, NULL);
+    int mdef = comp_cmethod_in_chain(c, def_cls, nm, &sub_def);
+    if (mci >= 0 && mci != mdef) return 1;            /* ci overrides nm directly */
+    /* nm is inherited unchanged by ci -- but its own body may still reach an
+       override; descend into the def-chain version. */
+    if (mdef >= 0 && sub_def >= 0 &&
+        cmethod_reaches_override(c, mdef, ci, sub_def, depth + 1)) return 1;
+  }
+  return 0;
+}
+
 /* Does the inherited cls method `mi` (defined on def_cls) contain a bare call
    that would resolve differently when run as a class method of `ci`? That is:
-   a bare `new` (constructs ci), or a bare cmethod call `m` that ci defines but
-   def_cls does not (so the inherited body's `m` means ci's version). */
+   a bare `new` (constructs ci), or a bare cmethod call that resolves to ci's
+   own version directly or transitively (cmethod_reaches_override). */
 int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *has_new) {
   const NodeTable *nt = c->nt;
   int need = 0;
@@ -1771,21 +1801,84 @@ int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *
     if (nt_ref(nt, id, "receiver") >= 0) continue;   /* receiverless only */
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
-    if (!strcmp(nm, "new")) { if (has_new) *has_new = 1; need = 1; continue; }
-    /* a bare cmethod call that resolves to a different method for ci than for
-       the defining class (ci adds or overrides it) */
-    int mci = comp_cmethod_in_chain(c, ci, nm, NULL);
-    int mdef = comp_cmethod_in_chain(c, def_cls, nm, NULL);
-    if (mci >= 0 && mci != mdef) need = 1;
+    if (!strcmp(nm, "new")) { if (has_new) *has_new = 1; need = 1; }
   }
+  if (cmethod_reaches_override(c, mi, ci, def_cls, 0)) need = 1;
   return need;
+}
+
+/* Clone inherited cls method `mi` (defined on def_cls) as a ci-owned copy whose
+   body is re-attributed to ci, so its bare `new` constructs ci and its
+   implicit-self cmethod calls resolve in ci's chain. Then recurse: any bare
+   cmethod call in mi's body that ci inherits unchanged but that itself needs
+   specialization (reaches an override, or does `new`) is cloned for ci too, so
+   the cloned body's implicit-self call rebinds to ci's copy instead of staying
+   on the base -- that transitive rebind is the #1451 fix. The ci-already-owns
+   guard makes this idempotent and terminates mutually-recursive cmethods. */
+static void specialize_cmethod_for(Compiler *c, int mi, int def_cls, int ci) {
+  if (comp_cmethod_in_class(c, ci, c->scopes[mi].name) >= 0) return;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int has_new = 0;
+  (void)cmethod_needs_specialization(c, mi, ci, def_cls, &has_new);
+  int src_body = c->scopes[mi].body;
+  int new_body = src_body >= 0 ? nt_clone_subtree(nt, src_body) : -1;
+  if (src_body >= 0 && new_body < 0) return;  /* clone failed: skip */
+  comp_grow_node_arrays(c);
+  Scope *src = &c->scopes[mi];
+  Scope *dst = comp_scope_new(c, src->name, src->def_node);
+  src = &c->scopes[mi];  /* realloc-safe */
+  int dst_idx = c->nscopes - 1;
+  dst->body = new_body;
+  if (new_body >= 0) walk_scope(c, new_body, dst_idx, ci);
+  dst->class_id = ci;
+  dst->is_cmethod = 1;
+  dst->yields = src->yields;
+  dst->nrequired = src->nrequired;
+  dst->rest_idx = src->rest_idx;
+  dst->kwrest_idx = src->kwrest_idx;
+  /* A bare-`new` create method returns the specialized subclass instance, so
+     pin its return type. Other specializations let normal return inference
+     compute the type from the cloned, ci-attributed body. */
+  if (has_new) {
+    dst->ret = ty_object(ci);
+    dst->ret_specialized = 1;
+  }
+  if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+  dst->nparams = src->nparams;
+  if (src->nparams > 0) {
+    dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
+    dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
+    for (int p = 0; p < src->nparams; p++) {
+      dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
+      dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
+      if (dst->pnames[p]) { LocalVar *lv = scope_local_intern(dst, dst->pnames[p]); lv->is_param = 1; }
+    }
+  }
+  /* Recurse into the inherited intermediates this body reaches. Scan the
+     ORIGINAL mi body (cloned nodes are attributed to dst, not mi); a sub-clone
+     reallocs c->scopes/c->nscope, so use indices and refetch. */
+  int scan_n = nt->count;
+  for (int id = 0; id < scan_n; id++) {
+    if (c->nscope[id] != mi) continue;
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !strcmp(nm, "new")) continue;
+    int sub_def = -1;
+    int sub_mi = comp_cmethod_in_chain(c, ci, nm, &sub_def);
+    if (sub_mi < 0 || sub_def == ci) continue;   /* unresolved, or ci-native */
+    int sub_new = 0;
+    if (cmethod_needs_specialization(c, sub_mi, ci, sub_def, &sub_new))
+      specialize_cmethod_for(c, sub_mi, sub_def, ci);
+  }
 }
 
 /* `Subclass.create` where `create` is an inherited class method whose body
    does `new(...)`: Ruby's bare `new` constructs the *calling* class, so copy
    the inherited cls method into each calling subclass (the copy's class_id
    makes codegen's `new` resolve to that subclass). The defining-class source
-   is DCE'd unless it is itself called directly. Covers #224 / #229. */
+   is DCE'd unless it is itself called directly. Covers #224 / #229 / #1451. */
 void specialize_inherited_cls_new(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int snap = c->nscopes;
@@ -1809,48 +1902,11 @@ void specialize_inherited_cls_new(Compiler *c) {
     if (mi < 0 || def_cls == ci || mi >= snap) continue;     /* not inherited */
     int has_new = 0;
     if (!cmethod_needs_specialization(c, mi, ci, def_cls, &has_new)) continue;
-
-    /* Copy the inherited cls method scope, owned by ci, with its OWN clone of
-       the body AST so locals/dispatches inside resolve against ci (the bare
-       `new` constructs ci, and `instance = new` is typed obj_ci). */
-    int src_body = c->scopes[mi].body;
-    int new_body = src_body >= 0 ? nt_clone_subtree(nt, src_body) : -1;
-    if (src_body >= 0 && new_body < 0) continue;  /* clone failed: skip */
-    comp_grow_node_arrays(c);
-    did_clone = 1;
-    Scope *src = &c->scopes[mi];
-    Scope *dst = comp_scope_new(c, src->name, src->def_node);
-    src = &c->scopes[mi];  /* realloc-safe */
-    int dst_idx = c->nscopes - 1;
-    dst->body = new_body;
-    /* attribute the cloned subtree to the new scope */
-    if (new_body >= 0) walk_scope(c, new_body, dst_idx, ci);
-    dst->class_id = ci;
-    dst->is_cmethod = 1;
-    dst->yields = src->yields;
-    dst->nrequired = src->nrequired;
-    dst->rest_idx = src->rest_idx;
-    dst->kwrest_idx = src->kwrest_idx;
-    /* A bare-`new` create method returns the specialized subclass instance, so
-       pin its return type. Other specializations (a body calling a subclass-
-       specific class method) let the normal return inference compute the type
-       from the cloned, ci-attributed body. */
-    if (has_new) {
-      dst->ret = ty_object(ci);
-      dst->ret_specialized = 1;
-    }
-    if (src->blk_param) dst->blk_param = strdup(src->blk_param);
-    dst->nparams = src->nparams;
-    if (src->nparams > 0) {
-      dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
-      dst->pdefault = malloc(sizeof(int) * (size_t)src->nparams);
-      for (int p = 0; p < src->nparams; p++) {
-        dst->pnames[p] = src->pnames[p] ? strdup(src->pnames[p]) : NULL;
-        dst->pdefault[p] = src->pdefault ? src->pdefault[p] : -1;
-        if (dst->pnames[p]) { LocalVar *lv = scope_local_intern(dst, dst->pnames[p]); lv->is_param = 1; }
-      }
-    }
+    /* Clone mi for ci and, transitively, the inherited intermediates it reaches
+       (#1451). nscopes growth below stands in for the old did_clone flag. */
+    specialize_cmethod_for(c, mi, def_cls, ci);
   }
+  did_clone = (c->nscopes > snap);
   /* DCE the now-shadowed source cls methods that are never called on their
      own defining class. */
   for (int s = 0; s < snap; s++) {
