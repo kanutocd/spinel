@@ -1451,6 +1451,591 @@ else {
   return 0;
 }
 
+static int emit_hash_call(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  const int *argv = NULL;
+  if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+  TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  if (recv >= 0 && ty_is_hash(rt)) {
+    const char *hn = ty_hash_cname(rt);
+    if (hn) {
+      /* Hash#to_proc: a Proc mapping a key to the hash value, closing over the
+         hash. Emit a per-variant lookup fn matching the sp_proc_call ABI. */
+      if (!strcmp(name, "to_proc") && argc == 0) {
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int pn = ++g_proc_counter;
+        const char *keyexpr = (kt == TY_SYMBOL) ? "(sp_sym)args[0]"
+                            : (kt == TY_STRING) ? "(const char *)(uintptr_t)args[0]"
+                            : "args[0]";
+        buf_printf(&g_proc_protos, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args);\n", pn);
+        buf_printf(&g_procs, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args) {\n", pn);
+        buf_printf(&g_procs, "  if (argc < 1) return 0;\n");
+        buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap;\n", hn, hn);
+        if (vt == TY_POLY) {
+          if (!g_needs_proc_poly_retslot) {
+            g_needs_proc_poly_retslot = 1;
+            buf_puts(&g_proc_protos, "static sp_RbVal _sp_proc_poly_ret;\n");
+          }
+          buf_printf(&g_procs, "  _sp_proc_poly_ret = sp_%sHash_get(_h, %s);\n  return 0;\n}\n", hn, keyexpr);
+        }
+        else if (vt == TY_STRING) {
+          buf_printf(&g_procs, "  return (mrb_int)(uintptr_t)sp_%sHash_get(_h, %s);\n}\n", hn, keyexpr);
+        }
+        else {
+          buf_printf(&g_procs, "  return (mrb_int)sp_%sHash_get(_h, %s);\n}\n", hn, keyexpr);
+        }
+        buf_printf(b, "sp_proc_new_meta((void *)_hashproc_%d, (void *)(", pn);
+        emit_expr(c, recv, b);
+        buf_puts(b, "), sp_hashproc_cap_scan, 1, FALSE, 1, NULL, NULL)");
+        return 1;
+      }
+      if ((!strcmp(name, "dup") || !strcmp(name, "clone")) && argc == 0) {
+        buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "[]") && argc == 1) {
+        TyKind arg_kt = comp_ntype(c, argv[0]);
+        TyKind hash_kt = ty_hash_key(rt);
+        /* key type mismatch: sym key on str-keyed hash (or vice versa) -- the key
+           can never exist in the hash, so always return the hash's default value.
+           Exception: a symbol key on a string-keyed hash is coerced to its name
+           (the Hash.new{} StrPolyHash model), so it is NOT a mismatch. */
+        if (hash_kt != TY_POLY && hash_kt != TY_UNKNOWN &&
+            arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt &&
+            !(hash_kt == TY_STRING && arg_kt == TY_SYMBOL)) {
+          TyKind vt = ty_hash_val(rt);
+          int t = ++g_tmp;
+          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b); buf_puts(b, "; ");
+          if (vt == TY_INT) buf_printf(b, "_t%d ? _t%d->default_v : SP_INT_NIL; })", t, t);
+          else if (vt == TY_STRING) buf_printf(b, "_t%d && _t%d->default_v ? _t%d->default_v : (&(\"\\xff\")[1]); })", t, t, t);
+          else buf_printf(b, "_t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
+          return 1;
+        }
+        if (rt == TY_POLY_POLY_HASH) {
+          buf_printf(b, "sp_%sHash_get(", hn);
+          emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        }
+        else {
+          /* int-valued hashes have a nullable get_opt; string-valued use get */
+          const char *getter = ty_hash_val(rt) == TY_INT ? "get_opt" : "get";
+          buf_printf(b, "sp_%sHash_%s(", hn, getter);
+          emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
+        }
+        return 1;
+      }
+      if (!strcmp(name, "dig") && argc >= 1) {
+        TyKind vt = ty_hash_val(rt);
+        TyKind kt = ty_hash_key(rt);
+        /* Static key-type mismatch (string key on sym hash, etc.) -> nil. */
+        TyKind arg0t = comp_ntype(c, argv[0]);
+        if ((kt == TY_SYMBOL && arg0t == TY_STRING) ||
+            (kt == TY_STRING && arg0t == TY_SYMBOL)) {
+          if (vt == TY_INT) buf_puts(b, "SP_INT_NIL");
+          else if (vt == TY_STRING) buf_puts(b, "NULL");
+          else buf_puts(b, "sp_box_nil()");
+          return 1;
+        }
+        const char *getter = vt == TY_INT ? "get_opt" : "get";
+        if (argc == 1) {
+          buf_printf(b, "sp_%sHash_%s(", hn, getter);
+          emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ")");
+        }
+        else {
+          /* multi-step dig: use a compound statement to guarantee
+             left-to-right key-expression evaluation order. */
+          int tr = ++g_tmp, th = ++g_tmp;
+          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th);
+          emit_expr(c, recv, b); buf_puts(b, ";");
+          /* first key -> box to sp_RbVal so remaining steps are uniform */
+          buf_printf(b, " sp_RbVal _t%d = ", tr);
+          if (vt == TY_INT) {
+            int tk0 = ++g_tmp;
+            buf_printf(b, "({ mrb_int _t%d = sp_%sHash_%s(_t%d, ", tk0, hn, getter, th);
+            emit_hash_key(c, argv[0], kt, b);
+            buf_printf(b, "); _t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d); });", tk0, tk0);
+          }
+          else if (vt == TY_STRING) {
+            int tk0 = ++g_tmp;
+            buf_printf(b, "({ const char *_t%d = sp_%sHash_%s(_t%d, ", tk0, hn, getter, th);
+            emit_hash_key(c, argv[0], kt, b);
+            buf_printf(b, "); _t%d ? sp_box_str(_t%d) : sp_box_nil(); });", tk0, tk0);
+          }
+          else {
+            /* TY_POLY: getter already returns sp_RbVal */
+            buf_printf(b, "sp_%sHash_%s(_t%d, ", hn, getter, th);
+            emit_hash_key(c, argv[0], kt, b);
+            buf_puts(b, ");");
+          }
+          /* remaining keys via sp_poly_get_sym / sp_poly_get_str / sp_poly_arr_get */
+          for (int di = 1; di < argc; di++) {
+            int tk = ++g_tmp;
+            /* For poly-keyed hashes (e.g. PolyPolyHash), infer sub-key type
+               from the argument itself rather than from the parent key type. */
+            TyKind dkt = (kt == TY_POLY || kt == TY_UNKNOWN)
+                         ? comp_ntype(c, argv[di]) : kt;
+            if (dkt == TY_SYMBOL) {
+              buf_printf(b, " sp_sym _t%d = ", tk);
+              emit_expr(c, argv[di], b);
+              buf_printf(b, "; _t%d = sp_poly_get_sym(_t%d, _t%d);", tr, tr, tk);
+            }
+            else if (dkt == TY_STRING) {
+              buf_printf(b, " const char *_t%d = ", tk);
+              emit_expr(c, argv[di], b);
+              buf_printf(b, "; _t%d = sp_poly_get_str(_t%d, _t%d);", tr, tr, tk);
+            }
+            else {
+              buf_printf(b, " mrb_int _t%d = ", tk);
+              emit_expr(c, argv[di], b);
+              buf_printf(b, "; _t%d = sp_poly_arr_get_hash(_t%d, _t%d);", tr, tr, tk);
+            }
+          }
+          buf_printf(b, " _t%d; })", tr);
+        }
+        return 1;
+      }
+      if ((!strcmp(name, "values_at") || !strcmp(name, "fetch_values")) && argc >= 1) {
+        /* collect looked-up values into a poly array; values_at yields nil for
+           a missing key, fetch_values raises KeyError */
+        int is_fetch = !strcmp(name, "fetch_values");
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int th = ++g_tmp, tr = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        for (int a = 0; a < argc; a++) {
+          int tk = ++g_tmp;
+          buf_printf(b, " %s _t%d = ", c_type_name(kt), tk); emit_hash_key(c, argv[a], kt, b); buf_puts(b, ";");
+          buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) sp_PolyArray_push(_t%d, ", hn, th, tk, tr);
+          char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+          if (vt == TY_POLY) buf_puts(b, getexpr);
+          else emit_boxed_text(c, vt, getexpr, b);
+          buf_puts(b, ");");
+          if (is_fetch) buf_puts(b, " else sp_raise_cls(\"KeyError\", \"key not found\");");
+          else buf_printf(b, " else sp_PolyArray_push(_t%d, sp_box_nil());", tr);
+        }
+        buf_printf(b, " _t%d; })", tr);
+        return 1;
+      }
+      if (!strcmp(name, "fetch") && argc == 1) {
+        int blk = nt_ref(nt, id, "block");
+        if (blk >= 0) {
+          /* fetch(key) { default } -> has_key? ? get : block-default */
+          TyKind vt = ty_hash_val(rt);
+          int th = ++g_tmp, tk = ++g_tmp;
+          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+          buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+          int bbody = nt_ref(nt, blk, "body");
+          int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
+          int bval = bn > 0 ? bb[bn - 1] : -1;
+          TyKind bvt = bval >= 0 ? comp_ntype(c, bval) : vt;
+          /* When the block's return type differs from the hash value type,
+             box both arms so the ternary produces a consistent sp_RbVal. */
+          int mismatch = vt != TY_POLY && bvt != vt;
+          if (mismatch) {
+            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
+            char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+            emit_boxed_text(c, vt, getexpr, b);
+            buf_puts(b, " : ({ ");
+          }
+else {
+            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ({ ",
+                       hn, th, tk, hn, th, tk);
+          }
+          const char *fp0 = block_param_name(c, blk, 0);  /* fetch yields the key */
+          if (fp0) { buf_printf(b, "lv_%s = _t%d; ", rename_local(fp0), tk); }
+          for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);  /* leading stmts */
+          if (bval >= 0) {
+            if ((vt == TY_POLY || mismatch) && bvt != TY_POLY) emit_boxed(c, bval, b);
+            else emit_expr(c, bval, b);
+          }
+          else buf_puts(b, (vt == TY_POLY || mismatch) ? "sp_box_nil()" : default_value(vt));
+          buf_printf(b, "; }); })");
+          return 1;
+        }
+        /* fetch(key) with no default raises KeyError on a miss */
+        TyKind vt = ty_hash_val(rt);
+        int th = ++g_tmp, tk = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+        buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d)"
+                      " : (sp_raise_cls(\"KeyError\", \"key not found\"), %s); })",
+                   hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
+        return 1;
+      }
+      if (!strcmp(name, "fetch") && argc == 2) {
+        /* fetch(key, default) -> has_key? ? value : default */
+        TyKind vt = ty_hash_val(rt);
+        TyKind dt = comp_ntype(c, argv[1]);
+        /* Empty `{}` default infers TY_UNKNOWN but is a hash — incompatible with int/str etc. */
+        if (dt == TY_UNKNOWN) {
+          const char *atn = nt_type(c->nt, argv[1]);
+          if (atn && (!strcmp(atn, "HashNode") || !strcmp(atn, "KeywordHashNode")))
+            dt = TY_POLY_POLY_HASH;
+        }
+        int needs_box = (vt != TY_POLY && ty_unify(vt, dt) == TY_POLY);
+        int th = ++g_tmp, tk = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+        if (needs_box) {
+          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
+          Buf _bx; memset(&_bx, 0, sizeof _bx);
+          buf_printf(&_bx, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+          emit_boxed_text(c, vt, _bx.p, b);
+          free(_bx.p);
+          buf_puts(b, " : "); emit_boxed(c, argv[1], b);
+        }
+        else {
+          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
+          if (vt == TY_POLY && dt != TY_POLY) emit_boxed(c, argv[1], b);
+          else emit_expr(c, argv[1], b);
+        }
+        buf_puts(b, "; })");
+        return 1;
+      }
+      if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) {
+        buf_printf(b, "sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "empty?") && argc == 0) {
+        buf_printf(b, "(sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        return 1;
+      }
+      if (!strcmp(name, "clear") && argc == 0) {
+        int t = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t);
+        emit_expr(c, recv, b);
+        buf_printf(b, "; sp_%sHash_clear(_t%d); _t%d; })", hn, t, t);
+        return 1;
+      }
+      if ((!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
+           !strcmp(name, "include?") || !strcmp(name, "member?")) && argc == 1) {
+        TyKind arg_kt = comp_ntype(c, argv[0]);
+        TyKind hash_kt = ty_hash_key(rt);
+        if (hash_kt != TY_POLY && arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt) {
+          /* type mismatch (e.g. string arg on sym-keyed hash): always false */
+          buf_puts(b, "0"); return 1;
+        }
+        buf_printf(b, "sp_%sHash_has_key(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], hash_kt, b); buf_puts(b, ")");
+        return 1;
+      }
+      if ((!strcmp(name, "value?") || !strcmp(name, "has_value?")) && argc == 1) {
+        int poly = (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH);
+        buf_printf(b, "sp_%sHash_has_value(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", ");
+        if (poly) emit_boxed(c, argv[0], b); else emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
+        return 1;
+      }
+      /* Hash#key(value): the first key mapping to value (sym-keyed hash). */
+      if (!strcmp(name, "key") && argc == 1 && rt == TY_SYM_POLY_HASH) {
+        buf_puts(b, "sp_SymPolyHash_key(");
+        emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_boxed(c, argv[0], b);
+        buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "replace") && argc == 1 && comp_ntype(c, argv[0]) == rt) {
+        buf_printf(b, "sp_%sHash_replace(", hn);
+        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "default") && argc == 0) {
+        int t = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
+        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
+          buf_printf(b, "; _t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
+        }
+        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
+          buf_printf(b, "; (_t%d && _t%d->default_v != SP_INT_NIL) ? sp_box_int(_t%d->default_v) : sp_box_nil(); })", t, t, t);
+        }
+        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
+          buf_printf(b, "; (_t%d && _t%d->default_v) ? sp_box_str(_t%d->default_v) : sp_box_nil(); })", t, t, t);
+        }
+        else {
+          buf_printf(b, "; (void)_t%d; sp_box_nil(); })", t);
+        }
+        return 1;
+      }
+      if (!strcmp(name, "default=") && argc == 1) {
+        int t = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
+        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_boxed(c, argv[0], b); buf_puts(b, "; ");
+        }
+        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+        }
+        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
+          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
+        }
+        emit_expr(c, argv[0], b); buf_puts(b, "; })"); return 1;
+      }
+      if (!strcmp(name, "keys") && argc == 0 && rt == TY_SYM_POLY_HASH) {
+        /* runtime returns sym ids as an IntArray; box into a poly (sym) array */
+        int ki = ++g_tmp, kp = ++g_tmp, ii = ++g_tmp;
+        buf_printf(b, "({ sp_IntArray *_t%d = sp_SymPolyHash_keys(", ki); emit_expr(c, recv, b);
+        buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", ki, kp, kp);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++)"
+                      " sp_PolyArray_push(_t%d, sp_box_sym((sp_sym)sp_IntArray_get(_t%d, _t%d)));",
+                   ii, ii, ki, ii, kp, ki, ii);
+        buf_printf(b, " _t%d; })", kp);
+        return 1;
+      }
+      if (!strcmp(name, "keys") && argc == 0) {
+        buf_printf(b, "sp_%sHash_keys(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "values") && argc == 0 && rt != TY_INT_INT_HASH) {
+        buf_printf(b, "sp_%sHash_values(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return 1;
+      }
+      if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) {
+        buf_printf(b, "sp_%sHash_inspect(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "merge") && argc == 1 && nt_ref(nt, id, "block") >= 0) {
+        /* merge(other) { |k, v1, v2| } -- conflict-resolution block. The
+           result starts as a copy of the receiver, then each key of `other`
+           is inserted; on a collision the block picks the value. */
+        int blk = nt_ref(nt, id, "block");
+        const char *bp0 = block_param_name(c, blk, 0);
+        const char *bp1 = block_param_name(c, blk, 1);
+        const char *bp2 = block_param_name(c, blk, 2);
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int tr = ++g_tmp, to = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp, tc = ++g_tmp, tj = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", c_type_name(rt), tr, hn, tr);
+        /* copy the receiver into the fresh result */
+        buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
+                      " sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_get(_t%d, _t%d->order[_t%d]));",
+                   tj, tj, tc, tj, hn, tr, tc, tj, hn, tc, tc, tj);
+        buf_printf(b, " %s _t%d = ", c_type_name(rt), to); emit_expr(c, argv[0], b); buf_puts(b, ";");
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, to, ti);
+        buf_printf(b, " %s _t%d = _t%d->order[_t%d];", c_type_name(kt), tk, to, ti);
+        buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) {", hn, tr, tk);
+        if (bp0) buf_printf(b, " lv_%s = _t%d;", rename_local(bp0), tk);
+        if (bp1) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp1), hn, tr, tk);
+        if (bp2) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp2), hn, to, tk);
+        buf_printf(b, " sp_%sHash_set(_t%d, _t%d, ", hn, tr, tk);
+        {
+          int bbody = nt_ref(nt, blk, "body");
+          int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
+          int bval = bn > 0 ? bb[bn - 1] : -1;
+          buf_puts(b, "({ ");
+          for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);
+          if (bval >= 0) {
+            if (vt == TY_POLY && comp_ntype(c, bval) != TY_POLY) emit_boxed(c, bval, b);
+            else emit_expr(c, bval, b);
+          }
+          else buf_puts(b, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
+          buf_puts(b, "; })");
+        }
+        buf_printf(b, "); } else { sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); } }", hn, tr, tk, hn, to, tk);
+        buf_printf(b, " _t%d; })", tr);
+        return 1;
+      }
+      if (!strcmp(name, "merge") && argc == 1 &&
+          (rt == TY_STR_INT_HASH || rt == TY_STR_POLY_HASH || rt == TY_SYM_POLY_HASH ||
+           rt == TY_STR_STR_HASH)) {
+        TyKind at = comp_ntype(c, argv[0]);
+        /* cross-variant str merge: promote both sides to str_poly_hash */
+        if ((rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH) &&
+            ty_is_hash(at) && ty_hash_key(at) == TY_STRING && at != rt) {
+          buf_puts(b, "sp_StrPolyHash_merge(");
+          const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
+                                                   : "sp_StrPolyHash_from_str_str_hash(";
+          buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, "), ");
+          const char *afn = at == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
+                          : at == TY_STR_STR_HASH  ? "sp_StrPolyHash_from_str_str_hash("
+                                                   : NULL;
+          if (afn) { buf_puts(b, afn); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+          else { emit_expr(c, argv[0], b); }
+          buf_puts(b, ")");
+          return 1;
+        }
+        buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
+        /* a str_poly receiver may be merged with a concrete str-keyed hash;
+           coerce the argument to the receiver's variant first */
+        if (rt == TY_STR_POLY_HASH && (at == TY_STR_STR_HASH || at == TY_STR_INT_HASH)) {
+          buf_printf(b, "sp_StrPolyHash_from_%s(", at == TY_STR_STR_HASH ? "str_str_hash" : "str_int_hash");
+          emit_expr(c, argv[0], b); buf_puts(b, ")");
+        }
+        else if (at == TY_POLY) {
+          /* poly arg: unbox to the receiver's hash type */
+          int t = ++g_tmp;
+          buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_expr(c, argv[0], b);
+          buf_printf(b, "; (sp_%sHash*)_t%d.v.p; })", hn, t);
+        }
+        else emit_expr(c, argv[0], b);
+        buf_puts(b, ")");
+        return 1;
+      }
+      if (!strcmp(name, "invert") && argc == 0) {
+        if (rt == TY_STR_STR_HASH) {
+          buf_printf(b, "sp_StrStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_STR_INT_HASH) {
+          buf_printf(b, "sp_StrIntHash_invert_poly("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_INT_STR_HASH) {
+          buf_printf(b, "sp_IntStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else {
+          /* generic: build PolyPolyHash by swapping key/value of each entry */
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          /* key and value access depend on the hash variant */
+          TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+          /* emit key as sp_RbVal */
+          if (kt == TY_SYMBOL)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_sym(_t%d->order[_t%d]);", ti, th, ti);
+          else if (kt == TY_STRING)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_str(_t%d->order[_t%d]);", ti, th, ti);
+          else if (kt == TY_INT)
+            buf_printf(b, " sp_RbVal _k%d = sp_box_int(_t%d->order[_t%d]);", ti, th, ti);
+          else
+            buf_printf(b, " sp_RbVal _k%d = _t%d->keys[_t%d->order[_t%d]];", ti, th, th, ti);
+          /* emit value as sp_RbVal */
+          if (vt == TY_POLY)
+            buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
+          else if (vt == TY_INT) {
+            buf_printf(b, " sp_RbVal _v%d = sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
+          }
+          else {
+            buf_printf(b, " sp_RbVal _v%d = sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
+          }
+          buf_printf(b, " sp_PolyPolyHash_set(_t%d, _v%d, _k%d); }", tr, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
+        return 1;
+      }
+      if (!strcmp(name, "flatten") && argc <= 1) {
+        /* interleave keys and values into a flat PolyArray */
+        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+        if (kt == TY_SYMBOL)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_STRING)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
+        if (vt == TY_POLY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
+        else if (vt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        buf_printf(b, " } _t%d; })", tr);
+        return 1;
+      }
+      if ((!strcmp(name, "assoc") || !strcmp(name, "rassoc")) && argc == 1) {
+        /* find first pair where key==arg (assoc) or value==arg (rassoc); returns [k,v] or nil */
+        int is_rassoc = !strcmp(name, "rassoc");
+        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, ta = ++g_tmp;
+        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
+        /* store argument */
+        if (!is_rassoc) {
+          buf_printf(b, " %s _t%d = ", c_type_name(kt), ta); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ";");
+        }
+        else {
+          /* rassoc: arg has value type */
+          buf_printf(b, " sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b); buf_puts(b, ";");
+        }
+        buf_printf(b, " sp_PolyArray *_t%d = NULL;", tr);
+        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+        if (!is_rassoc) {
+          /* assoc: compare key */
+          if (rt == TY_POLY_POLY_HASH)
+            buf_printf(b, " if (sp_rbval_eql_key(_t%d->keys[_t%d->order[_t%d]], _t%d)) {", th, th, ti, ta);
+          else if (kt == TY_STRING)
+            buf_printf(b, " if (!strcmp(_t%d->order[_t%d], _t%d)) {", th, ti, ta);
+          else
+            buf_printf(b, " if (_t%d->order[_t%d] == _t%d) {", th, ti, ta);
+        }
+        else {
+          /* rassoc: compare value (boxed) */
+          buf_printf(b, " sp_RbVal _rv%d = ", ti);
+          if (vt == TY_POLY) buf_printf(b, "sp_%sHash_get(_t%d, _t%d->order[_t%d]);", hn, th, th, ti);
+          else if (vt == TY_INT) buf_printf(b, "sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
+          else buf_printf(b, "sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
+          buf_printf(b, " if (sp_poly_eq(_rv%d, _t%d)) {", ti, ta);
+        }
+        /* build pair */
+        buf_printf(b, " _t%d = sp_PolyArray_new();", tr);
+        if (kt == TY_SYMBOL)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_STRING)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
+        else if (kt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
+        if (vt == TY_POLY)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
+        else if (vt == TY_INT)
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        else
+          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
+        buf_printf(b, " break; } } _t%d; })", tr);  /* NULL = nil in poly context */
+        return 1;
+      }
+      if (!strcmp(name, "compact") && argc == 0) {
+        TyKind vt = ty_hash_val(rt);
+        if (vt != TY_POLY) {
+          /* Non-poly values can't be nil; compact is equivalent to dup */
+          buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        else if (rt == TY_POLY_POLY_HASH) {
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          buf_printf(b, " sp_RbVal _v%d = _t%d->vals[_t%d->order[_t%d]];", ti, th, th, ti);
+          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_PolyPolyHash_set(_t%d, _t%d->keys[_t%d->order[_t%d]], _v%d); }", ti, tr, th, th, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
+        else {
+          /* SYM_POLY_HASH or other poly-valued hash */
+          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
+          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
+          buf_printf(b, "; sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", hn, tr, hn, tr);
+          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
+          buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
+          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_%sHash_set(_t%d, _t%d->order[_t%d], _v%d); }", ti, hn, tr, th, ti, ti);
+          buf_printf(b, " _t%d; })", tr);
+        }
+        return 1;
+      }
+      if (!strcmp(name, "delete") && argc == 1 &&
+          (rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH || rt == TY_SYM_POLY_HASH ||
+           rt == TY_STR_POLY_HASH)) {
+        /* returns the deleted value (or nil on a miss), then removes the key */
+        TyKind vt = ty_hash_val(rt);
+        int th = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
+        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+        buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
+                   c_type_name(vt), tv, hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
+        buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   /* `require` / `require_relative` is a compile-time directive: top-level ones
@@ -7077,579 +7662,7 @@ else {
     buf_puts(b, "sp_box_nil()");
     return;
   }
-  if (recv >= 0 && ty_is_hash(rt)) {
-    const char *hn = ty_hash_cname(rt);
-    if (hn) {
-      /* Hash#to_proc: a Proc mapping a key to the hash value, closing over the
-         hash. Emit a per-variant lookup fn matching the sp_proc_call ABI. */
-      if (!strcmp(name, "to_proc") && argc == 0) {
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        int pn = ++g_proc_counter;
-        const char *keyexpr = (kt == TY_SYMBOL) ? "(sp_sym)args[0]"
-                            : (kt == TY_STRING) ? "(const char *)(uintptr_t)args[0]"
-                            : "args[0]";
-        buf_printf(&g_proc_protos, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args);\n", pn);
-        buf_printf(&g_procs, "static mrb_int _hashproc_%d(void *cap, mrb_int argc, mrb_int *args) {\n", pn);
-        buf_printf(&g_procs, "  if (argc < 1) return 0;\n");
-        buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap;\n", hn, hn);
-        if (vt == TY_POLY) {
-          if (!g_needs_proc_poly_retslot) {
-            g_needs_proc_poly_retslot = 1;
-            buf_puts(&g_proc_protos, "static sp_RbVal _sp_proc_poly_ret;\n");
-          }
-          buf_printf(&g_procs, "  _sp_proc_poly_ret = sp_%sHash_get(_h, %s);\n  return 0;\n}\n", hn, keyexpr);
-        }
-        else if (vt == TY_STRING) {
-          buf_printf(&g_procs, "  return (mrb_int)(uintptr_t)sp_%sHash_get(_h, %s);\n}\n", hn, keyexpr);
-        }
-        else {
-          buf_printf(&g_procs, "  return (mrb_int)sp_%sHash_get(_h, %s);\n}\n", hn, keyexpr);
-        }
-        buf_printf(b, "sp_proc_new_meta((void *)_hashproc_%d, (void *)(", pn);
-        emit_expr(c, recv, b);
-        buf_puts(b, "), sp_hashproc_cap_scan, 1, FALSE, 1, NULL, NULL)");
-        return;
-      }
-      if ((!strcmp(name, "dup") || !strcmp(name, "clone")) && argc == 0) {
-        buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "[]") && argc == 1) {
-        TyKind arg_kt = comp_ntype(c, argv[0]);
-        TyKind hash_kt = ty_hash_key(rt);
-        /* key type mismatch: sym key on str-keyed hash (or vice versa) -- the key
-           can never exist in the hash, so always return the hash's default value.
-           Exception: a symbol key on a string-keyed hash is coerced to its name
-           (the Hash.new{} StrPolyHash model), so it is NOT a mismatch. */
-        if (hash_kt != TY_POLY && hash_kt != TY_UNKNOWN &&
-            arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt &&
-            !(hash_kt == TY_STRING && arg_kt == TY_SYMBOL)) {
-          TyKind vt = ty_hash_val(rt);
-          int t = ++g_tmp;
-          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b); buf_puts(b, "; ");
-          if (vt == TY_INT) buf_printf(b, "_t%d ? _t%d->default_v : SP_INT_NIL; })", t, t);
-          else if (vt == TY_STRING) buf_printf(b, "_t%d && _t%d->default_v ? _t%d->default_v : (&(\"\\xff\")[1]); })", t, t, t);
-          else buf_printf(b, "_t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
-          return;
-        }
-        if (rt == TY_POLY_POLY_HASH) {
-          buf_printf(b, "sp_%sHash_get(", hn);
-          emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-        }
-        else {
-          /* int-valued hashes have a nullable get_opt; string-valued use get */
-          const char *getter = ty_hash_val(rt) == TY_INT ? "get_opt" : "get";
-          buf_printf(b, "sp_%sHash_%s(", hn, getter);
-          emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
-        }
-        return;
-      }
-      if (!strcmp(name, "dig") && argc >= 1) {
-        TyKind vt = ty_hash_val(rt);
-        TyKind kt = ty_hash_key(rt);
-        /* Static key-type mismatch (string key on sym hash, etc.) -> nil. */
-        TyKind arg0t = comp_ntype(c, argv[0]);
-        if ((kt == TY_SYMBOL && arg0t == TY_STRING) ||
-            (kt == TY_STRING && arg0t == TY_SYMBOL)) {
-          if (vt == TY_INT) buf_puts(b, "SP_INT_NIL");
-          else if (vt == TY_STRING) buf_puts(b, "NULL");
-          else buf_puts(b, "sp_box_nil()");
-          return;
-        }
-        const char *getter = vt == TY_INT ? "get_opt" : "get";
-        if (argc == 1) {
-          buf_printf(b, "sp_%sHash_%s(", hn, getter);
-          emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ")");
-        }
-        else {
-          /* multi-step dig: use a compound statement to guarantee
-             left-to-right key-expression evaluation order. */
-          int tr = ++g_tmp, th = ++g_tmp;
-          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th);
-          emit_expr(c, recv, b); buf_puts(b, ";");
-          /* first key -> box to sp_RbVal so remaining steps are uniform */
-          buf_printf(b, " sp_RbVal _t%d = ", tr);
-          if (vt == TY_INT) {
-            int tk0 = ++g_tmp;
-            buf_printf(b, "({ mrb_int _t%d = sp_%sHash_%s(_t%d, ", tk0, hn, getter, th);
-            emit_hash_key(c, argv[0], kt, b);
-            buf_printf(b, "); _t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d); });", tk0, tk0);
-          }
-          else if (vt == TY_STRING) {
-            int tk0 = ++g_tmp;
-            buf_printf(b, "({ const char *_t%d = sp_%sHash_%s(_t%d, ", tk0, hn, getter, th);
-            emit_hash_key(c, argv[0], kt, b);
-            buf_printf(b, "); _t%d ? sp_box_str(_t%d) : sp_box_nil(); });", tk0, tk0);
-          }
-          else {
-            /* TY_POLY: getter already returns sp_RbVal */
-            buf_printf(b, "sp_%sHash_%s(_t%d, ", hn, getter, th);
-            emit_hash_key(c, argv[0], kt, b);
-            buf_puts(b, ");");
-          }
-          /* remaining keys via sp_poly_get_sym / sp_poly_get_str / sp_poly_arr_get */
-          for (int di = 1; di < argc; di++) {
-            int tk = ++g_tmp;
-            /* For poly-keyed hashes (e.g. PolyPolyHash), infer sub-key type
-               from the argument itself rather than from the parent key type. */
-            TyKind dkt = (kt == TY_POLY || kt == TY_UNKNOWN)
-                         ? comp_ntype(c, argv[di]) : kt;
-            if (dkt == TY_SYMBOL) {
-              buf_printf(b, " sp_sym _t%d = ", tk);
-              emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_get_sym(_t%d, _t%d);", tr, tr, tk);
-            }
-            else if (dkt == TY_STRING) {
-              buf_printf(b, " const char *_t%d = ", tk);
-              emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_get_str(_t%d, _t%d);", tr, tr, tk);
-            }
-            else {
-              buf_printf(b, " mrb_int _t%d = ", tk);
-              emit_expr(c, argv[di], b);
-              buf_printf(b, "; _t%d = sp_poly_arr_get_hash(_t%d, _t%d);", tr, tr, tk);
-            }
-          }
-          buf_printf(b, " _t%d; })", tr);
-        }
-        return;
-      }
-      if ((!strcmp(name, "values_at") || !strcmp(name, "fetch_values")) && argc >= 1) {
-        /* collect looked-up values into a poly array; values_at yields nil for
-           a missing key, fetch_values raises KeyError */
-        int is_fetch = !strcmp(name, "fetch_values");
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        int th = ++g_tmp, tr = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
-        for (int a = 0; a < argc; a++) {
-          int tk = ++g_tmp;
-          buf_printf(b, " %s _t%d = ", c_type_name(kt), tk); emit_hash_key(c, argv[a], kt, b); buf_puts(b, ";");
-          buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) sp_PolyArray_push(_t%d, ", hn, th, tk, tr);
-          char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
-          if (vt == TY_POLY) buf_puts(b, getexpr);
-          else emit_boxed_text(c, vt, getexpr, b);
-          buf_puts(b, ");");
-          if (is_fetch) buf_puts(b, " else sp_raise_cls(\"KeyError\", \"key not found\");");
-          else buf_printf(b, " else sp_PolyArray_push(_t%d, sp_box_nil());", tr);
-        }
-        buf_printf(b, " _t%d; })", tr);
-        return;
-      }
-      if (!strcmp(name, "fetch") && argc == 1) {
-        int blk = nt_ref(nt, id, "block");
-        if (blk >= 0) {
-          /* fetch(key) { default } -> has_key? ? get : block-default */
-          TyKind vt = ty_hash_val(rt);
-          int th = ++g_tmp, tk = ++g_tmp;
-          buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-          buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-          int bbody = nt_ref(nt, blk, "body");
-          int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
-          int bval = bn > 0 ? bb[bn - 1] : -1;
-          TyKind bvt = bval >= 0 ? comp_ntype(c, bval) : vt;
-          /* When the block's return type differs from the hash value type,
-             box both arms so the ternary produces a consistent sp_RbVal. */
-          int mismatch = vt != TY_POLY && bvt != vt;
-          if (mismatch) {
-            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
-            char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
-            emit_boxed_text(c, vt, getexpr, b);
-            buf_puts(b, " : ({ ");
-          }
-else {
-            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ({ ",
-                       hn, th, tk, hn, th, tk);
-          }
-          const char *fp0 = block_param_name(c, blk, 0);  /* fetch yields the key */
-          if (fp0) { buf_printf(b, "lv_%s = _t%d; ", rename_local(fp0), tk); }
-          for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);  /* leading stmts */
-          if (bval >= 0) {
-            if ((vt == TY_POLY || mismatch) && bvt != TY_POLY) emit_boxed(c, bval, b);
-            else emit_expr(c, bval, b);
-          }
-          else buf_puts(b, (vt == TY_POLY || mismatch) ? "sp_box_nil()" : default_value(vt));
-          buf_printf(b, "; }); })");
-          return;
-        }
-        /* fetch(key) with no default raises KeyError on a miss */
-        TyKind vt = ty_hash_val(rt);
-        int th = ++g_tmp, tk = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-        buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d)"
-                      " : (sp_raise_cls(\"KeyError\", \"key not found\"), %s); })",
-                   hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
-        return;
-      }
-      if (!strcmp(name, "fetch") && argc == 2) {
-        /* fetch(key, default) -> has_key? ? value : default */
-        TyKind vt = ty_hash_val(rt);
-        TyKind dt = comp_ntype(c, argv[1]);
-        /* Empty `{}` default infers TY_UNKNOWN but is a hash — incompatible with int/str etc. */
-        if (dt == TY_UNKNOWN) {
-          const char *atn = nt_type(c->nt, argv[1]);
-          if (atn && (!strcmp(atn, "HashNode") || !strcmp(atn, "KeywordHashNode")))
-            dt = TY_POLY_POLY_HASH;
-        }
-        int needs_box = (vt != TY_POLY && ty_unify(vt, dt) == TY_POLY);
-        int th = ++g_tmp, tk = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-        if (needs_box) {
-          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
-          Buf _bx; memset(&_bx, 0, sizeof _bx);
-          buf_printf(&_bx, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
-          emit_boxed_text(c, vt, _bx.p, b);
-          free(_bx.p);
-          buf_puts(b, " : "); emit_boxed(c, argv[1], b);
-        }
-        else {
-          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
-          if (vt == TY_POLY && dt != TY_POLY) emit_boxed(c, argv[1], b);
-          else emit_expr(c, argv[1], b);
-        }
-        buf_puts(b, "; })");
-        return;
-      }
-      if ((!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "count")) && argc == 0) {
-        buf_printf(b, "sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "empty?") && argc == 0) {
-        buf_printf(b, "(sp_%sHash_length(", hn); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
-        return;
-      }
-      if (!strcmp(name, "clear") && argc == 0) {
-        int t = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t);
-        emit_expr(c, recv, b);
-        buf_printf(b, "; sp_%sHash_clear(_t%d); _t%d; })", hn, t, t);
-        return;
-      }
-      if ((!strcmp(name, "has_key?") || !strcmp(name, "key?") ||
-           !strcmp(name, "include?") || !strcmp(name, "member?")) && argc == 1) {
-        TyKind arg_kt = comp_ntype(c, argv[0]);
-        TyKind hash_kt = ty_hash_key(rt);
-        if (hash_kt != TY_POLY && arg_kt != TY_POLY && arg_kt != TY_UNKNOWN && arg_kt != hash_kt) {
-          /* type mismatch (e.g. string arg on sym-keyed hash): always false */
-          buf_puts(b, "0"); return;
-        }
-        buf_printf(b, "sp_%sHash_has_key(", hn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], hash_kt, b); buf_puts(b, ")");
-        return;
-      }
-      if ((!strcmp(name, "value?") || !strcmp(name, "has_value?")) && argc == 1) {
-        int poly = (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH);
-        buf_printf(b, "sp_%sHash_has_value(", hn);
-        emit_expr(c, recv, b); buf_puts(b, ", ");
-        if (poly) emit_boxed(c, argv[0], b); else emit_expr(c, argv[0], b);
-        buf_puts(b, ")");
-        return;
-      }
-      /* Hash#key(value): the first key mapping to value (sym-keyed hash). */
-      if (!strcmp(name, "key") && argc == 1 && rt == TY_SYM_POLY_HASH) {
-        buf_puts(b, "sp_SymPolyHash_key(");
-        emit_expr(c, recv, b); buf_puts(b, ", ");
-        emit_boxed(c, argv[0], b);
-        buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "replace") && argc == 1 && comp_ntype(c, argv[0]) == rt) {
-        buf_printf(b, "sp_%sHash_replace(", hn);
-        emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "default") && argc == 0) {
-        int t = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
-        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
-          buf_printf(b, "; _t%d ? _t%d->default_v : sp_box_nil(); })", t, t);
-        }
-        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
-          buf_printf(b, "; (_t%d && _t%d->default_v != SP_INT_NIL) ? sp_box_int(_t%d->default_v) : sp_box_nil(); })", t, t, t);
-        }
-        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
-          buf_printf(b, "; (_t%d && _t%d->default_v) ? sp_box_str(_t%d->default_v) : sp_box_nil(); })", t, t, t);
-        }
-        else {
-          buf_printf(b, "; (void)_t%d; sp_box_nil(); })", t);
-        }
-        return;
-      }
-      if (!strcmp(name, "default=") && argc == 1) {
-        int t = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
-        if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
-          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_boxed(c, argv[0], b); buf_puts(b, "; ");
-        }
-        else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
-          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
-        }
-        else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
-          buf_printf(b, "; if (_t%d) _t%d->default_v = ", t, t); emit_expr(c, argv[0], b); buf_puts(b, "; ");
-        }
-        emit_expr(c, argv[0], b); buf_puts(b, "; })"); return;
-      }
-      if (!strcmp(name, "keys") && argc == 0 && rt == TY_SYM_POLY_HASH) {
-        /* runtime returns sym ids as an IntArray; box into a poly (sym) array */
-        int ki = ++g_tmp, kp = ++g_tmp, ii = ++g_tmp;
-        buf_printf(b, "({ sp_IntArray *_t%d = sp_SymPolyHash_keys(", ki); emit_expr(c, recv, b);
-        buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", ki, kp, kp);
-        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++)"
-                      " sp_PolyArray_push(_t%d, sp_box_sym((sp_sym)sp_IntArray_get(_t%d, _t%d)));",
-                   ii, ii, ki, ii, kp, ki, ii);
-        buf_printf(b, " _t%d; })", kp);
-        return;
-      }
-      if (!strcmp(name, "keys") && argc == 0) {
-        buf_printf(b, "sp_%sHash_keys(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "values") && argc == 0 && rt != TY_INT_INT_HASH) {
-        buf_printf(b, "sp_%sHash_values(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        return;
-      }
-      if ((!strcmp(name, "inspect") || !strcmp(name, "to_s")) && argc == 0) {
-        buf_printf(b, "sp_%sHash_inspect(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "merge") && argc == 1 && nt_ref(nt, id, "block") >= 0) {
-        /* merge(other) { |k, v1, v2| } -- conflict-resolution block. The
-           result starts as a copy of the receiver, then each key of `other`
-           is inserted; on a collision the block picks the value. */
-        int blk = nt_ref(nt, id, "block");
-        const char *bp0 = block_param_name(c, blk, 0);
-        const char *bp1 = block_param_name(c, blk, 1);
-        const char *bp2 = block_param_name(c, blk, 2);
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        int tr = ++g_tmp, to = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp, tc = ++g_tmp, tj = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", c_type_name(rt), tr, hn, tr);
-        /* copy the receiver into the fresh result */
-        buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
-        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
-                      " sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_get(_t%d, _t%d->order[_t%d]));",
-                   tj, tj, tc, tj, hn, tr, tc, tj, hn, tc, tc, tj);
-        buf_printf(b, " %s _t%d = ", c_type_name(rt), to); emit_expr(c, argv[0], b); buf_puts(b, ";");
-        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, to, ti);
-        buf_printf(b, " %s _t%d = _t%d->order[_t%d];", c_type_name(kt), tk, to, ti);
-        buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) {", hn, tr, tk);
-        if (bp0) buf_printf(b, " lv_%s = _t%d;", rename_local(bp0), tk);
-        if (bp1) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp1), hn, tr, tk);
-        if (bp2) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp2), hn, to, tk);
-        buf_printf(b, " sp_%sHash_set(_t%d, _t%d, ", hn, tr, tk);
-        {
-          int bbody = nt_ref(nt, blk, "body");
-          int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
-          int bval = bn > 0 ? bb[bn - 1] : -1;
-          buf_puts(b, "({ ");
-          for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);
-          if (bval >= 0) {
-            if (vt == TY_POLY && comp_ntype(c, bval) != TY_POLY) emit_boxed(c, bval, b);
-            else emit_expr(c, bval, b);
-          }
-          else buf_puts(b, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
-          buf_puts(b, "; })");
-        }
-        buf_printf(b, "); } else { sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); } }", hn, tr, tk, hn, to, tk);
-        buf_printf(b, " _t%d; })", tr);
-        return;
-      }
-      if (!strcmp(name, "merge") && argc == 1 &&
-          (rt == TY_STR_INT_HASH || rt == TY_STR_POLY_HASH || rt == TY_SYM_POLY_HASH ||
-           rt == TY_STR_STR_HASH)) {
-        TyKind at = comp_ntype(c, argv[0]);
-        /* cross-variant str merge: promote both sides to str_poly_hash */
-        if ((rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH) &&
-            ty_is_hash(at) && ty_hash_key(at) == TY_STRING && at != rt) {
-          buf_puts(b, "sp_StrPolyHash_merge(");
-          const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
-                                                   : "sp_StrPolyHash_from_str_str_hash(";
-          buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, "), ");
-          const char *afn = at == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
-                          : at == TY_STR_STR_HASH  ? "sp_StrPolyHash_from_str_str_hash("
-                                                   : NULL;
-          if (afn) { buf_puts(b, afn); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-          else { emit_expr(c, argv[0], b); }
-          buf_puts(b, ")");
-          return;
-        }
-        buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
-        /* a str_poly receiver may be merged with a concrete str-keyed hash;
-           coerce the argument to the receiver's variant first */
-        if (rt == TY_STR_POLY_HASH && (at == TY_STR_STR_HASH || at == TY_STR_INT_HASH)) {
-          buf_printf(b, "sp_StrPolyHash_from_%s(", at == TY_STR_STR_HASH ? "str_str_hash" : "str_int_hash");
-          emit_expr(c, argv[0], b); buf_puts(b, ")");
-        }
-        else if (at == TY_POLY) {
-          /* poly arg: unbox to the receiver's hash type */
-          int t = ++g_tmp;
-          buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_expr(c, argv[0], b);
-          buf_printf(b, "; (sp_%sHash*)_t%d.v.p; })", hn, t);
-        }
-        else emit_expr(c, argv[0], b);
-        buf_puts(b, ")");
-        return;
-      }
-      if (!strcmp(name, "invert") && argc == 0) {
-        if (rt == TY_STR_STR_HASH) {
-          buf_printf(b, "sp_StrStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
-        }
-        else if (rt == TY_STR_INT_HASH) {
-          buf_printf(b, "sp_StrIntHash_invert_poly("); emit_expr(c, recv, b); buf_puts(b, ")");
-        }
-        else if (rt == TY_INT_STR_HASH) {
-          buf_printf(b, "sp_IntStrHash_invert("); emit_expr(c, recv, b); buf_puts(b, ")");
-        }
-        else {
-          /* generic: build PolyPolyHash by swapping key/value of each entry */
-          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
-          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
-          /* key and value access depend on the hash variant */
-          TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-          /* emit key as sp_RbVal */
-          if (kt == TY_SYMBOL)
-            buf_printf(b, " sp_RbVal _k%d = sp_box_sym(_t%d->order[_t%d]);", ti, th, ti);
-          else if (kt == TY_STRING)
-            buf_printf(b, " sp_RbVal _k%d = sp_box_str(_t%d->order[_t%d]);", ti, th, ti);
-          else if (kt == TY_INT)
-            buf_printf(b, " sp_RbVal _k%d = sp_box_int(_t%d->order[_t%d]);", ti, th, ti);
-          else
-            buf_printf(b, " sp_RbVal _k%d = _t%d->keys[_t%d->order[_t%d]];", ti, th, th, ti);
-          /* emit value as sp_RbVal */
-          if (vt == TY_POLY)
-            buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
-          else if (vt == TY_INT) {
-            buf_printf(b, " sp_RbVal _v%d = sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
-          }
-          else {
-            buf_printf(b, " sp_RbVal _v%d = sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
-          }
-          buf_printf(b, " sp_PolyPolyHash_set(_t%d, _v%d, _k%d); }", tr, ti, ti);
-          buf_printf(b, " _t%d; })", tr);
-        }
-        return;
-      }
-      if (!strcmp(name, "flatten") && argc <= 1) {
-        /* interleave keys and values into a flat PolyArray */
-        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
-        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
-        if (kt == TY_SYMBOL)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
-        else if (kt == TY_STRING)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
-        else if (kt == TY_INT)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
-        else
-          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
-        if (vt == TY_POLY)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
-        else if (vt == TY_INT)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
-        else
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
-        buf_printf(b, " } _t%d; })", tr);
-        return;
-      }
-      if ((!strcmp(name, "assoc") || !strcmp(name, "rassoc")) && argc == 1) {
-        /* find first pair where key==arg (assoc) or value==arg (rassoc); returns [k,v] or nil */
-        int is_rassoc = !strcmp(name, "rassoc");
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, ta = ++g_tmp;
-        buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
-        /* store argument */
-        if (!is_rassoc) {
-          buf_printf(b, " %s _t%d = ", c_type_name(kt), ta); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ";");
-        }
-        else {
-          /* rassoc: arg has value type */
-          buf_printf(b, " sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b); buf_puts(b, ";");
-        }
-        buf_printf(b, " sp_PolyArray *_t%d = NULL;", tr);
-        buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
-        if (!is_rassoc) {
-          /* assoc: compare key */
-          if (rt == TY_POLY_POLY_HASH)
-            buf_printf(b, " if (sp_rbval_eql_key(_t%d->keys[_t%d->order[_t%d]], _t%d)) {", th, th, ti, ta);
-          else if (kt == TY_STRING)
-            buf_printf(b, " if (!strcmp(_t%d->order[_t%d], _t%d)) {", th, ti, ta);
-          else
-            buf_printf(b, " if (_t%d->order[_t%d] == _t%d) {", th, ti, ta);
-        }
-        else {
-          /* rassoc: compare value (boxed) */
-          buf_printf(b, " sp_RbVal _rv%d = ", ti);
-          if (vt == TY_POLY) buf_printf(b, "sp_%sHash_get(_t%d, _t%d->order[_t%d]);", hn, th, th, ti);
-          else if (vt == TY_INT) buf_printf(b, "sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
-          else buf_printf(b, "sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", hn, th, th, ti);
-          buf_printf(b, " if (sp_poly_eq(_rv%d, _t%d)) {", ti, ta);
-        }
-        /* build pair */
-        buf_printf(b, " _t%d = sp_PolyArray_new();", tr);
-        if (kt == TY_SYMBOL)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_sym(_t%d->order[_t%d]));", tr, th, ti);
-        else if (kt == TY_STRING)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(_t%d->order[_t%d]));", tr, th, ti);
-        else if (kt == TY_INT)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d->order[_t%d]));", tr, th, ti);
-        else
-          buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", tr, th, th, ti);
-        if (vt == TY_POLY)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
-        else if (vt == TY_INT)
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
-        else
-          buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
-        buf_printf(b, " break; } } _t%d; })", tr);  /* NULL = nil in poly context */
-        return;
-      }
-      if (!strcmp(name, "compact") && argc == 0) {
-        TyKind vt = ty_hash_val(rt);
-        if (vt != TY_POLY) {
-          /* Non-poly values can't be nil; compact is equivalent to dup */
-          buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
-        }
-        else if (rt == TY_POLY_POLY_HASH) {
-          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-          buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_expr(c, recv, b);
-          buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
-          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
-          buf_printf(b, " sp_RbVal _v%d = _t%d->vals[_t%d->order[_t%d]];", ti, th, th, ti);
-          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_PolyPolyHash_set(_t%d, _t%d->keys[_t%d->order[_t%d]], _v%d); }", ti, tr, th, th, ti, ti);
-          buf_printf(b, " _t%d; })", tr);
-        }
-        else {
-          /* SYM_POLY_HASH or other poly-valued hash */
-          int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-          buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-          buf_printf(b, "; sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", hn, tr, hn, tr);
-          buf_printf(b, " for (mrb_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
-          buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
-          buf_printf(b, " if (!sp_poly_nil_p(_v%d)) sp_%sHash_set(_t%d, _t%d->order[_t%d], _v%d); }", ti, hn, tr, th, ti, ti);
-          buf_printf(b, " _t%d; })", tr);
-        }
-        return;
-      }
-      if (!strcmp(name, "delete") && argc == 1 &&
-          (rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH || rt == TY_SYM_POLY_HASH ||
-           rt == TY_STR_POLY_HASH)) {
-        /* returns the deleted value (or nil on a miss), then removes the key */
-        TyKind vt = ty_hash_val(rt);
-        int th = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-        buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
-                   c_type_name(vt), tv, hn, th, tk, hn, th, tk, vt == TY_POLY ? "sp_box_nil()" : default_value(vt));
-        buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
-        return;
-      }
-    }
-  }
+  if (emit_hash_call(c, id, b)) return;
 
   /* `arr[i] = v` in expression position: do the store, evaluate to the rhs
      (Ruby []= returns the assigned value). The statement form is emitted
