@@ -6864,6 +6864,16 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     }
   }
 
+  /* The fully dynamic form (class held in a variable, or a non-literal method
+     name) cannot be answered ahead of time: there is no runtime reflection
+     table, and builtin classes have no enumerable method set. Emit a specific
+     diagnostic rather than a generic unsupported-call node dump. Covers both an
+     explicit receiver and an implicit-self call (recv < 0). */
+  if (!strcmp(name, "method_defined?")) {
+    unsupported(c, id, "method_defined? (needs a compile-time-known class and literal method name)");
+    return;
+  }
+
   /* Class.const_defined?(:K): compile-time presence check. Constants are
      recorded in a flat namespace, so this consults the global const and class
      tables rather than the receiver's own constants. */
