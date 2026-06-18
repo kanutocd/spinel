@@ -5029,6 +5029,77 @@ static mrb_int sp_catch_val[SP_CATCH_STACK_MAX];
 static volatile int sp_catch_top = 0;
 static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, "uncaught throw: %s\n", tag); exit(1); }
 
+/* ---- Per-fiber exception/catch handler context (#1474) -------------------
+   The handler stacks above are process-global, but begin/rescue handlers and
+   catch tags are stack-frame-bound: a fiber that yields while holding one must
+   not let another fiber's raise/throw longjmp into its suspended frame. So
+   sp_fiber.c saves the live prefix [0..top] of every handler array into the
+   outgoing fiber's context and loads the incoming fiber's at each switch; the
+   arrays then never alias across fibers. Only the active prefix is copied
+   (top == 0 for a fiber that never rescues, e.g. optcarrot's PPU, so it is
+   free there). These are non-static: reached by name from libspinel_rt.a. */
+typedef struct {
+  jmp_buf *es; const char **em; const char **ec; void **eo; int en, ecap;
+  jmp_buf *cs; const char **ct; mrb_int *cv;              int cn, ccap;
+} sp_exc_ctx_t;
+
+void *sp_exc_ctx_new(void) { return calloc(1, sizeof(sp_exc_ctx_t)); }
+void sp_exc_ctx_free(void *p) {
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  if (!x) return;
+  free(x->es); free(x->em); free(x->ec); free(x->eo);
+  free(x->cs); free(x->ct); free(x->cv); free(x);
+}
+void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  int n = sp_exc_top;
+  if (n > x->ecap) { x->ecap = n;
+    x->es = (jmp_buf *)realloc(x->es, sizeof(jmp_buf) * n);
+    x->em = (const char **)realloc(x->em, sizeof(char *) * n);
+    x->ec = (const char **)realloc(x->ec, sizeof(char *) * n);
+    x->eo = (void **)realloc(x->eo, sizeof(void *) * n); }
+  for (int i = 0; i < n; i++) { memcpy(x->es[i], sp_exc_stack[i], sizeof(jmp_buf));
+    x->em[i] = sp_exc_msg[i]; x->ec[i] = sp_exc_cls[i]; x->eo[i] = sp_exc_obj[i]; }
+  x->en = n;
+  int m = sp_catch_top;
+  if (m > x->ccap) { x->ccap = m;
+    x->cs = (jmp_buf *)realloc(x->cs, sizeof(jmp_buf) * m);
+    x->ct = (const char **)realloc(x->ct, sizeof(char *) * m);
+    x->cv = (mrb_int *)realloc(x->cv, sizeof(mrb_int) * m); }
+  for (int i = 0; i < m; i++) { memcpy(x->cs[i], sp_catch_stack[i], sizeof(jmp_buf));
+    x->ct[i] = sp_catch_tag[i]; x->cv[i] = sp_catch_val[i]; }
+  x->cn = m;
+}
+void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  for (int i = 0; i < x->en; i++) { memcpy(sp_exc_stack[i], x->es[i], sizeof(jmp_buf));
+    sp_exc_msg[i] = x->em[i]; sp_exc_cls[i] = x->ec[i]; sp_exc_obj[i] = x->eo[i]; }
+  sp_exc_top = x->en;
+  for (int i = 0; i < x->cn; i++) { memcpy(sp_catch_stack[i], x->cs[i], sizeof(jmp_buf));
+    sp_catch_tag[i] = x->ct[i]; sp_catch_val[i] = x->cv[i]; }
+  sp_catch_top = x->cn;
+}
+void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carried exc objects */
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  if (!x) return;
+  for (int i = 0; i < x->en; i++) if (x->eo[i]) sp_gc_mark(x->eo[i]);
+}
+/* Trampoline base handler (#1474): the fiber trampoline arms a copy of its own
+   setjmp buffer as the fiber's lowest handler, so an otherwise-unhandled raise
+   in the fiber body unwinds back to the trampoline (on the fiber's own stack)
+   instead of exiting or long-jumping across to the resumer. */
+void sp_exc_arm(jmp_buf b)     { memcpy(sp_exc_stack[sp_exc_top], b, sizeof(jmp_buf)); sp_exc_top++; }
+void sp_exc_disarm(void)       { if (sp_exc_top > 0) sp_exc_top--; }
+const char *sp_exc_cur_cls(void) { return sp_exc_top > 0 ? sp_exc_cls[sp_exc_top-1] : sp_str_empty; }
+const char *sp_exc_cur_msg(void) { return sp_exc_top > 0 ? sp_exc_msg[sp_exc_top-1] : sp_str_empty; }
+void *sp_exc_cur_obj(void)       { return sp_exc_top > 0 ? sp_exc_obj[sp_exc_top-1] : NULL; }
+/* Re-raise a fiber's unhandled exception in the resumer's context (the fiber
+   trampoline caught it on the fiber's stack, then returned cooperatively). */
+void sp_fiber_reraise(const char *cls, const char *msg, void *obj) {
+  if (obj) sp_pending_exc_obj = obj;
+  sp_raise_cls(cls, msg);
+}
+
 /* Kernel#sleep with sub-second precision. Argument is seconds as a
    double so `sleep(0.5)` actually waits 500ms; the legacy `sleep((unsigned)0.5)`
    cast truncated to 0 and returned immediately. POSIX uses
