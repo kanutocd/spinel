@@ -862,7 +862,8 @@ else {
         return TY_STRING;
       if (!strcmp(name, "exist?") || !strcmp(name, "exists?"))
         return TY_BOOL;
-      if (!strcmp(name, "write") || !strcmp(name, "binwrite") || !strcmp(name, "delete"))
+      if (!strcmp(name, "write") || !strcmp(name, "binwrite") || !strcmp(name, "delete") ||
+          !strcmp(name, "size"))
         return TY_INT;
       if (!strcmp(name, "readable?") || !strcmp(name, "directory?") || !strcmp(name, "file?") ||
           !strcmp(name, "zero?") || !strcmp(name, "empty?"))

@@ -5109,6 +5109,21 @@ static sp_Time sp_file_mtime(const char *path) {
   return (sp_Time){(int64_t)st.st_mtim.tv_sec, (int32_t)st.st_mtim.tv_nsec, 0};
 #endif
 }
+/* File.size(path) -> byte size. Raises Errno::ENOENT on a missing path,
+   matching MRI (and sp_file_read / sp_file_mtime, which stat/open the
+   same way). */
+static mrb_int sp_file_size(const char *path) {
+  if (!path) {
+    sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+    return 0;
+  }
+  struct stat st;
+  if (stat(path, &st) == -1) {
+    sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" : "RuntimeError", sp_sprintf("%s @ File.size - %s", strerror(errno), path));
+    return 0;
+  }
+  return (mrb_int)st.st_size;
+}
 static const char *sp_backtick(const char *cmd) {
   FILE *p = popen(cmd, "r");
   if (!p) { sp_last_status = -1; return sp_str_empty; }
