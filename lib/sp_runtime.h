@@ -1423,6 +1423,24 @@ static const char*sp_float_to_s(mrb_float f){
   out[o]=0;sp_str_set_len(out,(size_t)o);return out;
 }
 #define sp_float_inspect sp_float_to_s
+
+/* Bound-checked clamp. The arithmetic lives in the compiled-once leaf
+   helpers (sp_core.c); the validation rides here because it needs the
+   error-message machinery (sp_sprintf) and Ruby float inspect, neither of
+   which the decoupled sp_core.c TU links against. CRuby's Comparable#clamp
+   compares min<=>max first (so a NaN bound names max), then self against
+   each bound (so a NaN receiver names min); a non-NaN min>max is the
+   ordinary ArgumentError. */
+static inline mrb_int sp_int_clamp_ck(mrb_int v,mrb_int lo,mrb_int hi){
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  return sp_int_clamp(v,lo,hi);
+}
+static inline mrb_float sp_float_clamp_ck(mrb_float v,mrb_float lo,mrb_float hi){
+  if(lo!=lo||hi!=hi)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(hi)));
+  if(lo>hi)sp_raise_cls("ArgumentError","min argument must be less than or equal to max argument");
+  if(v!=v)sp_raise_cls("ArgumentError",sp_sprintf("comparison of Float with %s failed",sp_float_to_s(lo)));
+  return sp_float_clamp(v,lo,hi);
+}
 /* String#inspect: wrap in double quotes and escape \, ", \n, \t, \r,
    plus any non-printable byte as \xNN. Output is always ASCII-safe. */
 static const char*sp_str_inspect(const char*s){if(!s){char*r=sp_str_alloc_raw(4);r[0]='n';r[1]='i';r[2]='l';r[3]=0;return r;}size_t sl=sp_str_byte_len(s);size_t cap=sl*4+3;char*r=sp_str_alloc_raw(cap);size_t o=0;r[o++]='"';for(size_t i=0;i<sl;i++){unsigned char c=(unsigned char)s[i];if(c=='\\'||c=='"'){r[o++]='\\';r[o++]=c;}else if(c=='\n'){r[o++]='\\';r[o++]='n';}else if(c=='\t'){r[o++]='\\';r[o++]='t';}else if(c=='\r'){r[o++]='\\';r[o++]='r';}else if(c<0x20||c==0x7f){snprintf(r+o,5,"\\x%02X",c);o+=4;}else{r[o++]=(char)c;}}r[o++]='"';r[o]=0;sp_str_set_len(r,o);return r;}
