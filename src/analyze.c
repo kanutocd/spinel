@@ -2327,5 +2327,48 @@ void analyze_program(Compiler *c) {
     TyKind lt = comp_ntype(c, st[n - 1]);
     if (ty_is_object(lt)) { int q = ty_object_class(lt); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
   }
+
+  /* Reconcile a hash literal's node type with the variable it initializes.
+     A literal like `{ begin: ... }` infers a narrow variant (SYM_POLY_HASH)
+     from its own keys, but the variable may later be promoted to a wider hash
+     (e.g. POLY_POLY_HASH from a mixed-key `dic[sym_or_int] = ...`). Codegen
+     emits the literal from its own node type, so without this the constructor
+     (sp_SymPolyHash_new) disagrees with the variable's declared C type
+     (sp_PolyPolyHash *) -- an incompatible-pointer assignment that corrupts
+     the hash at runtime. Align the literal to the variable's type so the right
+     constructor and key/value boxing are emitted. Widen only (the variable
+     type is the union over all writes, so it is never narrower). */
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty) continue;
+    int is_lv = !strcmp(ty, "LocalVariableWriteNode");
+    int is_iv = !strcmp(ty, "InstanceVariableWriteNode");
+    if (!is_lv && !is_iv) continue;
+    int v = nt_ref(c->nt, id, "value");
+    if (v < 0) continue;
+    const char *vty = nt_type(c->nt, v);
+    if (!vty || (strcmp(vty, "HashNode") && strcmp(vty, "KeywordHashNode"))) continue;
+    TyKind litt = c->ntype[v];
+    if (!ty_is_hash(litt)) continue;
+    const char *nm = nt_str(c->nt, id, "name");
+    if (!nm) continue;
+    TyKind dstt = TY_UNKNOWN;
+    if (is_lv) {
+      Scope *s = comp_scope_of(c, id);
+      LocalVar *lv = s ? scope_local(s, nm) : NULL;
+      if (lv) dstt = lv->type;
+    } else {
+      Scope *s = comp_scope_of(c, id);
+      if (s && s->class_id >= 0) {
+        int iv = comp_ivar_index(&c->classes[s->class_id], nm);
+        if (iv >= 0) dstt = c->classes[s->class_id].ivar_types[iv];
+      }
+    }
+    /* Only widen toward POLY_POLY_HASH, the universally-boxed variant whose
+       constructor accepts any keys/values -- a safe target for any narrower
+       literal. Other cross-variant widenings are left alone. */
+    if (dstt == TY_POLY_POLY_HASH && litt != TY_POLY_POLY_HASH)
+      c->ntype[v] = dstt;
+  }
 }
 
