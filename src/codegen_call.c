@@ -5299,6 +5299,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     else if (!strcmp(name, "max")) pm = "sp_poly_max";
     else if (!strcmp(name, "first")) pm = "sp_poly_first";
     else if (!strcmp(name, "last")) pm = "sp_poly_last";
+    /* a Thread (Fiber-modelled) carried through a poly slot: #value/#resume/#join
+       dispatch on the boxed Fiber when no user class defines the name (#1261). */
+    else if (!strcmp(name, "value") || !strcmp(name, "resume")) pm = "sp_poly_fiber_value";
+    else if (!strcmp(name, "join")) pm = "sp_poly_fiber_join";
     if (pm) {
       int ncand = 0;
       for (int k = 0; k < c->nclasses; k++)

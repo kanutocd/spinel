@@ -4501,6 +4501,27 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
   mrb_int n = sp_poly_length(v);
   return n > 0 ? sp_poly_arr_get(v, n - 1) : sp_box_nil();
 }
+/* Thread#value / #join through a poly slot. A Thread is modelled as a Fiber run
+   to completion (single-threaded); when one is carried in a poly value -- e.g.
+   an array of Threads, `(1..n).map { Thread.new { ... } }` -- #value/#join must
+   dispatch at runtime on the boxed Fiber. value/resume return the block's
+   result; join runs it and returns the thread (self). A non-Fiber poly returns
+   nil, matching the NoMethodError gate for an unknown poly method. */
+static sp_RbVal sp_poly_fiber_value(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FIBER) {
+    sp_Fiber *f = (sp_Fiber *)v.v.p;
+    if (f->state == 3) return f->yielded_value;   /* already run: cached result, idempotent */
+    return sp_Fiber_resume(f, sp_box_nil());
+  }
+  return sp_box_nil();
+}
+static sp_RbVal sp_poly_fiber_join(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FIBER) {
+    sp_Fiber *f = (sp_Fiber *)v.v.p;
+    if (f->state != 3) sp_Fiber_resume(f, sp_box_nil());
+  }
+  return v;
+}
 static sp_PolyArray*sp_PolyPolyHash_keys(sp_PolyPolyHash*h){SP_GC_ROOT(h);sp_PolyArray*a=sp_PolyArray_new();SP_GC_ROOT(a);for(mrb_int i=0;i<h->len;i++)sp_PolyArray_push(a,h->keys[h->order[i]]);return a;}
 static sp_PolyArray*sp_PolyPolyHash_values(sp_PolyPolyHash*h){SP_GC_ROOT(h);sp_PolyArray*a=sp_PolyArray_new();SP_GC_ROOT(a);for(mrb_int i=0;i<h->len;i++)sp_PolyArray_push(a,h->vals[h->order[i]]);return a;}
 static sp_PolyPolyHash*sp_PolyPolyHash_dup(sp_PolyPolyHash*h){sp_PolyPolyHash*r=sp_PolyPolyHash_new();for(mrb_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,h->keys[h->order[i]],h->vals[h->order[i]]);return r;}
