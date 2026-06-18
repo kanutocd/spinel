@@ -2732,6 +2732,165 @@ static int emit_object_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+static int emit_value_recv_call(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  const int *argv = NULL;
+  if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+  TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  /* Time instance methods: sp_Time is a value -- splice the receiver once. */
+  if (recv >= 0 && rt == TY_TIME) {
+    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    int done = 1;
+    if (!strcmp(name, "utc") || !strcmp(name, "gmtime") || !strcmp(name, "getutc")) buf_printf(b, "sp_time_utc(%s)", r);
+    else if (!strcmp(name, "localtime") || !strcmp(name, "getlocal")) buf_printf(b, "sp_time_localtime(%s)", r);
+    else if (!strcmp(name, "year"))  buf_printf(b, "sp_time_year(%s)", r);
+    else if (!strcmp(name, "mon") || !strcmp(name, "month")) buf_printf(b, "sp_time_mon(%s)", r);
+    else if (!strcmp(name, "day") || !strcmp(name, "mday"))  buf_printf(b, "sp_time_mday(%s)", r);
+    else if (!strcmp(name, "hour")) buf_printf(b, "sp_time_hour(%s)", r);
+    else if (!strcmp(name, "min"))  buf_printf(b, "sp_time_min(%s)", r);
+    else if (!strcmp(name, "sec"))  buf_printf(b, "sp_time_sec(%s)", r);
+    else if (!strcmp(name, "wday")) buf_printf(b, "sp_time_wday(%s)", r);
+    else if (!strcmp(name, "yday")) buf_printf(b, "sp_time_yday(%s)", r);
+    else if (!strcmp(name, "to_i") || !strcmp(name, "tv_sec")) buf_printf(b, "(%s).tv_sec", r);
+    else if (!strcmp(name, "to_f")) buf_printf(b, "((mrb_float)(%s).tv_sec + (mrb_float)(%s).tv_nsec / 1e9)", r, r);
+    else if (!strcmp(name, "subsec")) buf_printf(b, "((mrb_float)(%s).tv_nsec / 1e9)", r);
+    else if (!strcmp(name, "tv_usec") || !strcmp(name, "usec")) buf_printf(b, "((mrb_int)(%s).tv_nsec / 1000)", r);
+    else if (!strcmp(name, "tv_nsec") || !strcmp(name, "nsec")) buf_printf(b, "((mrb_int)(%s).tv_nsec)", r);
+    else if (!strcmp(name, "utc?") || !strcmp(name, "gmt?")) buf_printf(b, "((%s).is_utc != 0)", r);
+    else if (!strcmp(name, "dst?") || !strcmp(name, "isdst")) buf_printf(b, "(sp_time_isdst(%s) != 0)", r);
+    else if (!strcmp(name, "utc_offset") || !strcmp(name, "gmt_offset") || !strcmp(name, "gmtoff")) buf_printf(b, "sp_time_utc_offset(%s)", r);
+    else if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) buf_printf(b, "sp_time_inspect_v(%s)", r);
+    else if (!strcmp(name, "iso8601")) buf_printf(b, "sp_time_iso8601(%s)", r);
+    else if (!strcmp(name, "zone")) buf_printf(b, "sp_time_zone(%s)", r);
+    else if (!strcmp(name, "class")) buf_puts(b, "SPL(\"Time\")");
+    else if (!strcmp(name, "strftime") && argc == 1) { buf_printf(b, "sp_time_strftime(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if ((!strcmp(name, "+") || !strcmp(name, "-")) && argc == 1) {
+      buf_printf(b, "sp_time_add(%s, %s(mrb_float)(", r, name[0] == '-' ? "-" : "");
+      emit_expr(c, argv[0], b); buf_puts(b, "))");
+    }
+    else if ((!strcmp(name, "<") || !strcmp(name, ">") || !strcmp(name, "<=") ||
+              !strcmp(name, ">=") || !strcmp(name, "==") || !strcmp(name, "!=")) && argc == 1) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
+    }
+    else if (!strcmp(name, "<=>") && argc == 1) {
+      int tt = ++g_tmp, tu = ++g_tmp;
+      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "; (mrb_int)sp_time_cmp(_t%d, _t%d); })", tt, tu);
+    }
+    else done = 0;
+    free(rs.p);
+    if (done) return 1;
+  }
+
+  /* StringScanner instance methods. String-returning methods may yield NULL
+     (nil) on a miss; the NULL-aware string output operators render that. */
+  if (recv >= 0 && rt == TY_STRINGSCANNER) {
+    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    int done = 1;
+    if ((!strcmp(name, "scan") || !strcmp(name, "check") || !strcmp(name, "scan_until")) &&
+        argc == 1 && re_lit_index(c, argv[0]) >= 0) {
+      buf_printf(b, "sp_StringScanner_%s(%s, sp_re_pat_%d)", name, r, re_lit_index(c, argv[0]));
+    }
+    else if (!strcmp(name, "matched")) buf_printf(b, "sp_StringScanner_matched(%s)", r);
+    else if (!strcmp(name, "matched?")) buf_printf(b, "sp_StringScanner_matched_p(%s)", r);
+    else if (!strcmp(name, "pre_match")) buf_printf(b, "sp_StringScanner_pre_match(%s)", r);
+    else if (!strcmp(name, "post_match")) buf_printf(b, "sp_StringScanner_post_match(%s)", r);
+    else if (!strcmp(name, "pos") || !strcmp(name, "charpos")) buf_printf(b, "sp_StringScanner_pos(%s)", r);
+    else if (!strcmp(name, "pos=") && argc == 1) { buf_printf(b, "sp_StringScanner_pos_set(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "rest")) buf_printf(b, "sp_StringScanner_rest(%s)", r);
+    else if (!strcmp(name, "rest?")) buf_printf(b, "sp_StringScanner_rest_p(%s)", r);
+    else if (!strcmp(name, "rest_size")) buf_printf(b, "sp_StringScanner_rest_size(%s)", r);
+    else if (!strcmp(name, "string")) buf_printf(b, "sp_StringScanner_string(%s)", r);
+    else if (!strcmp(name, "eos?")) buf_printf(b, "sp_StringScanner_eos_p(%s)", r);
+    else if (!strcmp(name, "getch")) buf_printf(b, "sp_StringScanner_getch(%s)", r);
+    else if (!strcmp(name, "peek") && argc == 1) { buf_printf(b, "sp_StringScanner_peek(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "[]") && argc == 1) { buf_printf(b, "sp_StringScanner_aref(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "reset")) buf_printf(b, "(sp_StringScanner_reset(%s), %s)", r, r);
+    else if (!strcmp(name, "terminate")) buf_printf(b, "(sp_StringScanner_terminate(%s), %s)", r, r);
+    else if (!strcmp(name, "unscan")) buf_printf(b, "(sp_StringScanner_unscan(%s), %s)", r, r);
+    else done = 0;
+    free(rs.p);
+    if (done) return 1;
+  }
+
+  /* MatchData instance methods (sp_MatchData *, nullable on no-match). */
+  if (recv >= 0 && rt == TY_MATCHDATA) {
+    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    if (!strcmp(name, "[]") && argc == 1) {
+      buf_printf(b, "sp_MatchData_aref(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "pre_match"))  buf_printf(b, "sp_MatchData_pre_match(%s)", r);
+    else if (!strcmp(name, "post_match")) buf_printf(b, "sp_MatchData_post_match(%s)", r);
+    else if (!strcmp(name, "to_s"))       buf_printf(b, "sp_MatchData_to_s(%s)", r);
+    else if ((!strcmp(name, "length") || !strcmp(name, "size")) && argc == 0)
+      buf_printf(b, "sp_MatchData_length(%s)", r);
+    else if (!strcmp(name, "begin") && argc == 1) {
+      buf_printf(b, "sp_MatchData_begin(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "end") && argc == 1) {
+      buf_printf(b, "sp_MatchData_end(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "offset") && argc == 1) {
+      buf_printf(b, "sp_MatchData_offset(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (!strcmp(name, "captures"))  buf_printf(b, "sp_MatchData_captures(%s)", r);
+    else if (!strcmp(name, "to_a"))      buf_printf(b, "sp_MatchData_to_a(%s)", r);
+    else if (!strcmp(name, "nil?"))      buf_printf(b, "(%s == 0)", r);
+    else unsupported(c, id, "MatchData method");
+    free(rs.p);
+    return 1;
+  }
+
+  /* StringIO instance methods (a non-GC heap buffer behind sp_StringIO *). */
+  if (recv >= 0 && rt == TY_STRINGIO) {
+    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
+    const char *r = rs.p ? rs.p : "";
+    int done = 1;
+    if (!strcmp(name, "string")) buf_printf(b, "sp_StringIO_string(%s)", r);
+    else if (!strcmp(name, "pos") || !strcmp(name, "tell")) buf_printf(b, "sp_StringIO_pos(%s)", r);
+    else if (!strcmp(name, "size") || !strcmp(name, "length")) buf_printf(b, "sp_StringIO_size(%s)", r);
+    else if (!strcmp(name, "lineno")) buf_printf(b, "(%s)->lineno", r);
+    else if (!strcmp(name, "puts") && argc == 0) buf_printf(b, "sp_StringIO_puts_empty(%s)", r);
+    else if (!strcmp(name, "puts") && argc == 1) { buf_printf(b, "sp_StringIO_puts(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "print") && argc == 1) { buf_printf(b, "sp_StringIO_print(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if ((!strcmp(name, "write") || !strcmp(name, "<<")) && argc == 1) { buf_printf(b, "sp_StringIO_write(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "putc") && argc == 1) {
+      if (comp_ntype(c, argv[0]) == TY_STRING) { buf_printf(b, "sp_StringIO_putc(%s, (mrb_int)(unsigned char)(", r); emit_expr(c, argv[0], b); buf_puts(b, ")[0])"); }
+      else { buf_printf(b, "sp_StringIO_putc(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    }
+    else if (!strcmp(name, "fsync") || !strcmp(name, "fileno") || !strcmp(name, "pid")) buf_printf(b, "((void)(%s), 0)", r);
+    else if (!strcmp(name, "read") && argc == 0) buf_printf(b, "sp_StringIO_read(%s)", r);
+    else if (!strcmp(name, "read") && argc == 1) { buf_printf(b, "sp_StringIO_read_n(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "gets")) buf_printf(b, "sp_box_nullable_str(sp_StringIO_gets(%s))", r);
+    else if (!strcmp(name, "getc")) buf_printf(b, "sp_box_nullable_str(sp_StringIO_getc(%s))", r);
+    else if (!strcmp(name, "getbyte")) buf_printf(b, "sp_StringIO_getbyte(%s)", r);
+    else if (!strcmp(name, "rewind")) buf_printf(b, "sp_StringIO_rewind(%s)", r);
+    else if (!strcmp(name, "seek") && argc >= 1) { buf_printf(b, "sp_StringIO_seek(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "truncate") && argc == 1) { buf_printf(b, "sp_StringIO_truncate(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    else if (!strcmp(name, "eof?") || !strcmp(name, "eof")) buf_printf(b, "sp_StringIO_eof_p(%s)", r);
+    else if (!strcmp(name, "close")) buf_printf(b, "sp_StringIO_close(%s)", r);
+    else if (!strcmp(name, "closed?")) buf_printf(b, "sp_StringIO_closed_p(%s)", r);
+    else if (!strcmp(name, "flush")) buf_printf(b, "sp_StringIO_flush(%s)", r);
+    else if (!strcmp(name, "sync")) buf_printf(b, "sp_StringIO_sync(%s)", r);
+    else if (!strcmp(name, "isatty") || !strcmp(name, "tty?")) buf_printf(b, "sp_StringIO_isatty(%s)", r);
+    else done = 0;
+    free(rs.p);
+    if (done) return 1;
+  }
+  return 0;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   /* `require` / `require_relative` is a compile-time directive: top-level ones
@@ -7485,153 +7644,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
 
   if (emit_object_call(c, id, b)) return;
 
-  /* Time instance methods: sp_Time is a value -- splice the receiver once. */
-  if (recv >= 0 && rt == TY_TIME) {
-    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
-    const char *r = rs.p ? rs.p : "";
-    int done = 1;
-    if (!strcmp(name, "utc") || !strcmp(name, "gmtime") || !strcmp(name, "getutc")) buf_printf(b, "sp_time_utc(%s)", r);
-    else if (!strcmp(name, "localtime") || !strcmp(name, "getlocal")) buf_printf(b, "sp_time_localtime(%s)", r);
-    else if (!strcmp(name, "year"))  buf_printf(b, "sp_time_year(%s)", r);
-    else if (!strcmp(name, "mon") || !strcmp(name, "month")) buf_printf(b, "sp_time_mon(%s)", r);
-    else if (!strcmp(name, "day") || !strcmp(name, "mday"))  buf_printf(b, "sp_time_mday(%s)", r);
-    else if (!strcmp(name, "hour")) buf_printf(b, "sp_time_hour(%s)", r);
-    else if (!strcmp(name, "min"))  buf_printf(b, "sp_time_min(%s)", r);
-    else if (!strcmp(name, "sec"))  buf_printf(b, "sp_time_sec(%s)", r);
-    else if (!strcmp(name, "wday")) buf_printf(b, "sp_time_wday(%s)", r);
-    else if (!strcmp(name, "yday")) buf_printf(b, "sp_time_yday(%s)", r);
-    else if (!strcmp(name, "to_i") || !strcmp(name, "tv_sec")) buf_printf(b, "(%s).tv_sec", r);
-    else if (!strcmp(name, "to_f")) buf_printf(b, "((mrb_float)(%s).tv_sec + (mrb_float)(%s).tv_nsec / 1e9)", r, r);
-    else if (!strcmp(name, "subsec")) buf_printf(b, "((mrb_float)(%s).tv_nsec / 1e9)", r);
-    else if (!strcmp(name, "tv_usec") || !strcmp(name, "usec")) buf_printf(b, "((mrb_int)(%s).tv_nsec / 1000)", r);
-    else if (!strcmp(name, "tv_nsec") || !strcmp(name, "nsec")) buf_printf(b, "((mrb_int)(%s).tv_nsec)", r);
-    else if (!strcmp(name, "utc?") || !strcmp(name, "gmt?")) buf_printf(b, "((%s).is_utc != 0)", r);
-    else if (!strcmp(name, "dst?") || !strcmp(name, "isdst")) buf_printf(b, "(sp_time_isdst(%s) != 0)", r);
-    else if (!strcmp(name, "utc_offset") || !strcmp(name, "gmt_offset") || !strcmp(name, "gmtoff")) buf_printf(b, "sp_time_utc_offset(%s)", r);
-    else if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) buf_printf(b, "sp_time_inspect_v(%s)", r);
-    else if (!strcmp(name, "iso8601")) buf_printf(b, "sp_time_iso8601(%s)", r);
-    else if (!strcmp(name, "zone")) buf_printf(b, "sp_time_zone(%s)", r);
-    else if (!strcmp(name, "class")) buf_puts(b, "SPL(\"Time\")");
-    else if (!strcmp(name, "strftime") && argc == 1) { buf_printf(b, "sp_time_strftime(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if ((!strcmp(name, "+") || !strcmp(name, "-")) && argc == 1) {
-      buf_printf(b, "sp_time_add(%s, %s(mrb_float)(", r, name[0] == '-' ? "-" : "");
-      emit_expr(c, argv[0], b); buf_puts(b, "))");
-    }
-    else if ((!strcmp(name, "<") || !strcmp(name, ">") || !strcmp(name, "<=") ||
-              !strcmp(name, ">=") || !strcmp(name, "==") || !strcmp(name, "!=")) && argc == 1) {
-      int tt = ++g_tmp, tu = ++g_tmp;
-      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
-      emit_expr(c, argv[0], b);
-      buf_printf(b, "; sp_time_cmp(_t%d, _t%d) %s 0; })", tt, tu, name);
-    }
-    else if (!strcmp(name, "<=>") && argc == 1) {
-      int tt = ++g_tmp, tu = ++g_tmp;
-      buf_puts(b, "({ sp_Time _t"); buf_printf(b, "%d = %s; sp_Time _t%d = ", tt, r, tu);
-      emit_expr(c, argv[0], b);
-      buf_printf(b, "; (mrb_int)sp_time_cmp(_t%d, _t%d); })", tt, tu);
-    }
-    else done = 0;
-    free(rs.p);
-    if (done) return;
-  }
-
-  /* StringScanner instance methods. String-returning methods may yield NULL
-     (nil) on a miss; the NULL-aware string output operators render that. */
-  if (recv >= 0 && rt == TY_STRINGSCANNER) {
-    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
-    const char *r = rs.p ? rs.p : "";
-    int done = 1;
-    if ((!strcmp(name, "scan") || !strcmp(name, "check") || !strcmp(name, "scan_until")) &&
-        argc == 1 && re_lit_index(c, argv[0]) >= 0) {
-      buf_printf(b, "sp_StringScanner_%s(%s, sp_re_pat_%d)", name, r, re_lit_index(c, argv[0]));
-    }
-    else if (!strcmp(name, "matched")) buf_printf(b, "sp_StringScanner_matched(%s)", r);
-    else if (!strcmp(name, "matched?")) buf_printf(b, "sp_StringScanner_matched_p(%s)", r);
-    else if (!strcmp(name, "pre_match")) buf_printf(b, "sp_StringScanner_pre_match(%s)", r);
-    else if (!strcmp(name, "post_match")) buf_printf(b, "sp_StringScanner_post_match(%s)", r);
-    else if (!strcmp(name, "pos") || !strcmp(name, "charpos")) buf_printf(b, "sp_StringScanner_pos(%s)", r);
-    else if (!strcmp(name, "pos=") && argc == 1) { buf_printf(b, "sp_StringScanner_pos_set(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "rest")) buf_printf(b, "sp_StringScanner_rest(%s)", r);
-    else if (!strcmp(name, "rest?")) buf_printf(b, "sp_StringScanner_rest_p(%s)", r);
-    else if (!strcmp(name, "rest_size")) buf_printf(b, "sp_StringScanner_rest_size(%s)", r);
-    else if (!strcmp(name, "string")) buf_printf(b, "sp_StringScanner_string(%s)", r);
-    else if (!strcmp(name, "eos?")) buf_printf(b, "sp_StringScanner_eos_p(%s)", r);
-    else if (!strcmp(name, "getch")) buf_printf(b, "sp_StringScanner_getch(%s)", r);
-    else if (!strcmp(name, "peek") && argc == 1) { buf_printf(b, "sp_StringScanner_peek(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "[]") && argc == 1) { buf_printf(b, "sp_StringScanner_aref(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "reset")) buf_printf(b, "(sp_StringScanner_reset(%s), %s)", r, r);
-    else if (!strcmp(name, "terminate")) buf_printf(b, "(sp_StringScanner_terminate(%s), %s)", r, r);
-    else if (!strcmp(name, "unscan")) buf_printf(b, "(sp_StringScanner_unscan(%s), %s)", r, r);
-    else done = 0;
-    free(rs.p);
-    if (done) return;
-  }
-
-  /* MatchData instance methods (sp_MatchData *, nullable on no-match). */
-  if (recv >= 0 && rt == TY_MATCHDATA) {
-    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
-    const char *r = rs.p ? rs.p : "";
-    if (!strcmp(name, "[]") && argc == 1) {
-      buf_printf(b, "sp_MatchData_aref(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
-    }
-    else if (!strcmp(name, "pre_match"))  buf_printf(b, "sp_MatchData_pre_match(%s)", r);
-    else if (!strcmp(name, "post_match")) buf_printf(b, "sp_MatchData_post_match(%s)", r);
-    else if (!strcmp(name, "to_s"))       buf_printf(b, "sp_MatchData_to_s(%s)", r);
-    else if ((!strcmp(name, "length") || !strcmp(name, "size")) && argc == 0)
-      buf_printf(b, "sp_MatchData_length(%s)", r);
-    else if (!strcmp(name, "begin") && argc == 1) {
-      buf_printf(b, "sp_MatchData_begin(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
-    }
-    else if (!strcmp(name, "end") && argc == 1) {
-      buf_printf(b, "sp_MatchData_end(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
-    }
-    else if (!strcmp(name, "offset") && argc == 1) {
-      buf_printf(b, "sp_MatchData_offset(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
-    }
-    else if (!strcmp(name, "captures"))  buf_printf(b, "sp_MatchData_captures(%s)", r);
-    else if (!strcmp(name, "to_a"))      buf_printf(b, "sp_MatchData_to_a(%s)", r);
-    else if (!strcmp(name, "nil?"))      buf_printf(b, "(%s == 0)", r);
-    else unsupported(c, id, "MatchData method");
-    free(rs.p);
-    return;
-  }
-
-  /* StringIO instance methods (a non-GC heap buffer behind sp_StringIO *). */
-  if (recv >= 0 && rt == TY_STRINGIO) {
-    Buf rs; memset(&rs, 0, sizeof rs); emit_expr(c, recv, &rs);
-    const char *r = rs.p ? rs.p : "";
-    int done = 1;
-    if (!strcmp(name, "string")) buf_printf(b, "sp_StringIO_string(%s)", r);
-    else if (!strcmp(name, "pos") || !strcmp(name, "tell")) buf_printf(b, "sp_StringIO_pos(%s)", r);
-    else if (!strcmp(name, "size") || !strcmp(name, "length")) buf_printf(b, "sp_StringIO_size(%s)", r);
-    else if (!strcmp(name, "lineno")) buf_printf(b, "(%s)->lineno", r);
-    else if (!strcmp(name, "puts") && argc == 0) buf_printf(b, "sp_StringIO_puts_empty(%s)", r);
-    else if (!strcmp(name, "puts") && argc == 1) { buf_printf(b, "sp_StringIO_puts(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "print") && argc == 1) { buf_printf(b, "sp_StringIO_print(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if ((!strcmp(name, "write") || !strcmp(name, "<<")) && argc == 1) { buf_printf(b, "sp_StringIO_write(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "putc") && argc == 1) {
-      if (comp_ntype(c, argv[0]) == TY_STRING) { buf_printf(b, "sp_StringIO_putc(%s, (mrb_int)(unsigned char)(", r); emit_expr(c, argv[0], b); buf_puts(b, ")[0])"); }
-      else { buf_printf(b, "sp_StringIO_putc(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    }
-    else if (!strcmp(name, "fsync") || !strcmp(name, "fileno") || !strcmp(name, "pid")) buf_printf(b, "((void)(%s), 0)", r);
-    else if (!strcmp(name, "read") && argc == 0) buf_printf(b, "sp_StringIO_read(%s)", r);
-    else if (!strcmp(name, "read") && argc == 1) { buf_printf(b, "sp_StringIO_read_n(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "gets")) buf_printf(b, "sp_box_nullable_str(sp_StringIO_gets(%s))", r);
-    else if (!strcmp(name, "getc")) buf_printf(b, "sp_box_nullable_str(sp_StringIO_getc(%s))", r);
-    else if (!strcmp(name, "getbyte")) buf_printf(b, "sp_StringIO_getbyte(%s)", r);
-    else if (!strcmp(name, "rewind")) buf_printf(b, "sp_StringIO_rewind(%s)", r);
-    else if (!strcmp(name, "seek") && argc >= 1) { buf_printf(b, "sp_StringIO_seek(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "truncate") && argc == 1) { buf_printf(b, "sp_StringIO_truncate(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else if (!strcmp(name, "eof?") || !strcmp(name, "eof")) buf_printf(b, "sp_StringIO_eof_p(%s)", r);
-    else if (!strcmp(name, "close")) buf_printf(b, "sp_StringIO_close(%s)", r);
-    else if (!strcmp(name, "closed?")) buf_printf(b, "sp_StringIO_closed_p(%s)", r);
-    else if (!strcmp(name, "flush")) buf_printf(b, "sp_StringIO_flush(%s)", r);
-    else if (!strcmp(name, "sync")) buf_printf(b, "sp_StringIO_sync(%s)", r);
-    else if (!strcmp(name, "isatty") || !strcmp(name, "tty?")) buf_printf(b, "sp_StringIO_isatty(%s)", r);
-    else done = 0;
-    free(rs.p);
-    if (done) return;
-  }
+  if (emit_value_recv_call(c, id, b)) return;
 
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
      `runs.map { |r| r.sum }` over chunk_while runs). The runtime helper switches
