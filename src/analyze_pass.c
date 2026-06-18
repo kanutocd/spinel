@@ -2992,7 +2992,7 @@ int infer_block_params(Compiler *c) {
       }
       pt = has_cap ? TY_STR_ARRAY : TY_STRING;
     }
-    else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
+    else if ((!strcmp(name, "each") || ty_iter_shape(name) == TY_ITER_MAP ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||
               !strcmp(name, "find") || !strcmp(name, "detect") || !strcmp(name, "each_with_index") ||
               !strcmp(name, "sort_by") || !strcmp(name, "find_all") || !strcmp(name, "count") ||
@@ -3008,7 +3008,7 @@ int infer_block_params(Compiler *c) {
       int lsrc = nt_ref(nt, recv, "receiver");
       if (lsrc >= 0 && infer_type(c, lsrc) == TY_RANGE) pt = TY_INT;
     }
-    else if ((!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
+    else if ((!strcmp(name, "each") || ty_iter_shape(name) == TY_ITER_MAP ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "filter") ||
               !strcmp(name, "find") || !strcmp(name, "detect") ||
               !strcmp(name, "max_by") || !strcmp(name, "min_by") || !strcmp(name, "sort_by") ||
@@ -3035,7 +3035,7 @@ int infer_block_params(Compiler *c) {
       pt = TY_INT;
     /* TY_POLY receiver with iteration methods: element type is TY_POLY */
     else if (rt == TY_POLY &&
-             (!strcmp(name, "each") || !strcmp(name, "map") || !strcmp(name, "collect") ||
+             (!strcmp(name, "each") || ty_iter_shape(name) == TY_ITER_MAP ||
               !strcmp(name, "select") || !strcmp(name, "reject") || !strcmp(name, "find") ||
               !strcmp(name, "detect") || !strcmp(name, "any?") || !strcmp(name, "all?") ||
               !strcmp(name, "uniq") || !strcmp(name, "uniq!") || !strcmp(name, "sort_by") ||
@@ -3075,7 +3075,7 @@ int infer_block_params(Compiler *c) {
        gets the element type of the original array (slice elements).
        array.each_cons(n).map { |pair| } chain: block param gets the array type.
        Also handles |(a, b)| destructuring as the first param. */
-    if ((!strcmp(name, "map") || !strcmp(name, "collect")) && rt == TY_UNKNOWN &&
+    if ((ty_iter_shape(name) == TY_ITER_MAP) && rt == TY_UNKNOWN &&
         nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
         nt_str(nt, recv, "name") && (!strcmp(nt_str(nt, recv, "name"), "each_slice") ||
                                      !strcmp(nt_str(nt, recv, "name"), "each_cons")) &&
@@ -3121,7 +3121,7 @@ int infer_block_params(Compiler *c) {
     }
 
     /* array.each_cons(n).with_index(off).map { |pair, i| } or { |(a,b), i| } chain */
-    if ((!strcmp(name, "map") || !strcmp(name, "collect")) && rt == TY_UNKNOWN &&
+    if ((ty_iter_shape(name) == TY_ITER_MAP) && rt == TY_UNKNOWN &&
         nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "with_index") &&
         nt_ref(nt, recv, "block") < 0) {

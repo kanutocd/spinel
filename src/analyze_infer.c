@@ -1397,7 +1397,7 @@ else {
   }
 
   /* each_slice(n).map/collect { |...| } chain: return array of block result type */
-  if (recv >= 0 && rt == TY_UNKNOWN && (!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (recv >= 0 && rt == TY_UNKNOWN && (ty_iter_shape(name) == TY_ITER_MAP) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_slice") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1410,7 +1410,7 @@ else {
   }
 
   /* each_cons(n).map/collect { |...| } chain: return array of block result type */
-  if (recv >= 0 && rt == TY_UNKNOWN && (!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (recv >= 0 && rt == TY_UNKNOWN && (ty_iter_shape(name) == TY_ITER_MAP) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "each_cons") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1423,7 +1423,7 @@ else {
   }
 
   /* each_cons(n).with_index(off).map/collect { |...| } chain */
-  if (recv >= 0 && rt == TY_UNKNOWN && (!strcmp(name, "map") || !strcmp(name, "collect")) &&
+  if (recv >= 0 && rt == TY_UNKNOWN && (ty_iter_shape(name) == TY_ITER_MAP) &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "with_index") &&
       nt_ref(nt, recv, "block") < 0) {
@@ -1468,7 +1468,7 @@ else {
   if (recv >= 0 && ty_is_array(rt)) {
     int block = nt_ref(nt, id, "block");
     if (block >= 0) {
-      if (!strcmp(name, "map") || !strcmp(name, "collect")) {
+      if (ty_iter_shape(name) == TY_ITER_MAP) {
         int body = nt_ref(nt, block, "body");
         int bn = 0;
         const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
@@ -1725,7 +1725,7 @@ else {
       if (!strcmp(name, "dig") && argc >= 1) return TY_POLY;
       {
         int blk = nt_ref(nt, id, "block");
-        if (blk >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
+        if (blk >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
           int body = nt_ref(nt, blk, "body");
           int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
           TyKind et = bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN;
@@ -1818,7 +1818,7 @@ else {
         !strcmp(name, "begin") || !strcmp(name, "end"))  return TY_INT;
     if (!strcmp(name, "bsearch")) return TY_INT;  /* a member, or nil (nullable int) */
     int block = nt_ref(nt, id, "block");
-    if (block >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
+    if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
       int body = nt_ref(nt, block, "body");
       int bn = 0;
       const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
@@ -1897,12 +1897,12 @@ else {
     if (!strcmp(name, "values_at") || !strcmp(name, "fetch_values")) return TY_POLY_ARRAY;
     {
       int block = nt_ref(nt, id, "block");
-      if (block >= 0 && (!strcmp(name, "map") || !strcmp(name, "collect"))) {
+      if (block >= 0 && (ty_iter_shape(name) == TY_ITER_MAP)) {
         int body = nt_ref(nt, block, "body");
         int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
         return ty_array_of(bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN);
       }
-      if (block >= 0 && (!strcmp(name, "select") || !strcmp(name, "filter") || !strcmp(name, "reject"))) return rt;
+      if (block >= 0 && (ty_iter_shape(name) == TY_ITER_SELECT || !strcmp(name, "reject"))) return rt;
       if (block >= 0 && !strcmp(name, "transform_keys")) {
         int body = nt_ref(nt, block, "body");
         int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
