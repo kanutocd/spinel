@@ -6039,6 +6039,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (!strcmp(name, "mtime") && argc == 1) {
       buf_puts(b, "sp_file_mtime("); emit_expr(c, argv[0], b); buf_puts(b, ")"); return;
     }
+    if (!strcmp(name, "size") && argc == 1) {
+      buf_puts(b, "sp_file_size("); emit_expr(c, argv[0], b); buf_puts(b, ")"); return;
+    }
     if (!strcmp(name, "expand_path") && (argc == 1 || argc == 2)) {
       buf_puts(b, "sp_file_expand_path("); emit_expr(c, argv[0], b); buf_puts(b, ", ");
       if (argc == 2) emit_expr(c, argv[1], b); else buf_puts(b, "(const char *)0");

@@ -5180,6 +5180,28 @@ static sp_Time sp_file_mtime(const char *path) {
   return (sp_Time){(int64_t)st.st_mtim.tv_sec, (int32_t)st.st_mtim.tv_nsec, 0};
 #endif
 }
+/* File.size(path) -> byte size. Raises Errno::ENOENT on a missing path,
+   matching MRI (and sp_file_read / sp_file_mtime, which stat/open the
+   same way). */
+static mrb_int sp_file_size(const char *path) {
+  if (!path) {
+    sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+    return 0;
+  }
+  struct stat st;
+  if (stat(path, &st) == -1) {
+    int err = errno;  /* capture once: strerror() may clobber errno */
+    sp_raise_cls(err == ENOENT ? "Errno::ENOENT" : "RuntimeError", sp_sprintf("%s @ File.size - %s", strerror(err), path));
+    return 0;
+  }
+  /* off_t (typically 64-bit) into mrb_int (intptr_t -> 32-bit on a 32-bit
+     build): guard the narrowing, as spinel does for int arithmetic. */
+  if ((off_t)(mrb_int)st.st_size != st.st_size) {
+    sp_raise_cls("RangeError", "file size out of range for Integer");
+    return 0;
+  }
+  return (mrb_int)st.st_size;
+}
 static const char *sp_backtick(const char *cmd) {
   FILE *p = popen(cmd, "r");
   if (!p) { sp_last_status = -1; return sp_str_empty; }
