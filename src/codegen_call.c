@@ -3448,6 +3448,17 @@ void emit_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, ")");
     return;
   }
+  /* eval(string) / Kernel.eval(string): compiling an arbitrary runtime string is
+     a hard AOT boundary, not a missing feature. Emit an intentional diagnostic.
+     (The instance_eval/class_eval/module_eval block forms are handled separately
+     and are unaffected -- those carry a literal block, not a string.) */
+  if (!strcmp(name, "eval") && argc >= 1 &&
+      (recv < 0 || (nt_type(nt, recv) &&
+                    (!strcmp(nt_type(nt, recv), "ConstantReadNode") || !strcmp(nt_type(nt, recv), "ConstantPathNode")) &&
+                    nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Kernel")))) {
+    unsupported(c, id, "eval of a runtime string is not supported by AOT compilation (define the code statically)");
+    return;
+  }
   if (recv < 0 && !strcmp(name, "loop") && argc == 0) {
     int blk = nt_ref(nt, id, "block");
     if (blk >= 0) {
