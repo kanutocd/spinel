@@ -2264,6 +2264,50 @@ static void scan_prologue_features(Compiler *c) {
     }                                                         \
   } while (0)
 
+/* `send` / `__send__` / `public_send` with a literal symbol/string name is
+   rewritten to a direct call before this point (textually for a receiver form,
+   on the AST for implicit self). A call to one of these that survives therefore
+   has a runtime method name, which AOT cannot dispatch in a closed world --
+   turn the opaque downstream reject (or silent nil-stub) into one actionable
+   diagnostic anchored to the call site. Skipped entirely if the program defines
+   its own method by that name, since then the call resolves normally. */
+static void reject_runtime_send(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static const char *const names[] = { "send", "__send__", "public_send", NULL };
+  for (int s = 0; s < c->nscopes; s++) {
+    const char *sn = c->scopes[s].name;
+    if (!sn) continue;
+    for (int k = 0; names[k]; k++)
+      if (!strcmp(sn, names[k])) return;  /* user-defined: leave to normal dispatch */
+  }
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || strcmp(ty, "CallNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    int is_send = 0;
+    for (int k = 0; names[k]; k++) if (!strcmp(nm, names[k])) { is_send = 1; break; }
+    if (!is_send) continue;
+    int args = nt_ref(nt, id, "arguments");
+    if (args < 0) continue;
+    int ac = 0; const int *av = nt_arr(nt, args, "arguments", &ac);
+    if (ac < 1 || !av) continue;
+    const char *a0 = nt_type(nt, av[0]);
+    /* a literal name should have been rewritten already; only a runtime name
+       (a variable, a method result, an interpolated string, ...) reaches here */
+    if (a0 && (!strcmp(a0, "SymbolNode") || !strcmp(a0, "StringNode"))) continue;
+    /* Only diagnose a send that codegen will actually emit. A send in a dead
+       (unreachable) method is pruned before emission, so rejecting it would
+       fail otherwise-valid programs that merely contain an unused method.
+       walk_scope assigns every node — including those inside blocks — the
+       enclosing method's scope, and the emit loop emits a scope's body only
+       when it is reachable; mirror that gate here. */
+    int sc = c->nscope[id];
+    if (sc < 0 || sc >= c->nscopes || !c->scopes[sc].reachable) continue;
+    unsupported(c, id, "send with a runtime method name (AOT needs a compile-time-known name)");
+  }
+}
+
 char *codegen_program(const NodeTable *nt) {
   Compiler *c = comp_new(nt);
   analyze_program(c);
@@ -2301,6 +2345,10 @@ char *codegen_program(const NodeTable *nt) {
     comp_free(c);
     return strdup("");
   }
+
+  /* Reject runtime-name send before any emission so the diagnostic fires
+     regardless of how the call's result is later consumed. */
+  reject_runtime_send(c);
 
   Buf b; memset(&b, 0, sizeof b);
   memset(&g_procs, 0, sizeof g_procs);
