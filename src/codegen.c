@@ -423,6 +423,12 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
     return;
   }
   inherit_transplant_locals(c, s);
+  /* Map the whole function (signature + SP_GC_SAVE prologue + local decls,
+     before the first body stmt) to the `def` line, so a breakpoint on the method
+     lands on the .rb source rather than the generated C -- which is deleted after
+     compile, so gdb couldn't find it. With this, --line-map / -g is enough to
+     debug against the Ruby source; no need to keep the generated C (#1261). */
+  emit_line_directive(c, s->def_node, b);
   emit_method_signature(c, s, b);
   buf_puts(b, " {\n");
   buf_puts(b, "    SP_GC_SAVE();\n");
