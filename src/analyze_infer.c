@@ -289,10 +289,17 @@ TyKind infer_call(Compiler *c, int id) {
         !strcmp(name, "+") || !strcmp(name, "-") || !strcmp(name, "*")) return TY_COMPLEX;
     if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) return TY_STRING;
   }
-  /* Proc#curry and curry application via []. */
+  /* Proc#curry and curry application via []. A curried call stays TY_CURRY until
+     it reaches the proc's arity, when it realizes to the proc's return type (the
+     runtime accumulates int args, so completion typing covers int-returning
+     procs; partial applications and other returns remain TY_CURRY). */
   if (rt == TY_PROC && !strcmp(name, "curry")) return TY_CURRY;
-  if (rt == TY_CURRY && (!strcmp(name, "[]") || !strcmp(name, "call") || !strcmp(name, "()")))
+  if (rt == TY_CURRY && (!strcmp(name, "[]") || !strcmp(name, "call") || !strcmp(name, "()"))) {
+    int complete = 0; TyKind cret = TY_UNKNOWN;
+    if (curry_apply_info(c, id, &complete, &cret) && complete && cret == TY_INT)
+      return TY_INT;
     return TY_CURRY;
+  }
 
   if (rt == TY_INT && !strcmp(name, "quo")) return TY_RATIONAL;
   if (rt == TY_RATIONAL) {
@@ -1568,7 +1575,11 @@ else {
         const char *a0ty = nt_type(nt, argv[0]);
         int an0 = 0;
         if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
-        if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) return TY_INT_ARRAY;
+        if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) {
+          /* empty `[]`: element type from how the memo is filled, else int. */
+          TyKind me = ewo_memo_elem_type(c, id);
+          return (me != TY_UNKNOWN) ? ty_array_of(me) : TY_INT_ARRAY;
+        }
       }
       return at;
     }

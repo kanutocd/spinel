@@ -21,6 +21,15 @@ TyKind infer_type(Compiler *c, int id);
 /* Name of a block's idx-th required parameter, or NULL. */
 const char *block_param_name(Compiler *c, int block, int idx);
 
+/* Element type an `each_with_object([])` accumulator is filled with, inferred
+   from how the memo param is pushed to (following a forwarded callable's body).
+   TY_UNKNOWN when undetermined; callers default an empty `[]` to int_array. */
+TyKind ewo_memo_elem_type(Compiler *c, int callid);
+
+/* For a curry-application node, whether it completes the curry (reaches the base
+   proc's arity) and the proc's return type. Returns 1 for a recognized chain. */
+int curry_apply_info(Compiler *c, int node, int *out_complete, TyKind *out_ret);
+
 /* Class index when a receiverless instance_eval/exec resolves to self, else -1. */
 int ie_implicit_self_class(Compiler *c, int id);
 

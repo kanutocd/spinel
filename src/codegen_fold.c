@@ -3395,11 +3395,16 @@ int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   if (!k) return 0;
   TyKind et = ty_array_elem(rt);
   TyKind accT = infer_type(c, argv[0]);
+  int empty_seed = 0;
   if (accT == TY_UNKNOWN) {
     const char *a0ty = nt_type(nt, argv[0]);
     int an0 = 0;
     if (a0ty && !strcmp(a0ty, "ArrayNode")) nt_arr(nt, argv[0], "elements", &an0);
-    if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) accT = TY_INT_ARRAY;
+    if (a0ty && !strcmp(a0ty, "ArrayNode") && an0 == 0) {
+      empty_seed = 1;
+      TyKind me = ewo_memo_elem_type(c, id);
+      accT = (me != TY_UNKNOWN) ? ty_array_of(me) : TY_INT_ARRAY;
+    }
     else return 0;
   }
   int body = nt_ref(nt, block, "body");
@@ -3415,11 +3420,21 @@ int emit_each_with_object_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
   buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : ""); free(rb.p);
 
-  /* Accumulator */
+  /* Accumulator: an empty `[]` seed is built as a fresh typed array of the
+     inferred element type, so a string/poly memo isn't materialized as int
+     storage; a non-empty seed is emitted as written. */
   int tacc = ++g_tmp;
-  Buf accb; memset(&accb, 0, sizeof accb); emit_expr(c, argv[0], &accb);
-  emit_indent(g_pre, g_indent); emit_ctype(c, accT, g_pre);
-  buf_printf(g_pre, " _t%d = %s;\n", tacc, accb.p ? accb.p : default_value(accT)); free(accb.p);
+  if (empty_seed) {
+    const char *ak = (accT == TY_POLY_ARRAY) ? "Poly" : array_kind(accT);
+    emit_indent(g_pre, g_indent); emit_ctype(c, accT, g_pre);
+    buf_printf(g_pre, " _t%d = sp_%sArray_new();\n", tacc, ak ? ak : "Int");
+  } else {
+    /* a non-empty seed's emit_expr writes its construction to the prelude first,
+       so the ctype/assign must follow it. */
+    Buf accb; memset(&accb, 0, sizeof accb); emit_expr(c, argv[0], &accb);
+    emit_indent(g_pre, g_indent); emit_ctype(c, accT, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", tacc, accb.p ? accb.p : default_value(accT)); free(accb.p);
+  }
 
   /* Save outer vars if block params shadow them (same-type only) */
   Scope *cs = comp_scope_of(c, id);
