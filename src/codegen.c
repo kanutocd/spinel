@@ -2129,8 +2129,10 @@ char *codegen_program(const NodeTable *nt) {
         s = semi + 1;
       }
     }
+    int any_binstr = 0;
     for (int fi = 0; fi < cf->n_ffi_funcs; fi++) {
       const char *ret = cf->ffi_func_ret[fi];
+      if (!strcmp(ret, "binstr")) any_binstr = 1;
       buf_puts(&b, "extern ");
       buf_puts(&b, ffi_c_type(ret));
       buf_puts(&b, " ");
@@ -2143,6 +2145,8 @@ char *codegen_program(const NodeTable *nt) {
       if (cf->ffi_func_nargs[fi] == 0) buf_puts(&b, "void");
       buf_puts(&b, ");\n");
     }
+    /* Byte count for the :binstr return mode (defined in sp_net.c). */
+    if (any_binstr) buf_puts(&b, "extern int sp_net_bin_len;\n");
     for (int bi = 0; bi < cf->n_ffi_bufs; bi++) {
       buf_printf(&b, "static char sp_ffi_buf_%s_%s[%d];\n",
                  cf->ffi_buf_mods[bi], cf->ffi_buf_names[bi], cf->ffi_buf_sizes[bi]);

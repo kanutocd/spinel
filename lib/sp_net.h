@@ -44,22 +44,34 @@ int sp_net_shutdown_requested(void);
  *   (checked before blocking and on EINTR), else the connection fd.
  * accept_nb: non-blocking accept; -1 with errno EAGAIN/EWOULDBLOCK if
  *   nothing pending (listen fd must be sp_net_set_nonblock'd first).
+ *   accept / accept_nb set TCP_NODELAY on the returned connection fd.
  * connect: outbound TCP to host:port via getaddrinfo (IP or DNS),
  *   Nagle off. Returns the connected fd or -1.
- * close: close(fd). set_nonblock: flip O_NONBLOCK on. */
+ * close: close(fd). set_nonblock: flip O_NONBLOCK on.
+ * set_nodelay: disable Nagle on a connection fd (called for you by
+ *   accept/accept_nb/connect; exposed for fds obtained elsewhere). */
 int sp_net_listen(int port, int reuseport);
 int sp_net_accept(int sfd);
 int sp_net_accept_nb(int sfd);
 int sp_net_connect(const char *host, int port);
 int sp_net_close(int fd);
 int sp_net_set_nonblock(int fd);
+void sp_net_set_nodelay(int fd);
 
 /* ---- TCP I/O ----
  * recv_some: up to maxlen bytes from one read. recv_all: read until
  * EOF or max_bytes. Both return a static, NUL-terminated buffer
  * (empty on error/EOF). write_str: write the full NUL-terminated
  * string; write_bytes: binary variant (explicit length, NUL-safe).
- * Return 0 on success, -1 on failure. */
+ * Return 0 on success, -1 on failure.
+ *
+ * Binary-safe recv: a NUL-terminated buffer can't carry an embedded
+ * 0x00 (WebSocket frames do). Declaring recv_some/recv_all with the
+ * FFI `:binstr` return mode builds the result String from the exact
+ * byte count published in sp_net_bin_len instead of strlen, so binary
+ * payloads survive. The same C functions serve both `:str` and
+ * `:binstr` callers; sp_net_bin_len holds the last recv's byte count. */
+extern int  sp_net_bin_len;
 const char *sp_net_recv_some(int fd, int maxlen);
 const char *sp_net_recv_all(int fd, int max_bytes);
 int         sp_net_write_str(int fd, const char *s);

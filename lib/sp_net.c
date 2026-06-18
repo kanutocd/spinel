@@ -73,6 +73,21 @@ int sp_net_shutdown_requested(void) {
     return (int)sp_net_term_flag;
 }
 
+/* Byte count written into the recv buffer by the most recent recv. The FFI
+ * `:binstr` return mode reads this to build a binary-safe String of exactly
+ * this many bytes (rather than strlen-truncating at the first NUL), so the same
+ * recv functions serve both text (`:str`) and binary (`:binstr`) callers.
+ * Single-threaded (the Fiber model is cooperative), so no locking is needed. */
+int sp_net_bin_len = 0;
+
+/* Disable Nagle on a connection fd. TCP_NODELAY is a per-connection option, so
+ * it must be set on each accepted fd, not just the listener -- otherwise small
+ * writes (response headers, WebSocket frames) stall against delayed-ACK. */
+void sp_net_set_nodelay(int fd) {
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
 /* ---------- TCP socket lifecycle ---------- */
 
 int sp_net_listen(int port, int reuseport) {
@@ -128,7 +143,7 @@ int sp_net_accept(int sfd) {
         }
         if (!(pfds[0].revents & POLLIN)) continue;  /* woken by the self-pipe alone */
         fd = accept(sfd, (struct sockaddr *)&caddr, &clen);
-        if (fd >= 0) return fd;
+        if (fd >= 0) { sp_net_set_nodelay(fd); return fd; }
         if (errno == EINTR) {
             if (sp_net_term_flag) return -1;
             continue;   /* unrelated signal (SIGCHLD, ...) -- retry */
@@ -144,6 +159,7 @@ int sp_net_accept_nb(int sfd) {
     do {
         fd = accept(sfd, (struct sockaddr *)&caddr, &clen);
     } while (fd < 0 && errno == EINTR);
+    if (fd >= 0) sp_net_set_nodelay(fd);
     return fd;
 }
 
@@ -226,15 +242,18 @@ const char *sp_net_recv_some(int fd, int maxlen) {
     for (;;) {
         /* Cooperative shutdown: bail rather than retry into the signal. */
         if (sp_net_term_flag) {
+            sp_net_bin_len = 0;
             sp_net_recv_buf[0] = '\0';
             return sp_net_recv_buf;
         }
         n = recv(fd, sp_net_recv_buf, (size_t)maxlen, 0);
         if (n >= 0) break;
         if (errno == EINTR) continue;   /* e.g. SIGCHLD in a prefork server */
+        sp_net_bin_len = 0;
         sp_net_recv_buf[0] = '\0';
         return sp_net_recv_buf;
     }
+    sp_net_bin_len = (int)n;            /* exact byte count for the :binstr path */
     sp_net_recv_buf[n] = '\0';
     return sp_net_recv_buf;
 }
@@ -253,6 +272,7 @@ const char *sp_net_recv_all(int fd, int max_bytes) {
         if (n == 0) break;                   /* clean EOF */
         total += (int)n;
     }
+    sp_net_bin_len = total;              /* exact byte count for the :binstr path */
     sp_net_recv_all_buf[total] = '\0';
     return sp_net_recv_all_buf;
 }
@@ -339,6 +359,7 @@ const char *sp_net_shell_capture(const char *cmd, int max_bytes) {
         if (n == 0) break;
         total += n;
     }
+    sp_net_bin_len = (int)total;        /* exact byte count for the :binstr path */
     sp_net_shell_buf[total] = '\0';
     pclose(fp);
     return sp_net_shell_buf;

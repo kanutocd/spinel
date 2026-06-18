@@ -411,6 +411,7 @@ const char *ffi_c_type(const char *spec) {
   if (!strcmp(spec, "double")) return "double";
   if (!strcmp(spec, "bool"))   return "int";
   if (!strcmp(spec, "str"))    return "const char *";
+  if (!strcmp(spec, "binstr")) return "const char *";  /* bytes + sp_net_bin_len */
   if (!strcmp(spec, "ptr"))    return "void *";
   if (!strcmp(spec, "float_array")) return "const double *";
   if (!strcmp(spec, "int_array"))   return "const int64_t *";

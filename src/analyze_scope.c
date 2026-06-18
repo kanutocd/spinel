@@ -1163,7 +1163,7 @@ TyKind ffi_spec_to_ty(const char *spec) {
       !strcmp(spec,"size_t")||!strcmp(spec,"long")||!strcmp(spec,"int64"))
     return TY_INT;
   if (!strcmp(spec,"float")||!strcmp(spec,"double")) return TY_FLOAT;
-  if (!strcmp(spec,"str")) return TY_STRING;
+  if (!strcmp(spec,"str")||!strcmp(spec,"binstr")) return TY_STRING;
   if (!strcmp(spec,"bool")) return TY_BOOL;
   if (!strcmp(spec,"ptr")) return TY_POLY;
   if (!strcmp(spec,"void")) return TY_NIL;

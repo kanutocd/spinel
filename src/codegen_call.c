@@ -3128,6 +3128,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         int is_void_ret = !strcmp(ret_spec, "void");
         int is_ptr_ret  = !strcmp(ret_spec, "ptr");
         int is_str_ret  = !strcmp(ret_spec, "str");
+        int is_binstr_ret = !strcmp(ret_spec, "binstr");
         int call_argc = c->ffi_func_nargs[fi];
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
@@ -3202,6 +3203,16 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         }
         else if (is_str_ret) {
           buf_printf(b, "sp_str_dup_external(%s)", call_buf.p);
+        }
+        else if (is_binstr_ret) {
+          /* Binary-safe: build the String from the exact byte count the callee
+             published in sp_net_bin_len, not strlen (which truncates at an
+             embedded NUL). Sequence the call before reading the length -- C
+             leaves argument evaluation order unspecified -- via a temp. */
+          int tp = ++g_tmp;
+          buf_printf(b, "({ const char *_t%d = %s; "
+                        "sp_str_from_bytes(_t%d, (size_t)(sp_net_bin_len < 0 ? 0 : sp_net_bin_len)); })",
+                     tp, call_buf.p, tp);
         }
         else {
           /* numeric / bool: cast to mrb_int or mrb_float */
