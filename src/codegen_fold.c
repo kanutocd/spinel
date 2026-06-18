@@ -2343,11 +2343,21 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
 
 /* Emit the `pattern === elem` membership test for grep, given the element
    bound to C variable `ev`. Returns 1 if the pattern kind is supported. */
-int emit_grep_pred(Compiler *c, int pat, const char *ev, Buf *b) {
+int emit_grep_pred(Compiler *c, int pat, const char *ev, TyKind et, Buf *b) {
   const NodeTable *nt = c->nt;
   int re = re_lit_index(c, pat);
   if (re >= 0) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, %s)", re, ev); return 1; }
   const char *pty = nt_type(nt, pat);
+  /* A value-literal pattern uses `pattern === elem` == value equality. The C
+     comparison depends on the element representation: a raw scalar for a typed
+     array, a boxed sp_RbVal for a poly array. */
+  if (pty && !strcmp(pty, "IntegerNode")) {
+    long long v = (long long)nt_int(nt, pat, "value", 0);
+    if (et == TY_INT) buf_printf(b, "((%s) == %lldLL)", ev, v);
+    else if (et == TY_POLY) buf_printf(b, "sp_poly_eq(%s, sp_box_int(%lldLL))", ev, v);
+    else return 0;
+    return 1;
+  }
   if (pty && !strcmp(pty, "RangeNode")) {
     int tr = ++g_tmp;
     buf_printf(b, "({ sp_Range _t%d = ", tr); emit_expr(c, pat, b);
@@ -2386,14 +2396,14 @@ int emit_grep_expr(Compiler *c, int id, Buf *b) {
   const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
   if (!k) return 0;
   int pat = argv[0];
+  TyKind et = ty_array_elem(rt);
 
   /* probe predicate support before emitting anything */
   Buf probe; memset(&probe, 0, sizeof probe);
-  if (!emit_grep_pred(c, pat, "_e", &probe)) { free(probe.p); return 0; }
+  if (!emit_grep_pred(c, pat, "_e", et, &probe)) { free(probe.p); return 0; }
   free(probe.p);
 
   int neg = !strcmp(name, "grep_v");
-  TyKind et = ty_array_elem(rt);
   int trecv = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp, te = ++g_tmp;
 
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
@@ -2411,7 +2421,7 @@ int emit_grep_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent + 1);
   char ev[16]; snprintf(ev, sizeof ev, "_t%d", te);
   buf_printf(g_pre, "if (%s(", neg ? "!" : "");
-  emit_grep_pred(c, pat, ev, g_pre);
+  emit_grep_pred(c, pat, ev, et, g_pre);
   buf_printf(g_pre, ")) sp_%sArray_push(_t%d, _t%d);\n", k, tres, te);
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "}\n");
