@@ -32,8 +32,13 @@ endif
 # `-Wno-alloc-size-larger-than` silences a gcc 13+ paranoia warning on the
 # inlined `h->cap *= 2` in sp_*Hash_grow; `-Wno-unknown-warning-option`
 # keeps clang (which lacks that flag) from turning it into a -Werror fail.
+# `-Wno-format-truncation` silences gcc's FORTIFY-driven paranoia on benign
+# `snprintf(buf, sizeof buf, "@%s", name)` ivar/path builds (the buffers are
+# sized for real identifiers; the warning fires independently of -Wall under
+# _FORTIFY_SOURCE, so -Wno-all does not cover it). clang lacks the flag and
+# ignores it via -Wno-unknown-warning-option above.
 OPT     ?= -O2
-CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than
+CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than -Wno-format-truncation
 
 # Bootstrap-only flags: the legacy compiler runs on the developer's
 # machine only, so -O3 -flto buys ~5-10% wall-clock without constraining
