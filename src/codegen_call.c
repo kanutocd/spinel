@@ -3021,6 +3021,208 @@ static int emit_range_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+static int emit_poly_call(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  const int *argv = NULL;
+  if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
+  TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  /* encoding.name -> the encoding name string */
+  if (!strcmp(name, "name") && argc == 0 && recv >= 0 && comp_ntype(c, recv) == TY_POLY) {
+    const char *rty2 = nt_type(nt, recv);
+    int is_enc = (rty2 && !strcmp(rty2, "SourceEncodingNode")) ||
+                 (rty2 && !strcmp(rty2, "CallNode") &&
+                  nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "encoding"));
+    if (is_enc) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
+  }
+
+  /* poly receiver: nil? / conversions / a few type-agnostic queries */
+  if (recv >= 0 && rt == TY_POLY && argc == 0) {
+    if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
+    if (!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "empty?")) {
+      int has_user_len = 0;
+      const char *lcheck = (!strcmp(name, "empty?")) ? "length" : name;
+      for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
+        if (comp_method_in_chain(c, kk, lcheck, NULL) >= 0) has_user_len = 1;
+      if (!strcmp(name, "empty?") && !has_user_len)
+        for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
+          if (comp_method_in_chain(c, kk, "empty?", NULL) >= 0) has_user_len = 1;
+      if (!has_user_len) {
+        if (!strcmp(name, "empty?")) {
+          buf_puts(b, "(sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
+        }
+        else {
+          buf_puts(b, "sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ")");
+        }
+        return 1;
+      }
+    }
+    if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
+      int has_user_method = 0;
+      for (int k = 0; k < c->nclasses; k++)
+        if (comp_method_in_chain(c, k, name, NULL) >= 0) { has_user_method = 1; break; }
+      if (!has_user_method) {
+        buf_printf(b, "%s(", !strcmp(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect");
+        emit_expr(c, recv, b); buf_puts(b, ")"); return 1;
+      }
+    }
+    if (!strcmp(name, "to_i")) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
+    if (!strcmp(name, "to_f")) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, recv, b); buf_puts(b, ")"); return 1; }
+    if (!strcmp(name, "upcase"))     { buf_puts(b, "sp_box_str(sp_str_upcase(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "downcase"))   { buf_puts(b, "sp_box_str(sp_str_downcase(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "capitalize")) { buf_puts(b, "sp_box_str(sp_str_capitalize(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "strip"))      { buf_puts(b, "sp_box_str(sp_str_strip(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "reverse"))    { buf_puts(b, "sp_box_str(sp_str_reverse(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "chomp"))      { buf_puts(b, "sp_box_str(sp_str_chomp(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "chop"))       { buf_puts(b, "sp_box_str(sp_str_chop(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "chr"))        { buf_puts(b, "sp_box_str(sp_str_chr(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return 1; }
+    if (!strcmp(name, "freeze"))     { emit_expr(c, recv, b); return 1; }
+  }
+  /* poly receiver: arr[start, len] = src -- 3-arg splice assign
+     Skip Fiber/Fiber.current storage receivers (handled later). */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]=") && argc == 3 &&
+      !sp_is_fiber_storage_recv(nt, recv)) {
+    int tv = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", tv); emit_boxed(c, argv[2], b);
+    buf_puts(b, "; sp_poly_splice("); emit_expr(c, recv, b); buf_puts(b, ", ");
+    emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b);
+    buf_printf(b, ", _t%d); _t%d; })", tv, tv);
+    return 1;
+  }
+  /* poly receiver: []= with symbol, string, int, or poly key -> runtime dispatch
+     Skip Fiber/Fiber.current storage receivers (handled later). */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]=") && argc == 2 &&
+      !sp_is_fiber_storage_recv(nt, recv)) {
+    TyKind at = comp_ntype(c, argv[0]);
+    TyKind vt = comp_ntype(c, argv[1]);
+    int tv = ++g_tmp;
+    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", tv); emit_boxed(c, argv[1], b);
+    buf_puts(b, "; ");
+    if (at == TY_STRING) {
+      buf_printf(b, "sp_poly_set_str("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_expr(c, argv[0], b);
+    }
+    else if (at == TY_SYMBOL) {
+      buf_printf(b, "sp_poly_set_sym("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_expr(c, argv[0], b);
+    }
+    else if (at == TY_INT) {
+      /* widen_and_set only returns a *different* boxed value when an IntArray is
+         promoted to a PolyArray; otherwise it mutates in place. We can only
+         write the result back when the receiver is a simple assignable lvalue
+         (a local or ivar). For a computed receiver (e.g. @nmt_mem[bank][idx]=v,
+         where the receiver is itself an array element), drop the write-back and
+         rely on in-place mutation. */
+      const char *rcvty = nt_type(nt, recv);
+      int recv_is_lvalue = rcvty && (!strcmp(rcvty, "LocalVariableReadNode") ||
+                                     !strcmp(rcvty, "InstanceVariableReadNode"));
+      if (recv_is_lvalue) {
+        emit_expr(c, recv, b);
+        buf_puts(b, " = sp_poly_arr_widen_and_set("); emit_expr(c, recv, b);
+      }
+      else {
+        buf_puts(b, "sp_poly_arr_widen_and_set("); emit_expr(c, recv, b);
+      }
+      buf_puts(b, ", "); emit_int_expr(c, argv[0], b);
+    }
+    else {
+      buf_printf(b, "sp_poly_set_poly("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+    }
+    buf_printf(b, ", _t%d); _t%d; })", tv, tv);
+    (void)vt;
+    return 1;
+  }
+  /* poly receiver: [] with symbol or string key -> runtime dispatch */
+  /* poly receiver: arr[start, len] -> sp_poly_slice (string or typed array) */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 2) {
+    /* The runtime dispatches on the receiver's tag: a string/array does a
+       two-arg slice, a bound Method (optcarrot's poke handlers) is called with
+       both int args. Both operands are raw integers. */
+    buf_puts(b, "sp_poly_slice("); emit_expr(c, recv, b); buf_puts(b, ", ");
+    emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+    return 1;
+  }
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 1) {
+    /* `@table[i][j]` dispatch table narrowed to int (poly_double_index_int):
+       call the entry (bound method / int array) for an unboxed int result. */
+    if (comp_ntype(c, id) == TY_INT) {
+      buf_puts(b, "sp_poly_index_int("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+      return 1;
+    }
+    TyKind at = comp_ntype(c, argv[0]);
+    /* Only use the fast single-call path when no user class defines [].
+       If any user class has its own [] method, fall through to the per-class
+       poly dispatch (line ~4640) which generates both user and builtin arms. */
+    int has_user_aref = 0;
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_method_in_chain(c, k, "[]", NULL) >= 0) { has_user_aref = 1; break; }
+    if (!has_user_aref) {
+      if (at == TY_SYMBOL) {
+        buf_puts(b, "sp_poly_get_sym("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+      if (at == TY_STRING) {
+        buf_puts(b, "sp_poly_get_str("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+      if (at == TY_INT) {
+        buf_puts(b, "sp_poly_arr_get_hash("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+      if (at == TY_POLY) {
+        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+      /* a non-poly key (e.g. a Method): box it, then index polymorphically */
+      if (at != TY_UNKNOWN) {
+        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        return 1;
+      }
+    }
+  }
+  /* poly receiver: join */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "join")) {
+    buf_puts(b, "sp_poly_join("); emit_expr(c, recv, b);
+    buf_puts(b, ", "); if (argc >= 1) emit_expr(c, argv[0], b); else buf_puts(b, "\"\"");
+    buf_puts(b, ")"); return 1;
+  }
+  /* poly receiver: replace(other) -> runtime dispatch (nullable array). */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "replace") && argc == 1) {
+    buf_puts(b, "sp_poly_replace("); emit_expr(c, recv, b);
+    buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    return 1;
+  }
+  /* poly receiver: pack(fmt) -> runtime dispatch (nullable array). */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "pack") && argc == 1) {
+    buf_puts(b, "sp_poly_pack("); emit_expr(c, recv, b);
+    buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    return 1;
+  }
+
+  /* poly receiver: gsub/sub with a regex literal -- extract the string
+     payload (poly values reaching here are strings) and route to the
+     engine, just like a TY_STRING receiver. */
+  if (recv >= 0 && rt == TY_POLY && (!strcmp(name, "gsub") || !strcmp(name, "sub")) &&
+      argc == 2 && re_lit_index(c, argv[0]) >= 0) {
+    const char *suf = comp_ntype(c, argv[1]) == TY_STR_STR_HASH ? "_str_str_hash" : "";
+    buf_printf(b, "sp_re_%s%s(sp_re_pat_%d, sp_poly_to_s(", name, suf, re_lit_index(c, argv[0]));
+    emit_expr(c, recv, b); buf_puts(b, "), ");
+    emit_expr(c, argv[1], b); buf_puts(b, ")");
+    return 1;
+  }
+  return 0;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   /* `require` / `require_relative` is a compile-time directive: top-level ones
@@ -7136,196 +7338,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     }
   }
 
-  /* encoding.name -> the encoding name string */
-  if (!strcmp(name, "name") && argc == 0 && recv >= 0 && comp_ntype(c, recv) == TY_POLY) {
-    const char *rty2 = nt_type(nt, recv);
-    int is_enc = (rty2 && !strcmp(rty2, "SourceEncodingNode")) ||
-                 (rty2 && !strcmp(rty2, "CallNode") &&
-                  nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "encoding"));
-    if (is_enc) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
-  }
-
-  /* poly receiver: nil? / conversions / a few type-agnostic queries */
-  if (recv >= 0 && rt == TY_POLY && argc == 0) {
-    if (!strcmp(name, "nil?")) { buf_puts(b, "sp_poly_nil_p("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
-    if (!strcmp(name, "length") || !strcmp(name, "size") || !strcmp(name, "empty?")) {
-      int has_user_len = 0;
-      const char *lcheck = (!strcmp(name, "empty?")) ? "length" : name;
-      for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
-        if (comp_method_in_chain(c, kk, lcheck, NULL) >= 0) has_user_len = 1;
-      if (!strcmp(name, "empty?") && !has_user_len)
-        for (int kk = 0; kk < c->nclasses && !has_user_len; kk++)
-          if (comp_method_in_chain(c, kk, "empty?", NULL) >= 0) has_user_len = 1;
-      if (!has_user_len) {
-        if (!strcmp(name, "empty?")) {
-          buf_puts(b, "(sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ") == 0)");
-        }
-        else {
-          buf_puts(b, "sp_poly_length("); emit_expr(c, recv, b); buf_puts(b, ")");
-        }
-        return;
-      }
-    }
-    if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
-      int has_user_method = 0;
-      for (int k = 0; k < c->nclasses; k++)
-        if (comp_method_in_chain(c, k, name, NULL) >= 0) { has_user_method = 1; break; }
-      if (!has_user_method) {
-        buf_printf(b, "%s(", !strcmp(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect");
-        emit_expr(c, recv, b); buf_puts(b, ")"); return;
-      }
-    }
-    if (!strcmp(name, "to_i")) { buf_puts(b, "sp_poly_to_i("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
-    if (!strcmp(name, "to_f")) { buf_puts(b, "sp_poly_to_f("); emit_expr(c, recv, b); buf_puts(b, ")"); return; }
-    if (!strcmp(name, "upcase"))     { buf_puts(b, "sp_box_str(sp_str_upcase(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "downcase"))   { buf_puts(b, "sp_box_str(sp_str_downcase(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "capitalize")) { buf_puts(b, "sp_box_str(sp_str_capitalize(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "strip"))      { buf_puts(b, "sp_box_str(sp_str_strip(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "reverse"))    { buf_puts(b, "sp_box_str(sp_str_reverse(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "chomp"))      { buf_puts(b, "sp_box_str(sp_str_chomp(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "chop"))       { buf_puts(b, "sp_box_str(sp_str_chop(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "chr"))        { buf_puts(b, "sp_box_str(sp_str_chr(sp_poly_to_s("); emit_expr(c, recv, b); buf_puts(b, ")))"); return; }
-    if (!strcmp(name, "freeze"))     { emit_expr(c, recv, b); return; }
-  }
-  /* poly receiver: arr[start, len] = src -- 3-arg splice assign
-     Skip Fiber/Fiber.current storage receivers (handled later). */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]=") && argc == 3 &&
-      !sp_is_fiber_storage_recv(nt, recv)) {
-    int tv = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", tv); emit_boxed(c, argv[2], b);
-    buf_puts(b, "; sp_poly_splice("); emit_expr(c, recv, b); buf_puts(b, ", ");
-    emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b);
-    buf_printf(b, ", _t%d); _t%d; })", tv, tv);
-    return;
-  }
-  /* poly receiver: []= with symbol, string, int, or poly key -> runtime dispatch
-     Skip Fiber/Fiber.current storage receivers (handled later). */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]=") && argc == 2 &&
-      !sp_is_fiber_storage_recv(nt, recv)) {
-    TyKind at = comp_ntype(c, argv[0]);
-    TyKind vt = comp_ntype(c, argv[1]);
-    int tv = ++g_tmp;
-    buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", tv); emit_boxed(c, argv[1], b);
-    buf_puts(b, "; ");
-    if (at == TY_STRING) {
-      buf_printf(b, "sp_poly_set_str("); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_expr(c, argv[0], b);
-    }
-    else if (at == TY_SYMBOL) {
-      buf_printf(b, "sp_poly_set_sym("); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_expr(c, argv[0], b);
-    }
-    else if (at == TY_INT) {
-      /* widen_and_set only returns a *different* boxed value when an IntArray is
-         promoted to a PolyArray; otherwise it mutates in place. We can only
-         write the result back when the receiver is a simple assignable lvalue
-         (a local or ivar). For a computed receiver (e.g. @nmt_mem[bank][idx]=v,
-         where the receiver is itself an array element), drop the write-back and
-         rely on in-place mutation. */
-      const char *rcvty = nt_type(nt, recv);
-      int recv_is_lvalue = rcvty && (!strcmp(rcvty, "LocalVariableReadNode") ||
-                                     !strcmp(rcvty, "InstanceVariableReadNode"));
-      if (recv_is_lvalue) {
-        emit_expr(c, recv, b);
-        buf_puts(b, " = sp_poly_arr_widen_and_set("); emit_expr(c, recv, b);
-      }
-      else {
-        buf_puts(b, "sp_poly_arr_widen_and_set("); emit_expr(c, recv, b);
-      }
-      buf_puts(b, ", "); emit_int_expr(c, argv[0], b);
-    }
-    else {
-      buf_printf(b, "sp_poly_set_poly("); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_boxed(c, argv[0], b);
-    }
-    buf_printf(b, ", _t%d); _t%d; })", tv, tv);
-    (void)vt;
-    return;
-  }
-  /* poly receiver: [] with symbol or string key -> runtime dispatch */
-  /* poly receiver: arr[start, len] -> sp_poly_slice (string or typed array) */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 2) {
-    /* The runtime dispatches on the receiver's tag: a string/array does a
-       two-arg slice, a bound Method (optcarrot's poke handlers) is called with
-       both int args. Both operands are raw integers. */
-    buf_puts(b, "sp_poly_slice("); emit_expr(c, recv, b); buf_puts(b, ", ");
-    emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
-    return;
-  }
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "[]") && argc == 1) {
-    /* `@table[i][j]` dispatch table narrowed to int (poly_double_index_int):
-       call the entry (bound method / int array) for an unboxed int result. */
-    if (comp_ntype(c, id) == TY_INT) {
-      buf_puts(b, "sp_poly_index_int("); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
-      return;
-    }
-    TyKind at = comp_ntype(c, argv[0]);
-    /* Only use the fast single-call path when no user class defines [].
-       If any user class has its own [] method, fall through to the per-class
-       poly dispatch (line ~4640) which generates both user and builtin arms. */
-    int has_user_aref = 0;
-    for (int k = 0; k < c->nclasses; k++)
-      if (comp_method_in_chain(c, k, "[]", NULL) >= 0) { has_user_aref = 1; break; }
-    if (!has_user_aref) {
-      if (at == TY_SYMBOL) {
-        buf_puts(b, "sp_poly_get_sym("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-      if (at == TY_STRING) {
-        buf_puts(b, "sp_poly_get_str("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-      if (at == TY_INT) {
-        buf_puts(b, "sp_poly_arr_get_hash("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-      if (at == TY_POLY) {
-        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-      /* a non-poly key (e.g. a Method): box it, then index polymorphically */
-      if (at != TY_UNKNOWN) {
-        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-        return;
-      }
-    }
-  }
-  /* poly receiver: join */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "join")) {
-    buf_puts(b, "sp_poly_join("); emit_expr(c, recv, b);
-    buf_puts(b, ", "); if (argc >= 1) emit_expr(c, argv[0], b); else buf_puts(b, "\"\"");
-    buf_puts(b, ")"); return;
-  }
-  /* poly receiver: replace(other) -> runtime dispatch (nullable array). */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "replace") && argc == 1) {
-    buf_puts(b, "sp_poly_replace("); emit_expr(c, recv, b);
-    buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-    return;
-  }
-  /* poly receiver: pack(fmt) -> runtime dispatch (nullable array). */
-  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "pack") && argc == 1) {
-    buf_puts(b, "sp_poly_pack("); emit_expr(c, recv, b);
-    buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
-    return;
-  }
-
-  /* poly receiver: gsub/sub with a regex literal -- extract the string
-     payload (poly values reaching here are strings) and route to the
-     engine, just like a TY_STRING receiver. */
-  if (recv >= 0 && rt == TY_POLY && (!strcmp(name, "gsub") || !strcmp(name, "sub")) &&
-      argc == 2 && re_lit_index(c, argv[0]) >= 0) {
-    const char *suf = comp_ntype(c, argv[1]) == TY_STR_STR_HASH ? "_str_str_hash" : "";
-    buf_printf(b, "sp_re_%s%s(sp_re_pat_%d, sp_poly_to_s(", name, suf, re_lit_index(c, argv[0]));
-    emit_expr(c, recv, b); buf_puts(b, "), ");
-    emit_expr(c, argv[1], b); buf_puts(b, ")");
-    return;
-  }
+  if (emit_poly_call(c, id, b)) return;
 
   /* between?(lo, hi): lo <= self <= hi */
   if (!strcmp(name, "between?") && argc == 2) {
