@@ -2341,8 +2341,14 @@ void analyze_program(Compiler *c) {
   for (int id = 0; id < c->nt->count; id++) {
     const char *ty = nt_type(c->nt, id);
     if (!ty) continue;
-    int is_lv = !strcmp(ty, "LocalVariableWriteNode");
-    int is_iv = !strcmp(ty, "InstanceVariableWriteNode");
+    int is_lv = !strcmp(ty, "LocalVariableWriteNode") ||
+                !strcmp(ty, "LocalVariableOrWriteNode") ||
+                !strcmp(ty, "LocalVariableAndWriteNode") ||
+                !strcmp(ty, "LocalVariableOperatorWriteNode");
+    int is_iv = !strcmp(ty, "InstanceVariableWriteNode") ||
+                !strcmp(ty, "InstanceVariableOrWriteNode") ||
+                !strcmp(ty, "InstanceVariableAndWriteNode") ||
+                !strcmp(ty, "InstanceVariableOperatorWriteNode");
     if (!is_lv && !is_iv) continue;
     int v = nt_ref(c->nt, id, "value");
     if (v < 0) continue;
@@ -2359,7 +2365,7 @@ void analyze_program(Compiler *c) {
       if (lv) dstt = lv->type;
     } else {
       Scope *s = comp_scope_of(c, id);
-      if (s && s->class_id >= 0) {
+      if (s && s->class_id >= 0 && s->class_id < c->nclasses) {
         int iv = comp_ivar_index(&c->classes[s->class_id], nm);
         if (iv >= 0) dstt = c->classes[s->class_id].ivar_types[iv];
       }
