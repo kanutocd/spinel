@@ -76,6 +76,18 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   return 1;
 }
 
+/* Emit `node` as a `sp_Bigint *` for a mixed bigint operand (arithmetic or
+   comparison where the other side is bigint): a bigint stays itself, a poly is
+   narrowed with sp_poly_as_bigint, and anything else (a plain int) is promoted
+   with sp_bigint_new_int. Not for the int64 exponent/shift argument of pow or
+   the shift operators, which stays an int. */
+static void emit_bigint_operand(Compiler *c, int node, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  if (t == TY_BIGINT) { emit_expr(c, node, b); return; }
+  if (t == TY_POLY) { buf_puts(b, "sp_poly_as_bigint("); emit_expr(c, node, b); buf_puts(b, ")"); return; }
+  buf_puts(b, "sp_bigint_new_int("); emit_expr(c, node, b); buf_puts(b, ")");
+}
+
 /* `s[i]` on a string with a single non-negative-style int index. Records the
    string receiver and index nodes. Used to fold `s[i] == "c"` into a raw byte
    comparison (no per-access 1-char string allocation). */
@@ -7204,8 +7216,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
                         : !strcmp(name, "<<") ? "sp_bigint_shl"
                         : "sp_bigint_shr";
         buf_printf(b, "%s(", sfn);
-        if (rt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
-        else emit_expr(c, recv, b);
+        emit_bigint_operand(c, recv, b);
         buf_puts(b, ", ");
         if (comp_ntype(c, argv[0]) == TY_BIGINT) { buf_puts(b, "sp_bigint_to_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
         else { buf_puts(b, "(int64_t)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
@@ -7215,12 +7226,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       const char *bfn = bigint_arith_fn(name);
       if (bfn) {
         buf_printf(b, "%s(", bfn);
-        if (rt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
-        else emit_expr(c, recv, b);
+        emit_bigint_operand(c, recv, b);
         buf_puts(b, ", ");
-        TyKind at0 = comp_ntype(c, argv[0]);
-        if (at0 != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-        else emit_expr(c, argv[0], b);
+        emit_bigint_operand(c, argv[0], b);
         buf_puts(b, ")");
         return;
       }
@@ -7351,12 +7359,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        !strcmp(name, "<=") || !strcmp(name, ">="))) {
     if (rt == TY_BIGINT || comp_ntype(c, argv[0]) == TY_BIGINT) {
       buf_printf(b, "(sp_bigint_cmp(");
-      if (rt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
-      else emit_expr(c, recv, b);
+      emit_bigint_operand(c, recv, b);
       buf_puts(b, ", ");
-      TyKind cmp_at = comp_ntype(c, argv[0]);
-      if (cmp_at != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-      else emit_expr(c, argv[0], b);
+      emit_bigint_operand(c, argv[0], b);
       buf_printf(b, ") %s 0)", name);
       return;
     }
@@ -7796,11 +7801,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     /* bigint == / != */
     if (rt == TY_BIGINT || a0 == TY_BIGINT) {
       buf_printf(b, "(sp_bigint_cmp(");
-      if (rt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
-      else emit_expr(c, recv, b);
+      emit_bigint_operand(c, recv, b);
       buf_puts(b, ", ");
-      if (a0 != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-      else emit_expr(c, argv[0], b);
+      emit_bigint_operand(c, argv[0], b);
       buf_printf(b, ") %s 0)", eq ? "==" : "!=");
       return;
     }

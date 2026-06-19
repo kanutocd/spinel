@@ -10,6 +10,7 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   const char *fn = NULL;
   switch (t) {
     case TY_INT: fn = "sp_box_int"; break;       case TY_FLOAT: fn = "sp_box_float"; break;
+    case TY_BIGINT: fn = "sp_box_bigint"; break;
     case TY_STRING: fn = "sp_box_str"; break;     case TY_BOOL: fn = "sp_box_bool"; break;
     case TY_SYMBOL: fn = "sp_box_sym"; break;     case TY_RANGE: fn = "sp_box_range"; break;
     case TY_TIME: fn = "sp_box_time"; break;
@@ -36,6 +37,7 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
     case TY_STRING: buf_printf(b, "(%s).v.s", expr); return;
     case TY_BOOL:   buf_printf(b, "(%s).v.b", expr); return;
     case TY_SYMBOL: buf_printf(b, "(sp_sym)(%s).v.i", expr); return;
+    case TY_BIGINT: buf_printf(b, "(sp_Bigint *)(%s).v.p", expr); return;
     default: break;
   }
   if (ty_is_object(t)) { buf_printf(b, "(sp_%s *)(%s).v.p", c->classes[ty_object_class(t)].name, expr); return; }
@@ -110,6 +112,7 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
   switch (t) {
     case TY_INT:    fn = "sp_box_int";   break;
     case TY_FLOAT:  fn = "sp_box_float"; break;
+    case TY_BIGINT: fn = "sp_box_bigint"; break;
     case TY_STRING: fn = "sp_box_str";   break;
     case TY_BOOL:   fn = "sp_box_bool";  break;
     case TY_SYMBOL: fn = "sp_box_sym";   break;
