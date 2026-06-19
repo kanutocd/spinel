@@ -17329,7 +17329,7 @@ class Compiler
  # walking the then-arm so a recursive call inside the arm sees
  # the narrowed type and unify_call_types widens the callee's
  # param accordingly. The else-arm walks unchanged — we don't
- # currently model "type minus C" (see POLY-AS-SET.md).
+ # currently model "type minus C".
     if @nd_type[nid] == "IfNode"
       pred = @nd_predicate[nid]
       if pred >= 0

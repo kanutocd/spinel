@@ -46,6 +46,7 @@ file_write_poly_arg
 /OPTIMIZATION.md
 /ISSUE_TRIAGE.md
 /PR908.md
+/POLY-AS-SET.md
 /t3b.types.json
 *.gem
 
