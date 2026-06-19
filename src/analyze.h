@@ -10,6 +10,13 @@
 
 #include "compiler.h"
 
+/* Set by main.c from --int-overflow=promote. In promote mode the analyzer is
+   free to widen accumulating int locals to bigint more aggressively (e.g. block
+   iteration loops, not just `while`), since the overflow-raising int macros are
+   exactly what promote mode is asking us to avoid. Off (0) for raise/wrap, so
+   the default gates and optcarrot (which pins wrap) see no behavior change. */
+extern int g_promote_mode;
+
 /* Run inference over the whole program: register locals, reach a fixpoint
    on their types, and fill the node type cache. */
 void analyze_program(Compiler *c);

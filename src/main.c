@@ -19,6 +19,7 @@
  */
 #include "node_table.h"
 #include "codegen.h"
+#include "analyze.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -274,6 +275,9 @@ int main(int argc, char **argv) {
   else if (!strcmp(int_overflow, "wrap"))    ov_define = "-DSP_INT_OVERFLOW_MODE_WRAP";
   else if (!strcmp(int_overflow, "promote")) ov_define = "-DSP_INT_OVERFLOW_MODE_PROMOTE";
   else { fprintf(stderr, "spinel: --int-overflow expects raise|wrap|promote, got '%s'\n", int_overflow); return 2; }
+  /* Let the analyzer widen accumulating int locals to bigint more freely in
+     promote mode (block-iteration loops, not just `while`). See analyze.h. */
+  g_promote_mode = !strcmp(int_overflow, "promote");
 
   /* Base name for default output paths. */
   char basename[1024];

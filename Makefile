@@ -268,6 +268,14 @@ TESTS := $(wildcard test/*.rb)
 # --int-overflow=promote the same code auto-promotes and output diverges.
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
 TESTS := $(filter-out test/int_overflow_raises.rb,$(TESTS))
+# Drive the spinel front-end and the C compile in promote mode so the test
+# rule actually exercises the auto-promotion path end to end.
+SP_OV_FLAG := --int-overflow=promote
+SP_OV_DEFINE := -DSP_INT_OVERFLOW_MODE_PROMOTE
+else
+# `promote_*` tests overflow on purpose and only have defined output under
+# --int-overflow=promote; in raise/wrap mode they would (correctly) raise.
+TESTS := $(filter-out test/promote_%.rb,$(TESTS))
 endif
 # sp_net is POSIX-only; on Windows the TU compiles to stubs and the smoke
 # test's output diverges. Skip it there.
@@ -402,8 +410,8 @@ build/test-results/%.ok: test/%.rb $(SP_RT_LIB) | $(SPINEL)
 	args=""; \
 	if [ -f "$<.args" ]; then args=$$(cat "$<.args"); fi; \
 	rm -f "$@.diff"; \
-	$(SPINEL) "$<" -c --no-line-map -o "$$cfile" 2>/dev/null && \
-	$(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib "$$cfile" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
+	$(SPINEL) "$<" $(SP_OV_FLAG) -c --no-line-map -o "$$cfile" 2>/dev/null && \
+	$(CC) $(CFLAGS) $(SP_OV_DEFINE) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib "$$cfile" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
 	  if [ -f "$<.expected" ]; then \
 	    LC_ALL=C sed 's/\r$$//' "$<.expected" >"$$exp.n"; \

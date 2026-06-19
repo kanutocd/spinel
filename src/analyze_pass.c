@@ -3896,16 +3896,44 @@ static void bi_scan_loop_node(Compiler *c, int id, const BiPair *pairs, int np) 
   }
 }
 
+/* Run the self-referential-multiply scan over one loop body subtree. */
+static void bi_scan_loop_body(Compiler *c, int body) {
+  if (body < 0) return;
+  BiPair pairs[BI_MAX_PAIRS];
+  int np = 0;
+  bi_collect_assigns(c->nt, body, pairs, &np);
+  bi_scan_loop_node(c, body, pairs, np);
+}
+
+/* An iteration method whose block runs an unbounded number of times, so an
+   accumulator multiplied inside it can grow without bound. Only consulted in
+   promote mode (the wrap-pinned optcarrot must not pay a block-loop bigint
+   widening, which is why the default path stays `while`-only). */
+static int bi_is_block_loop_method(const char *name) {
+  return !strcmp(name, "times") || !strcmp(name, "each") ||
+         !strcmp(name, "upto") || !strcmp(name, "downto") ||
+         !strcmp(name, "step") || !strcmp(name, "loop") ||
+         !strcmp(name, "each_with_index");
+}
+
 void infer_bigint_loop_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
-    if (!ty || strcmp(ty, "WhileNode")) continue;
-    int body = nt_ref(nt, id, "statements");
-    if (body < 0) continue;
-    BiPair pairs[BI_MAX_PAIRS];
-    int np = 0;
-    bi_collect_assigns(nt, body, pairs, &np);
-    bi_scan_loop_node(c, body, pairs, np);
+    if (!ty) continue;
+    if (!strcmp(ty, "WhileNode")) {
+      bi_scan_loop_body(c, nt_ref(nt, id, "statements"));
+      continue;
+    }
+    /* Promote mode additionally treats block-iteration loops as growth sites:
+       `n.times { f = f * x }`, `(a..b).each { ... }`, etc. The block body is a
+       BlockNode -> statements; reuse the same self-referential-multiply scan. */
+    if (g_promote_mode && !strcmp(ty, "CallNode")) {
+      const char *mname = nt_str(nt, id, "name");
+      int block = nt_ref(nt, id, "block");
+      if (mname && bi_is_block_loop_method(mname) && block >= 0 &&
+          nt_type(nt, block) && !strcmp(nt_type(nt, block), "BlockNode"))
+        bi_scan_loop_body(c, nt_ref(nt, block, "body"));
+    }
   }
 }

@@ -547,6 +547,21 @@ void emit_op_assign(Compiler *c, int id, Buf *b, int indent) {
   int celled = (lv && lv->is_cell) || (g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm));
   if (celled) {
     emit_local_ref(c, id, nm, b); buf_puts(b, " = ");
+    /* A bigint cell (an accumulator widened to bigint in promote mode and then
+       captured): route through the bigint helpers, not the int ones, which
+       would truncate the pointer-sized value. The cell stores the sp_Bigint*
+       as its int-sized slot, so read/write are still through emit_local_ref. */
+    if (t == TY_BIGINT) {
+      const char *bfn = bigint_arith_fn(op);
+      if (bfn) {
+        TyKind vt = comp_ntype(c, v);
+        buf_printf(b, "%s(", bfn); emit_local_ref(c, id, nm, b); buf_puts(b, ", ");
+        if (vt != TY_BIGINT) { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, v, b); buf_puts(b, ")"); }
+        else emit_expr(c, v, b);
+        buf_puts(b, ");\n");
+        return;
+      }
+    }
     if (t == TY_INT && (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "*"))) {
       emit_local_ref(c, id, nm, b); buf_printf(b, " %s ", op); emit_expr(c, v, b); buf_puts(b, ";\n");
       return;

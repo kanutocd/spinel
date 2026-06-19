@@ -1,5 +1,8 @@
 #include "analyze_internal.h"
 
+/* --int-overflow=promote flag; see analyze.h. Default off. */
+int g_promote_mode = 0;
+
 /* Defined in codegen.c (linked into the same binary). Used to specialize a
    `rescue <UserExc> => e` binding to the exception subclass's object type. */
 int class_is_exc_subclass(Compiler *c, int ci);
