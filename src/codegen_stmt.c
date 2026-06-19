@@ -2278,6 +2278,18 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   if (!strcmp(ty, "CallNode")) {
     const char *cnm = nt_str(nt, id, "name");
     if (cnm && !strcmp(cnm, "define_method") && nt_ref(nt, id, "receiver") < 0) return;
+    /* define_singleton_method on a supported target (no receiver, `self`, or a
+       class-constant / namespaced-class receiver) is resolved into a class-method
+       scope at analyze time, so the call emits no runtime code. Mirror exactly the
+       receivers analyze registers; an arbitrary-instance receiver is NOT no-op'd
+       here -- it falls through to the normal unresolved-call reject at this site. */
+    if (cnm && !strcmp(cnm, "define_singleton_method")) {
+      int dsm_recv = nt_ref(nt, id, "receiver");
+      if (dsm_recv < 0) return;
+      const char *dsm_rty = nt_type(nt, dsm_recv);
+      if (dsm_rty && (!strcmp(dsm_rty, "SelfNode") || !strcmp(dsm_rty, "ConstantReadNode") ||
+                      !strcmp(dsm_rty, "ConstantPathNode"))) return;
+    }
     /* `class_eval/module_eval { defs }` reopen: the block's def/define_method
        were registered as the target's methods at analyze time and are emitted
        separately; the call itself is a no-op at runtime. g_class_body_id resolves

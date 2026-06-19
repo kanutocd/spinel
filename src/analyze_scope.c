@@ -663,7 +663,24 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
        function (class_id stays -1), matching `def`. */
     const char *dm_cn = nt_str(c->nt, id, "name");
     int dm_recv = nt_ref(c->nt, id, "receiver");
-    if (dm_cn && !strcmp(dm_cn, "define_method") && dm_recv < 0) {
+    int dm_is_dm  = dm_cn && !strcmp(dm_cn, "define_method") && dm_recv < 0;
+    int dm_is_dsm = dm_cn && !strcmp(dm_cn, "define_singleton_method");
+    /* define_singleton_method registers a class method on the resolved target:
+       a class constant receiver, `self` in a class body, or no receiver (the
+       enclosing class). An arbitrary-instance singleton has no compile-time
+       class, so it is not registered (the later call rejects). */
+    int dm_cmethod = 0, dm_cls = class_id, dm_ok = dm_is_dm;
+    if (dm_is_dsm) {
+      dm_cmethod = 1;
+      const char *dsm_rty = dm_recv >= 0 ? nt_type(c->nt, dm_recv) : NULL;
+      if (dm_recv < 0) dm_cls = class_id;
+      else if (dsm_rty && (!strcmp(dsm_rty, "ConstantReadNode") || !strcmp(dsm_rty, "ConstantPathNode")))
+        dm_cls = comp_class_index(c, nt_str(c->nt, dm_recv, "name"));
+      else if (dsm_rty && !strcmp(dsm_rty, "SelfNode")) dm_cls = class_id;
+      else dm_cls = -1;
+      dm_ok = dm_cls >= 0;
+    }
+    if (dm_ok) {
       int dm_args = nt_ref(c->nt, id, "arguments");
       int dm_na = 0;
       const int *dm_argv = dm_args >= 0 ? nt_arr(c->nt, dm_args, "arguments", &dm_na) : NULL;
@@ -679,7 +696,8 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
           Scope *dm_s = comp_scope_new(c, dm_mname, id);
           int dm_new_idx = c->nscopes - 1;
           dm_s->body = nt_ref(c->nt, dm_blk, "body");
-          dm_s->class_id = class_id;
+          dm_s->class_id = dm_cls;
+          dm_s->is_cmethod = dm_cmethod;
           /* the block's params are the defined method's params (e.g. the
              `&:to_s`-rewritten `{ |_spx| _spx.to_s }`'s _spx). */
           int dm_pn = nt_ref(c->nt, dm_blk, "parameters");
