@@ -37,7 +37,16 @@ typedef struct { int tag; int cls_id; union { mrb_int i; const char *s; mrb_floa
  * Only the globals touched by both the kept hot path (sp_gc_alloc, the
  * SP_GC_ROOT macros, GC.stat, the fiber root hook) and the moved cold
  * body are extern; the rest stay static on whichever side owns them. */
+/* Capacity of the stack-resident GC root array (sp_gc_roots). At 8 bytes/entry
+   the default is a 512 KB static buffer -- ample for desktop, but the dominant
+   static allocation in a minimal binary. Embedded targets can shrink it with
+   -DSP_GC_STACK_MAX=<n> (pass the SAME value when building lib/sp_gc.c and the
+   generated TU -- both consult this for the array and the SP_GC_ROOT bound).
+   Too small overflows silently into a dropped root (UAF), so size it to the
+   program's deepest live-root nesting. */
+#ifndef SP_GC_STACK_MAX
 #define SP_GC_STACK_MAX 65536
+#endif
 #define SP_GC_FULL_INTERVAL 8
 extern void **sp_gc_roots[SP_GC_STACK_MAX];
 extern int sp_gc_nroots;

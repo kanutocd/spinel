@@ -2294,7 +2294,7 @@ char *codegen_program(const NodeTable *nt) {
     }
     /* dynamic intern pool: symbols minted at runtime (Symbol#upcase,
        :"interp", String#to_sym) get ids >= the static count. */
-    buf_puts(&b, "static const char *sp_dyn_syms[8192]; static int sp_ndyn = 0;\n");
+    buf_puts(&b, "static const char *sp_dyn_syms[SP_DYN_SYMS_MAX]; static int sp_ndyn = 0;\n");
     buf_printf(&b, "static const char *sp_sym_to_s(sp_sym id){"
                    "if(id>=0&&id<%d)return %s;"
                    "if(id>=%d&&id<%d+sp_ndyn)return sp_dyn_syms[id-%d];"
@@ -2302,7 +2302,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_printf(&b, "static sp_sym sp_sym_intern(const char *s){"
                    "for(int i=0;i<%d;i++)if(strcmp(%s,s)==0)return (sp_sym)i;"
                    "for(int i=0;i<sp_ndyn;i++)if(strcmp(sp_dyn_syms[i],s)==0)return (sp_sym)(%d+i);"
-                   "if(sp_ndyn<8192){sp_dyn_syms[sp_ndyn]=sp_str_dup_external(s);return (sp_sym)(%d+sp_ndyn++);}"
+                   "if(sp_ndyn<SP_DYN_SYMS_MAX){sp_dyn_syms[sp_ndyn]=sp_str_dup_external(s);return (sp_sym)(%d+sp_ndyn++);}"
                    "return (sp_sym)0;}\n\n", ns, ns > 0 ? "sp_sym_names[i]" : "\"\"", ns, ns);
   }
   /* sp_class_to_s is referenced by the runtime itself (sp_poly_puts /

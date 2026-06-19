@@ -67,6 +67,13 @@ static int sp_bt_n = 0;
 /* sp_Fiber + the Fiber API; the bodies live in libspinel_rt.a (lib/sp_fiber.c). */
 #include "sp_fiber.h"
 static const char *sp_sym_to_s(sp_sym id);
+/* Capacity of the runtime symbol-intern pool the generated TU declares
+   (sp_dyn_syms). 8 bytes/entry, so the default is a 64 KB static buffer holding
+   symbols minted at runtime (String#to_sym, :"#{interp}"). Embedded targets that
+   intern few or no symbols at runtime can shrink it with -DSP_DYN_SYMS_MAX=<n>. */
+#ifndef SP_DYN_SYMS_MAX
+#define SP_DYN_SYMS_MAX 8192
+#endif
 
 /* sp_raise_cls forward decl — defined later in this header (line ~1017).
    Used by the integer-division helpers below to match CRuby semantics:
