@@ -187,6 +187,18 @@ extern int g_needs_class_machinery;
    runtime default (sp_re_mark_globals, installed by a constructor before main),
    so it -- and the sp_re_init hook override -- are skipped. */
 extern int g_has_user_global_marks;
+/* Whole-program feature presence, computed once before main is emitted, so the
+   main() prologue can skip setup a trivial program never needs:
+   g_uses_symbols -> sp_re_init sets sp_sym_name_fn; g_uses_regex -> sp_re_init
+   wires the regex error handler; g_uses_argv -> the sp_argv copy loop runs;
+   g_uses_random -> srand seeds the PRNG. g_re_init_needed is the OR of the
+   conditions that give sp_re_init a body (symbols/regex/class-machinery/user
+   global marks); when 0, neither sp_re_init nor its call is emitted. */
+extern int g_uses_symbols;
+extern int g_uses_regex;
+extern int g_uses_argv;
+extern int g_uses_random;
+extern int g_re_init_needed;
 
 const char *rename_local(const char *nm);
 

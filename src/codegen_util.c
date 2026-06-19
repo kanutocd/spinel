@@ -242,6 +242,11 @@ NameSet *g_cap_names = NULL;
 int g_needs_at_exit = 0;
 int g_needs_class_machinery = 0;
 int g_has_user_global_marks = 0;
+int g_uses_symbols = 0;
+int g_uses_regex = 0;
+int g_uses_argv = 0;
+int g_uses_random = 0;
+int g_re_init_needed = 0;
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b) {
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
     /* A TY_PROC capture is stored as (mrb_int)(uintptr_t)sp_Proc* in the cell.

@@ -1724,15 +1724,21 @@ void emit_super(Compiler *c, int id, Buf *b) {
   buf_puts(b, ")");
 }
 
-/* Emit the static regex-literal globals and the sp_re_init() that compiles
-   them at startup. Always defines sp_re_init (empty when no literals) so
-   main() can call it unconditionally. */
+/* Emit the static regex-literal globals and, when g_re_init_needed, the
+   sp_re_init() that installs the symbol/regex/class/global-mark hooks and
+   compiles the literals at startup. */
 void emit_regex_section(Buf *b) {
   for (int i = 0; i < g_re_count; i++) {
     buf_printf(b, "static mrb_regexp_pattern *sp_re_pat_%d;\n", i);
   }
+  /* sp_re_init wires the hooks below. When none apply (a trivial program uses
+     no symbols, regex, class machinery, or heap globals) neither the function
+     nor its main() call is emitted, so the symbol/regex runtime it would pin
+     stays unreferenced and links away. */
+  if (!g_re_init_needed) return;
   buf_puts(b, "static void sp_re_init(void) {\n");
-  buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
+  if (g_uses_symbols)
+    buf_puts(b, "  sp_sym_name_fn = sp_sym_to_s;\n");
   if (g_needs_class_machinery)
     buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n");
   /* Replace the runtime's hook with the superset that also marks this
@@ -1753,8 +1759,10 @@ void emit_regex_section(Buf *b) {
     }
   }
   /* From here on (runtime Regexp.new / dynamic patterns), a compile error
-     raises a catchable RegexpError via sp_raise_cls instead of aborting. */
-  buf_puts(b, "  sp_re_set_error_handler(sp_re_default_error_handler);\n");
+     raises a catchable RegexpError via sp_raise_cls instead of aborting. Only
+     needed when the program actually constructs a regex. */
+  if (g_uses_regex)
+    buf_puts(b, "  sp_re_set_error_handler(sp_re_default_error_handler);\n");
   buf_puts(b, "}\n\n");
 }
 
@@ -2163,6 +2171,43 @@ static int program_needs_class_machinery(Compiler *c) {
   return 0;
 }
 
+/* Whole-program scan for the prologue features (see codegen_internal.h). Each
+   flag over-approximates (a user method named `rand` keeps srand; that is
+   harmless), so a feature that is genuinely used is never missed: a symbol /
+   regex / random value can only originate from one of the nodes below. */
+static void scan_prologue_features(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  g_uses_symbols = (c->nsymbols > 0);
+  g_uses_regex = 0; g_uses_argv = 0; g_uses_random = 0;
+  for (int i = 0; i < nt->count; i++) {
+    const char *ty = nt_type(nt, i);
+    if (!ty) continue;
+    if (!strcmp(ty, "RegularExpressionNode") || !strcmp(ty, "InterpolatedRegularExpressionNode"))
+      g_uses_regex = 1;
+    else if (!strcmp(ty, "SymbolNode") || !strcmp(ty, "InterpolatedSymbolNode"))
+      g_uses_symbols = 1;
+    else if (!strcmp(ty, "ConstantReadNode") || !strcmp(ty, "ConstantPathNode")) {
+      const char *nm = nt_str(nt, i, "name");
+      if (!nm) continue;
+      if (!strcmp(nm, "Regexp")) g_uses_regex = 1;
+      else if (!strcmp(nm, "Random")) g_uses_random = 1;
+      else if (!strcmp(nm, "ARGV") || !strcmp(nm, "ARGF")) g_uses_argv = 1;
+      else if (!strcmp(nm, "Symbol")) g_uses_symbols = 1;
+    }
+    else if (!strcmp(ty, "GlobalVariableReadNode") || !strcmp(ty, "GlobalVariableWriteNode")) {
+      const char *nm = nt_str(nt, i, "name");
+      if (nm && !strcmp(nm, "$*")) g_uses_argv = 1;
+    }
+    else if (!strcmp(ty, "CallNode")) {
+      const char *nm = nt_str(nt, i, "name");
+      if (!nm) continue;
+      if (!strcmp(nm, "to_sym") || !strcmp(nm, "intern")) g_uses_symbols = 1;
+      else if (!strcmp(nm, "rand") || !strcmp(nm, "srand") || !strcmp(nm, "sample") ||
+               !strcmp(nm, "shuffle") || !strcmp(nm, "shuffle!")) g_uses_random = 1;
+    }
+  }
+}
+
 /* Emit one top-level output unit (a method, constructor, BEGIN/END block, or the
    top-level body). Outside SP_COLLECT_ERRORS this is just the bare call. In
    collect mode each unit runs under a setjmp: an `unsupported` gap longjmps back
@@ -2337,6 +2382,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "default:return \"\";} }\n\n");
   }
   g_needs_class_machinery = program_needs_class_machinery(c);
+  scan_prologue_features(c);
   if (g_needs_class_machinery) {
   /* sp_cls_is_module[i]: 1 if user class i was defined as a module, 0 if class */
   if (c->nclasses > 0) {
@@ -2748,6 +2794,9 @@ char *codegen_program(const NodeTable *nt) {
     }
     free(mk.p);
   }
+  /* sp_re_init is worth emitting only if it would set at least one hook. */
+  g_re_init_needed = g_uses_symbols || g_uses_regex || g_needs_class_machinery ||
+                     g_has_user_global_marks;
 
   /* Constructor defs, method defs, and main go into a separate buffer. Any
      proc literals they contain accumulate static functions into g_procs /
@@ -2784,8 +2833,10 @@ char *codegen_program(const NodeTable *nt) {
 
   buf_puts(body, "int main(int argc,char**argv){\n");
   buf_puts(body, "    SP_GC_SAVE();\n");
-  buf_puts(body, "    sp_re_init();\n");
-  buf_puts(body, "    { sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
+  if (g_re_init_needed) buf_puts(body, "    sp_re_init();\n");
+  /* The ARGV copy loop only matters if the program reads ARGV / ARGF / $*. */
+  if (g_uses_argv)
+    buf_puts(body, "    { sp_argv.len = argc - 1; sp_argv.data = (const char**)malloc(sizeof(const char*) * (size_t)(argc > 1 ? argc - 1 : 1)); for (int _ai = 0; _ai < argc - 1; _ai++) sp_argv.data[_ai] = sp_str_dup_external(argv[_ai + 1]); }\n");
   buf_puts(body, "    sp_program_name = argc > 0 ? argv[0] : \"\";\n");
   /* Enable the backtrace substrate (Exception#backtrace, Kernel#caller) in
      debug builds only: --debug compiles at -O0 with non-inlined methods, so
@@ -2800,8 +2851,9 @@ char *codegen_program(const NodeTable *nt) {
   }
   /* Ruby auto-seeds its PRNG at startup, so rand/shuffle/sample vary per
      run. Seed once here; an explicit srand(seed) in user code runs later
-     and overrides this for reproducible sequences. */
-  buf_puts(body, "    srand((unsigned)time(NULL));\n");
+     and overrides this for reproducible sequences. Skipped when the program
+     consumes no randomness (no time() / srand call at all). */
+  if (g_uses_random) buf_puts(body, "    srand((unsigned)time(NULL));\n");
   /* Register END blocks (atexit runs LIFO, so they execute in reverse registration order) */
   for (int e = 1; e <= end_count; e++)
     buf_printf(body, "    atexit(sp_end_fn_%d);\n", e);
