@@ -1,28 +1,30 @@
 # Spinel AST format
 
-`spinel_parse` consumes a Ruby source file and emits a text-based AST
-that the rest of the pipeline (`spinel_analyze`, `spinel_codegen`)
-reads. This file documents that text format -- the record types, the
-flattening conventions, and the per-node fields the consumers rely on.
+The parser front-end consumes a Ruby source file and produces a
+text-based AST that the rest of the compiler reads. This file documents
+that text format -- the record types, the flattening conventions, and
+the per-node fields the consumers rely on.
 
 ## Pipeline position
 
 ```
-.rb  ──[spinel_parse]──▶  .ast  ──[spinel_analyze]──▶  .ir  ──[spinel_codegen]──▶  .c
+.rb  ──[sp_parse_file_to_text]──▶  text AST  ──[nt_load_text]──▶  NodeTable
+        ──[analyze_program + codegen_program]──▶  .c
 ```
 
-`spinel_parse` is the only stage that talks to libprism. The downstream
-binaries never see Prism's data structures -- they read the flattened
-text AST and operate on parallel integer-indexed arrays. The text format
-is the stable contract between Prism (a moving upstream) and Spinel's
-fixed-shape backend.
+Spinel is a single binary (`spinel`). `sp_parse_file_to_text`
+(`src/spinel_parse.c`) is the only stage that talks to libprism; it
+returns the flattened text AST as an in-memory string -- there is no
+on-disk `.ast` intermediate (though `spinel --dump-ast` prints it).
+`nt_load_text` (`src/node_table.c`) parses that text into a `NodeTable`,
+and the analyzer and code generator both read the table through the
+`nt_*` accessor API. The text format is the stable contract between
+Prism (a moving upstream) and Spinel's fixed-shape backend.
 
-Two implementations of the parser exist and produce byte-identical AST:
-
-- **`spinel_parse.c`** -- links libprism directly. The default; no Ruby
-  needed at build time once `make deps` has fetched the sources.
-- **`spinel_parse.rb`** -- uses the Prism gem from CRuby. Bootstrap
-  fallback when no compiled parser is available.
+There is one parser implementation: **`src/spinel_parse.c`**, which links
+libprism directly (no Ruby is needed at build time once `make deps` has
+fetched the sources). The retired Ruby self-host had a `spinel_parse.rb`
+fallback; the C compiler does not.
 
 ## File format
 
@@ -42,7 +44,17 @@ ROOT <int>
 
 naming the AST node id that the rest of the file roots at (always `0`
 in practice, since `flatten()` walks the tree top-down and assigns ids
-in DFS order).
+in DFS order). It is followed by the source-file header records:
+
+```
+SOURCE_FILE <path>        # the primary source path (unescaped)
+FILE <fid> <path>         # file-id -> path map, one per distinct source file
+```
+
+The `FILE` records back the multi-file `#line` map: a node's
+`node_file` integer attribute (below) indexes this table, so an error in
+generated C points at the right original `.rb` even across an inlined
+require. `nt_file_path(nt, fid)` resolves the id.
 
 Every subsequent record begins with a single-letter tag:
 
@@ -50,10 +62,15 @@ Every subsequent record begins with a single-letter tag:
 |-----|------------------------------------|----------------------------------------------------------------------|
 | `N` | `N <id> <NodeType>`                | Node header. Introduces a new node; binds its id to its Prism type.  |
 | `S` | `S <id> <field> <string>`          | String-valued attribute (`name`, `content`, `pattern`, etc.).        |
-| `I` | `I <id> <field> <int>`             | Integer attribute (`value`, `flags`).                                |
-| `F` | `F <id> <field> <float>`           | Float attribute (`value`).                                           |
+| `I` | `I <id> <field> <int>`             | Integer attribute (`value`, `flags`, and the `node_line` / `node_file` / `node_col` source position). |
+| `F` | `F <id> <field> <float>`           | Float attribute (`value`). Stored as the node's `content` string.    |
 | `R` | `R <id> <field> <child-id-or--1>`  | Single child reference. `-1` means the child slot is empty.          |
 | `A` | `A <id> <field> <id,id,…>`         | Array of child references. Body is comma-separated; empty allowed.   |
+
+Every node carries `node_line` / `node_file` / `node_col` integer
+attributes (the source position Prism reports); codegen reads them via
+`nt_int(nt, id, "node_line", 0)` etc. to emit `#line` directives under
+`--line-map` (on by default) and `--debug`.
 
 A node is defined by its `N` line followed by zero or more attribute
 lines (`S`/`I`/`F`/`R`/`A`) that share the same `<id>`. Attribute lines
@@ -115,12 +132,12 @@ Newlines do not appear in string payloads -- they are encoded as `\n`.
 
 ## Node-type taxonomy
 
-`spinel_parse.c`'s `flatten()` enumerates every Prism node it
+`src/spinel_parse.c`'s `flatten()` enumerates every Prism node it
 understands. Adding support for a new Ruby idiom usually means adding
 one `case PM_<NODE>:` arm to the switch and a matching consumer-side
-handler in `spinel_analyze.rb` / `spinel_codegen.rb`. The list below
-groups the recognised nodes by category; field names per node are the
-ones Prism documents, with a few Spinel-specific aliases for clarity.
+handler in `src/analyze*.c` / `src/codegen*.c`. The list below groups
+the recognised nodes by category; field names per node are the ones
+Prism documents, with a few Spinel-specific aliases for clarity.
 
 ### Program / scopes
 
@@ -242,7 +259,7 @@ disambiguating field is `name`, plus the recv / args / block triple.
 The parser also injects synthetic `CallNode`s for built-in idioms that
 Prism parses as separate constructs: `catch` / `throw`, `defined?`, and
 the `*-write` shorthand operators. Those are documented at their
-emit sites in `spinel_parse.c`.
+emit sites in `src/spinel_parse.c`.
 
 ## Field semantics by category
 
@@ -296,34 +313,35 @@ Float literal in `printf("%.17g")` form, always with a decimal point.
 
 ## How consumers read the AST
 
-Both `spinel_analyze.rb` and `spinel_codegen.rb` build the same set of
-parallel arrays from the text AST:
+`nt_load_text` parses the text into a `NodeTable`: an array of `SpNode`
+records indexed by node id (`src/node_table.h`). Unlike the retired Ruby
+self-host -- which built one flat `@nd_<field>` array per attribute --
+each `SpNode` stores its own small field lists (string / int / ref /
+array), and the analyzer and code generator both query them by name
+through the accessor API:
 
-| Array                | Meaning                                                |
-|----------------------|--------------------------------------------------------|
-| `@nd_type[id]`       | Node type name (the second field of the `N` record).   |
-| `@nd_name[id]`       | `S name` value, if any.                                |
-| `@nd_value[id]`      | `I value` value, if any.                               |
-| `@nd_receiver[id]`   | `R receiver <child>` value (or -1).                    |
-| `@nd_arguments[id]`  | `R arguments <child>` value.                           |
-| `@nd_block[id]`      | `R block <child>` value.                               |
-| `@nd_body[id]`       | `R body <child>` for non-array shapes, or first id of an `A body` list. |
-| `@nd_stmts[id]`      | `A statements` body (for StatementsNode-shaped).       |
-| `@nd_predicate[id]`  | `R predicate <child>` value.                           |
-| ... (~50 more, all named `@nd_<field>`) |                                     |
+| Accessor                              | Reads                                                  |
+|---------------------------------------|--------------------------------------------------------|
+| `nt_type(nt, id)`                     | Node type name (the `N` record); `NULL` if unset.      |
+| `nt_str(nt, id, "name")`              | An `S` string attribute; `NULL` if absent.             |
+| `nt_int(nt, id, "value", dflt)`       | An `I` integer attribute; `dflt` if absent.            |
+| `nt_ref(nt, id, "receiver")`          | An `R` child reference; `-1` if absent / empty.        |
+| `nt_arr(nt, id, "arguments", &n)`     | An `A` child-id list and its length; `NULL,0` if absent. |
+| `nt_kind(nt, id)`                     | The cached `NodeKind` enum (a fast switch key vs. `strcmp` on the type string). |
 
-Each `@nd_<field>` is a flat array indexed by node id. Initialization
-sets the default (`-1` for refs, `""` for strings, `0` for ints) and
-the AST loader overwrites the matching slot for every record it sees.
-A given node's id is `@nd_count`-sized -- 99 % of slots are unused for
-any one node, but the per-array cache locality at `infer_type` /
-`compile_expr` time more than pays for the sparsity.
+A reference field absent from a node reads back as `-1` and an absent
+array as empty, so consumers check before indexing. The loader skips
+records it does not recognise; an attribute the parser emits but no
+accessor ever reads is simply inert. New parser fields are picked up
+automatically by `nt_str` / `nt_int` / `nt_ref` / `nt_arr` once a
+consumer asks for them by name -- there is no separate per-field loader
+arm to keep in sync.
 
-The loader treats unknown fields as errors-by-omission: it skips them
-silently. This means an unknown record on the parser side stays
-unreferenced on the consumer side -- usually fine, occasionally a
-silent bug. New parser fields should land alongside the matching
-loader arm in both `spinel_analyze.rb` and `spinel_codegen.rb`.
+The analyzer's results do **not** live in the `NodeTable`; they live in
+the `Compiler` struct (the per-node type cache plus the class / method /
+scope tables). The `NodeTable` is the immutable parsed program; the
+`Compiler` is the derived analysis. See
+[ANALYZE-IR.md](ANALYZE-IR.md).
 
 ## Limitations
 
@@ -340,21 +358,19 @@ loader arm in both `spinel_analyze.rb` and `spinel_codegen.rb`.
   assumes UTF-8. ASCII-7 sources are always safe; mixed-encoding
   sources are not supported (matches the README's "no encoding"
   limitation).
-- **Source locations**: not emitted. Errors reported by `spinel_parse`
-  include source positions (via libprism's diagnostic list), but the
-  serialized AST drops them -- downstream errors point at AST node
-  ids, not source lines. This is a deliberate trade-off for smaller
-  AST files; adding a `LOC` record per node would roughly double the
-  serialized size of `spinel_codegen.rb`'s ~123 K nodes.
+- **Source locations**: emitted. Each node carries `node_line` /
+  `node_file` / `node_col` integer attributes and the file table is
+  carried in `SOURCE_FILE` / `FILE` records, so codegen can map a
+  generated-C line back to the original `.rb` (the `--line-map` /
+  `--debug` `#line` directives, and the `--line-map` diagnostics that
+  re-point cc errors at Ruby source).
 
 ## See also
 
-- [docs/ANALYZE-IR.md](ANALYZE-IR.md) -- the `.ir` format
-  `spinel_analyze` produces (consumed by `spinel_codegen`).
-- [docs/CLASS-OBJECT.md](CLASS-OBJECT.md) -- the sp_Class value-type
-  design and the per-program tables Spinel emits for class
-  introspection.
+- [docs/ANALYZE-IR.md](ANALYZE-IR.md) -- the in-memory analyze ↔ codegen
+  contract (the `Compiler` struct that replaced the old `.ir` file).
 - [docs/FFI.md](FFI.md) -- direct C-call declarations.
-- `spinel_parse.c` -- the C frontend that produces this format.
-- `spinel_analyze.rb` -- type inference; consumes `.ast`, produces `.ir`.
-- `spinel_codegen.rb` -- C emission; consumes `.ast` + `.ir`.
+- `src/spinel_parse.c` -- the C front-end that produces this format.
+- `src/node_table.[ch]` -- `nt_load_text` and the `nt_*` accessor API.
+- `src/analyze*.c` -- type inference; fills the `Compiler` node type cache.
+- `src/codegen*.c` -- C emission; reads the `NodeTable` + `Compiler`.
