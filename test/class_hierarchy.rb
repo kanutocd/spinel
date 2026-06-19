@@ -30,8 +30,8 @@ def names_of(arr)
   out
 end
 
-puts names_of(C.ancestors)  # => "C,B,A"
-puts names_of(A.ancestors)  # => "A"
+puts names_of(C.ancestors)  # => "C,B,A,Object,Kernel,BasicObject"
+puts names_of(A.ancestors)  # => "A,Object,Kernel,BasicObject"
 
 # `<` / `<=` -- proper / non-proper subclass.
 puts (C < A) ? "C<A" : "C!<A"

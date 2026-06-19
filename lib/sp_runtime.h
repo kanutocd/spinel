@@ -3999,6 +3999,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
     case SP_TAG_NIL:  return SPL("nil");
     case SP_TAG_SYM:  return sp_str_concat(SPL(":"), sp_sym_to_s((sp_sym)v.v.i));
     case SP_TAG_ENCODING: return sp_sprintf("#<Encoding:%s>", v.v.s ? v.v.s : "");
+    case SP_TAG_CLASS: { sp_Class c = {v.v.i}; return sp_class_to_s(c); }
     case SP_TAG_OBJ:
  /* Built-in container / value-type tags get their typed inspect
     helper. Matches the dispatch shape in sp_poly_to_s above and the

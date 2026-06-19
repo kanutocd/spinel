@@ -44,7 +44,7 @@ def names_of(arr)
 end
 
 puts names_of(Polite.ancestors)
-# => Polite,Politeness,Greeting,Base
+# => Polite,Politeness,Greeting,Base,Object,Kernel,BasicObject
 
 # <= check on a module via the ancestors table.
 puts (Polite <= Greeting) ? "polite<=Greeting" : "polite!<=Greeting"

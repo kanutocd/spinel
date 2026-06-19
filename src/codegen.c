@@ -2526,12 +2526,11 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(&b, "  sp_Class cur=c;\n");
     int depth2 = c->nclasses + 20;
     buf_printf(&b, "  for(int _i=0;_i<%d;_i++){\n", depth2);
-    /* When we reach a builtin class while walking user-class ancestors:
-       if we STARTED from a builtin (c.cls_id<0), follow the full builtin
-       chain with module includes; if we STARTED from a user class (c.cls_id>=0),
-       stop here so that user-class .ancestors only returns user ancestors. */
+    /* When the walk reaches a builtin class (a user class's eventual Object
+       parent, or a builtin start), follow the full builtin chain with module
+       includes so e.g. Dog.ancestors == [Dog, Animal, Object, Kernel,
+       BasicObject], matching CRuby. */
     buf_puts(&b, "    if(cur.cls_id<0){\n");
-    buf_puts(&b, "      if(c.cls_id>=0)break;\n");  /* started from user class: stop */
     buf_puts(&b, "      while(1){\n");
     buf_puts(&b, "        sp_PolyArray_push(a,sp_box_class(cur));\n");
     /* Numeric includes Comparable; Array/Hash include Enumerable; String includes Comparable */

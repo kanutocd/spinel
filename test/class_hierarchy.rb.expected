@@ -1,8 +1,8 @@
 A
 B
 A-root-ok
-C,B,A
-A
+C,B,A,Object,Kernel,BasicObject
+A,Object,Kernel,BasicObject
 C<A
 C<=A
 A!<A

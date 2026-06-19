@@ -4807,8 +4807,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       return;
     }
     if (!strcmp(name, "superclass") && argc == 0) {
+      /* sp_class_superclass only knows the user chain; a builtin class needs
+         sp_builtin_superclass (Integer -> Numeric), as sp_class_is_ancestor
+         already dispatches. */
       buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_class_superclass(_cl%d); })", _clt);
+      buf_printf(b, "; _cl%d.cls_id>=0?sp_class_superclass(_cl%d):sp_builtin_superclass(_cl%d); })", _clt, _clt, _clt);
       return;
     }
     if (!strcmp(name, "ancestors") && argc == 0) {

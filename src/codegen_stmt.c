@@ -251,6 +251,11 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "{ sp_Time _t%d = ", tv); emit_expr(c, arg, b);
     buf_printf(b, "; fputs(sp_time_inspect_v(_t%d), stdout); putchar('\\n'); }\n", tv);
   }
+  else if (t == TY_CLASS) {   /* a Class/Module inspects as its name */
+    int cv = ++g_tmp;
+    buf_printf(b, "{ sp_Class _t%d = ", cv); emit_expr(c, arg, b);
+    buf_printf(b, "; fputs(sp_class_to_s(_t%d), stdout); putchar('\\n'); }\n", cv);
+  }
   else if (t == TY_NIL || t == TY_VOID) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
   }
