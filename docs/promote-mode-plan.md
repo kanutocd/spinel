@@ -34,9 +34,19 @@
 
 既知の周辺バグ(promote 無関係・default でも再現): **`1.upto(N){ ... }` の no-block-param ブロックが body を drop**(`h=0; 1.upto(5){h+=1}; puts h` → 0)。upto codegen の別件。
 
-## 完成路: legacy 方式(全 int → bigint widen)
+## 採用方針: poly-based(SP_TAG_BIGINT)— 2026-06-19 matz 決定
 
-legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote モードで **全 int slot を `sp_Bigint*` に widen**(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`、境界で `sp_bigint_to_int`/`sp_bigint_new_int`)。C 版にこれを移植 = 関数引数も含め完成。
+legacy の「全 int → bigint widen」ではなく、**poly 値(`sp_RbVal`)に bigint を載せる**方向を採用(matz 判断)。理由: (a) `SP_TAG_BIGINT` 追加は promote と無関係に異種コンテナ/リテラル bug を直す独立価値がある、(b) 小さい int は unbox のまま=Ruby の fixnum→bignum と同じで legacy 全 bigint より実用的、(c) コア投資を bug 修正と共有。
+
+### 進捗(landed)
+- **Increment 1 (ce6995c8)**: `SP_TAG_BIGINT`(`v.p`=GC bigint)。`sp_box_bigint` + emit_boxed/unbox の TY_BIGINT arm + GC mark + poly consumer 全 arm(puts/to_s/inspect/class_name/to_i/to_f/numeric_p/eq/cmp/hash-key)+ codegen `emit_bigint_operand`(poly operand を `sp_poly_as_bigint` で narrow)。→ `[1,"x",big]` / `{k:big}` / bigint hash-key 動作。clang+ASAN 検証。
+- **Increment 2a (48863f34)**: `sp_poly_add/sub/mul` が bigint operand を bigint 演算へ(全モード、`bigint+int`→0 bug 修正)+ **promote で int+int overflow→bigint 昇格**(`SP_INT_OVERFLOW_MODE_PROMOTE` #ifdef gate、default/wrap は wrap 維持)。→ **既に poly 型の値**は promote で runtime 昇格する。
+
+### 残: Increment 2b(本丸 big-bang)= int→poly widen under promote
+**既に poly な値**は 2a で昇格するが、関数引数など**静的に int な slot** は poly でないので overflow しても昇格できない。最後の山は promote モードで該当 int slot を **poly に widen**する analyze 変更。これが all-or-nothing(部分 widen は promote suite の現 972 を割る)。widen 先が bigint(legacy)でなく **poly** な点が違い: 小さい値は unbox のまま、overflow 時だけ 2a の機構で box。
+
+### (参考)legacy 方式
+legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
 
 **実装の難所:**
 1. **mode 伝達**: C 版は `codegen_program(nt)` に overflow mode が渡らない(main.c:355、現状 `-D` のみ)。`g_promote_mode` global を main.c で設定し analyze/codegen が読む必要。
