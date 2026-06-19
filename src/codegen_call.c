@@ -2369,11 +2369,11 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "; sp_IntArray *_t%d = sp_IntArray_new(); sp_IntArray_push(_t%d, sp_gcd(%s, _t%d));"
                       " sp_IntArray_push(_t%d, sp_lcm(%s, _t%d)); _t%d; })", o, o, r, ta, o, r, ta, o);
       }
-      else if (!strcmp(name, "clamp") && argc == 2) { buf_printf(b, "sp_int_clamp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+      else if (!strcmp(name, "clamp") && argc == 2) { buf_printf(b, "sp_int_clamp_ck(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
       else if (!strcmp(name, "clamp") && argc == 1 && nt_type(c->nt, argv[0]) && !strcmp(nt_type(c->nt, argv[0]), "RangeNode")) {
         int rn = argv[0]; int tcr = ++g_tmp;
         buf_printf(b, "({ sp_Range _t%d = ", tcr); emit_expr(c, argv[0], b);
-        buf_printf(b, "; sp_int_clamp(%s, _t%d.first, _t%d.last - _t%d.excl); })", r, tcr, tcr, tcr);
+        buf_printf(b, "; sp_int_clamp_ck(%s, _t%d.first, _t%d.last - _t%d.excl); })", r, tcr, tcr, tcr);
         (void)rn;
       }
       else if (!strcmp(name, "digits") && argc == 0) buf_printf(b, "sp_int_digits(%s, 10)", r);
@@ -2456,7 +2456,7 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
          Mirrors the inference condition in analyze_infer.c. */
       else if (!strcmp(name, "clamp") && argc == 2 &&
                comp_ntype(c, argv[0]) == TY_FLOAT && comp_ntype(c, argv[1]) == TY_FLOAT) {
-        buf_printf(b, "sp_float_clamp(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+        buf_printf(b, "sp_float_clamp_ck(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "coerce") && argc == 1) {
         TyKind a0 = comp_ntype(c, argv[0]);
