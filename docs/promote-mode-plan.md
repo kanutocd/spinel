@@ -7,13 +7,40 @@
 - `make bench` 全 pass
 - `make optcarrot` PASS + checksum 59662 (Makefile から `--int-overflow=wrap` pin 除去)
 
-## 現状 (master HEAD, commit `bc7e1a1`)
+## 現状 (master HEAD, 2026-06-19 再計測 — 旧 `bc7e1a1` 表は obsolete)
 
-| Target | promote 結果 | 主要 error |
-|---|---|---|
-| `make test` | 557 / 52 fail / 22 error | 23 errors の多くは bit-ops / typed-call-args poly→bigint |
-| `make bench` | 36 / 7 fail / 14 error | bit-ops, IntArray index with bigint, FFI float arg |
-| `make optcarrot` (--int-overflow=promote) | C compile failed | 72 errors、 80%以上が bit-op (`&`, `\|`, `^`, `<<`, `>>`, `~`) |
+| Target | promote 結果 |
+|---|---|
+| `make test` 相当 (全 .rb を `-DSP_INT_OVERFLOW_MODE_PROMOTE` でコンパイル+実行) | **965/965 pass** |
+| `make bench` 相当 | **57/57 pass** |
+| optcarrot (`-DSP_INT_OVERFLOW_MODE_PROMOTE`) | **コンパイル成功 + checksum 59662** (fps 635) |
+
+→ 5月の error バケット(bit-ops/index/FFI 等、optcarrot 72 errors)は **既に全て解消済み**。境界変換は実装済み。
+
+## 残る本質的 gap (2026-06-19)
+
+promote は **runtime macro に promote arm が無く**(`sp_int_add` は overflow で raise)、唯一の昇格機構は **`detect_bigint_loop_vars`**(analyze.c)。これは:
+- **`WhileNode`/`UntilNode` の `x = x*y` / `x *= y`(`*`/`**` のみ)だけ**を検出し当該 local を `TY_BIGINT` 化。
+- `while`形の階乗は promote で正しく動く(検証済 `fact(25)` = MRI 一致)。
+
+検出されない = raise になるパターン:
+- **`.times`/`.each`/`upto`/`step`/`(range).each` ブロックループ蓄積**(`f=1; (1..25).each{|i| f=f*i}`)
+- **関数引数経由**(`def mul(x,y)=x*y; mul(10**15,10**15)`)= **静的検出は原理的に不可能**
+- **リテラル累乗**(`10**30` → overflow → nil/空白。compile-time 計算可能だが未対応)
+- `+`/`<<` 蓄積(`*`/`**` のみ対象)
+
+## 完成路: legacy 方式(全 int → bigint widen)
+
+legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote モードで **全 int slot を `sp_Bigint*` に widen**(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`、境界で `sp_bigint_to_int`/`sp_bigint_new_int`)。C 版にこれを移植 = 関数引数も含め完成。
+
+**実装の難所:**
+1. **mode 伝達**: C 版は `codegen_program(nt)` に overflow mode が渡らない(main.c:355、現状 `-D` のみ)。`g_promote_mode` global を main.c で設定し analyze/codegen が読む必要。
+2. **big-bang 性**: 全 int を bigint 化すると、埋まっていない境界が新たに表面化しうる。部分 widen は promote コンパイルを壊すので、全境界を同時に通す必要(=現 optcarrot が通る範囲を超えた path で再度バケツ潰し)。
+3. **optcarrot perf 退行リスク**: ブロックループ検出を素朴に足すと optcarrot の `.times` 内 `x=x*y` が大量 bigint 化し壊滅的に遅くなる(while 限定はこの回避が理由と思われる)。全 int widen でも promote optcarrot は大幅減速(opt-in なので許容、gate は wrap pin で不変)。
+
+**推奨**: 専用の集中作業として (1) mode 伝達 →(2) 全 int→bigint widen pass(promote gate)→(3) 表面化する境界を潰す → promote で test/bench/optcarrot 再確認、の順。default/wrap は promote gate により不変なので gate 回帰リスクは promote 経路に限定。
+
+## (以下、2026-05 当時の Error バケット分類 — 多くは解消済み、参考)
 
 ## Error バケット分類
 
