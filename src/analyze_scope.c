@@ -2285,24 +2285,52 @@ int infer_ivar_types(Compiler *c) {
       int recv = nt_ref(nt, id, "receiver");
       size_t ln = nm ? strlen(nm) : 0;
       if (!nm || recv < 0 || ln < 2 || nm[ln - 1] != '=') continue;
-      TyKind rt = infer_type(c, recv);
-      if (!ty_is_object(rt)) continue;
-      ClassInfo *ci = &c->classes[ty_object_class(rt)];
+      /* not a comparison that happens to end in '=' (==, !=, <=, >=) */
+      if (nm[ln - 2] == '=' || nm[ln - 2] == '!' || nm[ln - 2] == '<' || nm[ln - 2] == '>') continue;
       char base[256];
       if (ln - 1 >= sizeof base) continue;
       memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
-      if (!comp_is_writer(ci, base)) continue;
       int args = nt_ref(nt, id, "arguments");
       int an = 0;
       const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
       if (an < 1) continue;
+      TyKind vt = infer_type(c, argv[0]);
+      if (vt == TY_NIL) continue;  /* a nil write doesn't pin the ivar type */
       char ivname[256];
       snprintf(ivname, sizeof ivname, "@%s", base);
-      int iv = comp_ivar_index(ci, ivname);
-      if (iv < 0 || class_ivar_pinned(ci, ivname)) continue;
-      TyKind vt = infer_type(c, argv[0]);
-      TyKind merged = ty_unify(ci->ivar_types[iv], vt);
-      if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
+      TyKind rt = infer_type(c, recv);
+      if (ty_is_object(rt)) {
+        /* concrete receiver: attribute to its class. */
+        ClassInfo *ci = &c->classes[ty_object_class(rt)];
+        if (!comp_is_writer(ci, base)) continue;
+        int iv = comp_ivar_index(ci, ivname);
+        if (iv < 0 || class_ivar_pinned(ci, ivname)) continue;
+        TyKind merged = ty_unify(ci->ivar_types[iv], vt);
+        if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
+      }
+      else {
+        /* Poly/unknown receiver -- e.g. `cell` read from a poly array/hash
+           (`@cells.each_value { |cell| cell.neighbours = ... }`). The static
+           class is unknown, but if exactly ONE class defines this attr-writer
+           with a matching ivar, the runtime object must be of that class, so
+           attribute the write to it. (Skip when ambiguous: zero or several
+           classes share the attr name -- over-widening an unrelated same-named
+           ivar would be unsound to attribute.) ty_unify only widens. */
+        int only = -1;
+        for (int ci2 = 0; ci2 < c->nclasses; ci2++) {
+          if (comp_is_writer(&c->classes[ci2], base) &&
+              comp_ivar_index(&c->classes[ci2], ivname) >= 0) {
+            if (only >= 0) { only = -2; break; }   /* ambiguous */
+            only = ci2;
+          }
+        }
+        if (only < 0) continue;
+        ClassInfo *ci = &c->classes[only];
+        int iv = comp_ivar_index(ci, ivname);
+        if (iv < 0 || class_ivar_pinned(ci, ivname)) continue;
+        TyKind merged = ty_unify(ci->ivar_types[iv], vt);
+        if (merged != ci->ivar_types[iv]) { ci->ivar_types[iv] = merged; changed = 1; }
+      }
     }
   }
   return changed;
