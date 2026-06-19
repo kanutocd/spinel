@@ -602,6 +602,16 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
     }
     else if (cname) {
       child_class = comp_class_index(c, cname);  /* reopened class/module */
+      /* A class can be opened bare first (no superclass -- e.g. just to hold a
+         nested class) and reopened later with `< Super`. The parent link is read
+         from def_node's "superclass" ref, so prefer the opening that declares one;
+         otherwise the superclass is lost and a subclass's overrides aren't
+         dispatched against the right ancestor chain (matz/spinel#1477). */
+      if (child_class >= 0 && nt_ref(c->nt, id, "superclass") >= 0 &&
+          c->classes[child_class].def_node >= 0 &&
+          nt_ref(c->nt, c->classes[child_class].def_node, "superclass") < 0) {
+        c->classes[child_class].def_node = id;
+      }
     }
   }
   else if (ty && !strcmp(ty, "DefNode")) {
