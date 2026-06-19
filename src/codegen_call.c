@@ -965,7 +965,11 @@ else {
           if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", bp, k, trecv, ti); }
           for (int j = 0; j < bn2 - 1; j++) emit_stmt(c, bb2[j], g_pre, g_indent + 1);
           int saveI = g_indent; g_indent = g_indent + 1;
-          Buf vb2; memset(&vb2, 0, sizeof vb2); emit_expr(c, bb2[bn2 - 1], &vb2);
+          /* The block value is a condition: route through emit_cond so a poly /
+             nil / scalar predicate becomes a valid C truthiness test (e.g.
+             `count(&:alive)` where the element method is poly-dispatched would
+             otherwise emit `if (sp_RbVal)` -- a struct in scalar position). */
+          Buf vb2; memset(&vb2, 0, sizeof vb2); emit_cond(c, bb2[bn2 - 1], &vb2);
           g_indent = saveI;
           emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (%s) _t%d++;\n", vb2.p ? vb2.p : "0", tcnt);
           free(vb2.p);
@@ -1203,7 +1207,11 @@ else {
           if (bp) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "lv_%s = sp_PolyArray_get(_t%d, _t%d);\n", bp, trecv, ti); }
           for (int j = 0; j < bn2 - 1; j++) emit_stmt(c, bb2[j], g_pre, g_indent + 1);
           int saveI = g_indent; g_indent = g_indent + 1;
-          Buf vb2; memset(&vb2, 0, sizeof vb2); emit_expr(c, bb2[bn2 - 1], &vb2);
+          /* The block value is a condition: route through emit_cond so a poly /
+             nil / scalar predicate becomes a valid C truthiness test (e.g.
+             `count(&:alive)` where the element method is poly-dispatched would
+             otherwise emit `if (sp_RbVal)` -- a struct in scalar position). */
+          Buf vb2; memset(&vb2, 0, sizeof vb2); emit_cond(c, bb2[bn2 - 1], &vb2);
           g_indent = saveI;
           emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (%s) _t%d++;\n", vb2.p ? vb2.p : "0", tcnt);
           free(vb2.p);
@@ -4445,11 +4453,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new();\n", ta);
       for (int ai = 1; ai < ac; ai++) {
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", ta);
+        /* Emit the boxed arg into a local buffer first: an arg that is itself a
+           call rooting its operands pushes those decls to g_pre, which must land
+           as whole statements before this push line, not inside its arg list
+           (#1498 / #1508). */
         Buf ab; memset(&ab, 0, sizeof ab);
         emit_boxed(c, av[ai], &ab);
-        buf_printf(g_pre, "%s);\n", ab.p ? ab.p : "sp_box_nil()");
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ta, ab.p ? ab.p : "sp_box_nil()");
         free(ab.p);
       }
       buf_printf(b, "sp_str_format_polyarr(_t%d, _t%d)", tf, ta);
