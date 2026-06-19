@@ -3708,14 +3708,17 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     return;
   }
 
-  /* statements that don't produce a usable tail value: emit normally;
-     the trailing default return covers the method's value. */
+  /* statements that don't produce a usable tail value: emit normally; the
+     trailing default return covers the method's value. Local/instance operator
+     assignments (`x += 1`, `@x += 1`) are NOT here -- in Ruby they return the
+     updated value, so they fall through to the value path and are returned
+     (matz/spinel#1484, matching the class-variable form that already worked).
+     Plain `x = v` / `||=` / `&&=` stay statements for now: routing a tail ivar
+     write of nil through the value path perturbs nullable-scalar inference. */
   if (!strcmp(ty, "LocalVariableWriteNode") ||
-      !strcmp(ty, "LocalVariableOperatorWriteNode") ||
       !strcmp(ty, "LocalVariableOrWriteNode") ||
       !strcmp(ty, "LocalVariableAndWriteNode") ||
       !strcmp(ty, "InstanceVariableWriteNode") ||
-      !strcmp(ty, "InstanceVariableOperatorWriteNode") ||
       !strcmp(ty, "GlobalVariableWriteNode") ||
       !strcmp(ty, "ConstantWriteNode") ||
       !strcmp(ty, "WhileNode") || !strcmp(ty, "UntilNode") ||
@@ -3723,6 +3726,17 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
        emit_output_call(c, id, b, indent))) {
     if (strcmp(ty, "CallNode") != 0) emit_stmt(c, id, b, indent);
     return;
+  }
+
+  /* A local operator-assignment whose target is a captured/cell var (inside a
+     proc/block body) has no value form in emit_expr -- cells are int-restricted
+     and statement-only -- so keep emitting it as a statement; the enclosing
+     callable returns its default. Ordinary locals/ivars fall through below. */
+  if (!strcmp(ty, "LocalVariableOperatorWriteNode")) {
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+    int celled = (lv && lv->is_cell) || (g_cap_struct && g_cap_names && nm && nameset_has(g_cap_names, nm));
+    if (celled) { emit_stmt(c, id, b, indent); return; }
   }
   /* iteration calls with a block are side-effect statements at tail position;
      emit them without wrapping in a return (the method returns nil implicitly) */
