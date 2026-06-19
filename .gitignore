@@ -41,6 +41,12 @@ file_write_poly_arg
 
 # Scratch design notes and downloaded gems (not for commit)
 /BIGINT.md
+/EXCEPTIONS.md
+/SETJMP.md
+/OPTIMIZATION.md
+/ISSUE_TRIAGE.md
+/PR908.md
+/t3b.types.json
 *.gem
 
 # Test binaries accidentally produced in repo root
