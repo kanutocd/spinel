@@ -4363,10 +4363,22 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
   }
 
   /* block_given? / self.block_given? -> true inside an inlined yielding
-     method (we only inline when a block is present) */
+     method (we only inline when a block is present). In a lowered yielding
+     method the block is the `__yblk__` proc parameter, which is non-NULL
+     exactly when the caller passed a block, so test it directly. */
   if (!strcmp(name, "block_given?") &&
       (recv < 0 || (nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "SelfNode")))) {
-    buf_puts(b, g_block_id >= 0 ? "1" : "0");
+    /* block_given? asks about the innermost method. An inlined yielding method
+       (g_block_id >= 0) statically has a block, so fold to 1 even when the
+       enclosing method is lowered; only a genuinely lowered scope inspects its
+       runtime __yblk__ parameter. */
+    if (g_block_id >= 0) {
+      buf_puts(b, "1");
+    } else if (g_current_scope_is_lowered) {
+      buf_puts(b, "("); emit_yblk_ref(b); buf_puts(b, " != NULL)");
+    } else {
+      buf_puts(b, "0");
+    }
     return;
   }
 
