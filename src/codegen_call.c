@@ -6960,6 +6960,49 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     return;
   }
 
+  /* Class.const_get(:K) with a literal name: constants live in a flat namespace
+     (cst_<name>), so resolve it like a ConstantRead. A literal name that does not
+     resolve raises NameError at runtime, matching CRuby: "uninitialized constant
+     <Name>" for a valid constant name, "wrong constant name <name>" for one that
+     is not (no leading uppercase). A dynamic name can't be resolved ahead of time
+     and is diagnosed. */
+  if (!strcmp(name, "const_get") && recv >= 0 && argc >= 1) {
+    const char *cg_aty = nt_type(nt, argv[0]);
+    const char *cg_qm = NULL;
+    if (cg_aty && !strcmp(cg_aty, "SymbolNode")) cg_qm = nt_str(nt, argv[0], "value");
+    else if (cg_aty && !strcmp(cg_aty, "StringNode")) cg_qm = nt_str(nt, argv[0], "content");
+    if (cg_qm) {
+      LocalVar *cv = comp_const(c, cg_qm);
+      if (cv && cv->type != TY_UNKNOWN) { buf_printf(b, "cst_%s", cg_qm); return; }
+      /* literal but unresolved: evaluate the receiver for side effects, then raise.
+         CRuby qualifies "uninitialized constant" by a named module receiver
+         (M::Missing) but not by Object/top-level; "wrong constant name" is never
+         qualified. Qualify when the receiver is a constant other than Object. */
+      buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), sp_raise_cls(\"NameError\", ");
+      if (cg_qm[0] >= 'A' && cg_qm[0] <= 'Z') {
+        /* Qualify by the receiver's full Ruby name when it resolves to a known
+           class/module (M, or nested M::N); a builtin like Object resolves to no
+           user-class index and stays unqualified, matching CRuby. */
+        const char *rcv_ty = nt_type(nt, recv);
+        const char *rcv_nm = (rcv_ty && (!strcmp(rcv_ty, "ConstantReadNode") ||
+                                         !strcmp(rcv_ty, "ConstantPathNode"))) ? nt_str(nt, recv, "name") : NULL;
+        int rcid = rcv_nm ? comp_class_index(c, rcv_nm) : -1;
+        if (rcid >= 0) {
+          const char *qn = class_ruby_name(c, rcid); if (!qn) qn = c->classes[rcid].name;
+          buf_printf(b, "\"uninitialized constant %s::%s\"", qn, cg_qm);
+        } else {
+          buf_printf(b, "\"uninitialized constant %s\"", cg_qm);
+        }
+      } else {
+        buf_printf(b, "\"wrong constant name %s\"", cg_qm);
+      }
+      buf_puts(b, "), sp_box_nil())");
+      return;
+    }
+    unsupported(c, id, "const_get (needs a compile-time-known constant name)");
+    return;
+  }
+
   /* Class.const_defined?(:K): compile-time presence check. Constants are
      recorded in a flat namespace, so this consults the global const and class
      tables rather than the receiver's own constants. */

@@ -2194,6 +2194,16 @@ else {
   if (!strcmp(name, "!")) return TY_BOOL;
   if (!strcmp(name, "respond_to?") && recv >= 0) return TY_BOOL;
   if ((!strcmp(name, "method_defined?") || !strcmp(name, "const_defined?")) && recv >= 0) return TY_BOOL;
+  /* const_get(:K) with a literal name resolves to the constant's type (codegen
+     emits cst_<K>); a literal name that does not resolve raises NameError at
+     runtime, so its value type is poly. A dynamic name is left unresolved. */
+  if (!strcmp(name, "const_get") && recv >= 0 && argc >= 1) {
+    const char *cgt = nt_type(nt, argv[0]);
+    const char *cgn = NULL;
+    if (cgt && !strcmp(cgt, "SymbolNode")) cgn = nt_str(nt, argv[0], "value");
+    else if (cgt && !strcmp(cgt, "StringNode")) cgn = nt_str(nt, argv[0], "content");
+    if (cgn) { LocalVar *cv = comp_const(c, cgn); if (cv && cv->type != TY_UNKNOWN) return cv->type; return TY_POLY; }
+  }
   if (!strcmp(name, "nil?") && recv >= 0 && argc == 0) return TY_BOOL;
   if (!strcmp(name, "object_id") && recv >= 0 && argc == 0) return TY_INT;
   if (!strcmp(name, "between?") && argc == 2 && (rt == TY_STRING || ty_is_numeric(rt))) return TY_BOOL;
