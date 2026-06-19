@@ -55,6 +55,18 @@ legacy の「全 int → bigint widen」ではなく、**poly 値(`sp_RbVal`)に
 - 伝播 pass を増やす(infer_block_params/ivar/cvar/param/return を post-widen で回す)と境界が**ずれるだけ**(whack-a-mole)。
 - **結論**: 2b は「全 poly↔int 境界 site で coercion を挿入する codegen sweep」(代入両方向 / yield / call-arg / 比較 / cvar)を要する真の big-bang。専用セッションで境界バケツを 1 つずつ。あるいは sound な uniform widen(全 int→poly + 境界 coercion 完備)。c2 が動く事は確認済みなので方式自体は正しい、残りは境界網羅。
 
+**2026-06-19 第2試行(保守 gate 方式・revert 済、master=2a の 972):**
+保守 gate を重ねて非退行を狙ったが収束せず、**根本 ripple** を特定:
+- 実装した gate: (1) DefNode メソッドのみ・block param 除外、(2)`scan_param_use`=param の**全 read が `+`/`-`/`*`/`**` の直接 operand**の時のみ widen(yield/call-arg/index/比較/代入に1つでも出たら不可)、(3)`method(:sym)` で address-taken なメソッドは除外、(4)伝播は infer_write_types+infer_return_types のみ(full re-run は無関係 slot を撹乱)。
+- これで block2/method/i960/bound_method 系は緑、**c2 維持**。だが pattern_pin/class_var_read/proc 等が残存。
+- **根本原因 = return-type ripple**: param を poly 化すると arith 結果=メソッド戻り値が poly 化し、**その戻り値を int 文脈で消費する全 caller が壊れる**:
+  - `^(double(7))` pin 比較(`mrb_int == sp_RbVal`)
+  - `x = double(7)`(int local へ)/ `@@total = @@total + n`(int cvar へ、static init 非定数も)
+  - `&blk` メソッドの signature 不一致(`undefined reference to sp_with_logging`)
+- poly→int coercion で消す案は **promote を台無し**(昇格値を truncate)。正解は消費 slot 側も poly に widen(=full propagation)+ codegen が poly 非対応な site(cvar static init / pin)を coerce。
+- **= caller call-site の tolerance 解析 か whole-program coercion sweep が必須**。gate だけでは「結果が puts 等 poly-tolerant 文脈でしか消費されないメソッド」まで絞らないと非退行にできず、それは c2 級しか残らない。
+- 次セッション指針: (A) full propagation を入れ、sur面化する codegen site を 1 つずつ coerce(cvar poly init / pin poly 比較 / 各 int-consume を poly widen)。(B) または call-site tolerance gate(戻り値が int 文脈で消費されるメソッドは widen しない)を実装。試行コードは git 履歴(本 commit 直前)に無し=revert 済、本節が完全な再現手順。
+
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
 
