@@ -216,10 +216,14 @@ int emit_regex_pat_to_buf(Compiler *c, int nid, Buf *b) {
   if (ty && !strcmp(ty, "InterpolatedRegularExpressionNode")) {
     int flg = re_engine_flags((int)nt_int(c->nt, nid, "flags", 0));
     int ts = ++g_tmp, tp = ++g_tmp;
+    /* Emit the interpolated pattern into a local buffer: an embedded call that
+       roots its own args pushes those decls to g_pre, which must land as whole
+       statements before this temp's decl, not inside its initializer (#1498). */
+    Buf pv; memset(&pv, 0, sizeof pv);
+    emit_interp(c, nid, &pv);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "const char *_t%d = ", ts);
-    emit_interp(c, nid, g_pre);
-    buf_puts(g_pre, ";\n");
+    buf_printf(g_pre, "const char *_t%d = %s;\n", ts, pv.p ? pv.p : "\"\"");
+    free(pv.p);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "mrb_regexp_pattern *_t%d = re_compile(_t%d, (int64_t)strlen(_t%d), %d);\n", tp, ts, ts, flg);
     buf_printf(b, "_t%d", tp);

@@ -4791,8 +4791,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Regexp")) {
     int tp = ++g_tmp, ts = ++g_tmp;
     int flags = (argc >= 2) ? 1 : 0;
+    /* See the Regexp.new path: emit the pattern into a local buffer so an
+       interpolated arg's embedded-call arg roots land in g_pre as whole
+       statements before this temp's decl, not inside its initializer. */
+    Buf pv; memset(&pv, 0, sizeof pv);
+    emit_expr(c, argv[0], &pv);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "const char *_t%d = ", ts); emit_expr(c, argv[0], g_pre); buf_puts(g_pre, ";\n");
+    buf_printf(g_pre, "const char *_t%d = %s;\n", ts, pv.p ? pv.p : "\"\"");
+    free(pv.p);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "mrb_regexp_pattern *_t%d = re_compile(_t%d, (int64_t)strlen(_t%d ? _t%d : \"\"), %d);\n",
                tp, ts, ts, ts, flags);
@@ -5737,8 +5743,15 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (cn && !strcmp(cn, "Regexp") && argc >= 1) {
         int tp = ++g_tmp, ts = ++g_tmp;
         int flags = (argc >= 2) ? 1 : 0; /* Regexp::IGNORECASE=1 if 2nd arg truthy */
+        /* Emit the pattern value into a local buffer first: an interpolated arg
+           whose embedded call roots its own args pushes those decls to g_pre,
+           which must land as whole statements BEFORE this temp's decl line, not
+           inside its initializer. */
+        Buf pv; memset(&pv, 0, sizeof pv);
+        emit_expr(c, argv[0], &pv);
         emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "const char *_t%d = ", ts); emit_expr(c, argv[0], g_pre); buf_puts(g_pre, ";\n");
+        buf_printf(g_pre, "const char *_t%d = %s;\n", ts, pv.p ? pv.p : "\"\"");
+        free(pv.p);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "mrb_regexp_pattern *_t%d = re_compile(_t%d, (int64_t)strlen(_t%d ? _t%d : \"\"), %d);\n",
                    tp, ts, ts, ts, flags);
