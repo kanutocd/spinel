@@ -1468,7 +1468,7 @@ else {
   /* arr.each.with_index(off).<terminal> / arr.each_with_index.<terminal>:
      a blockless [elem, index]-pair enumerator consumed by the terminal.
      (matz/spinel#1481 inject/reduce result; #1483 others.) */
-  if (recv >= 0 && rt == TY_UNKNOWN &&
+  if (recv >= 0 &&
       nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
       nt_ref(nt, recv, "block") < 0) {
     const char *rn = nt_str(nt, recv, "name");
@@ -1499,6 +1499,21 @@ else {
         }
         return acc;
       }
+      int blk = nt_ref(nt, id, "block");
+      int body = blk >= 0 ? nt_ref(nt, blk, "body") : -1;
+      int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+      /* The codegen path only handles the |v, i| two-param block form; gate the
+         result type on it so single-param forms fall to their normal rules. */
+      int two_param = blk >= 0 && !block_param_is_multi(c, blk, 0) &&
+                      block_param_name(c, blk, 0) && block_param_name(c, blk, 1);
+      if (two_param && (!strcmp(name, "map") || !strcmp(name, "collect")))
+        return ty_array_of(bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN);
+      if (!strcmp(name, "to_a") || !strcmp(name, "entries") ||
+          (two_param && (!strcmp(name, "select") || !strcmp(name, "filter") || !strcmp(name, "reject"))))
+        return TY_POLY_ARRAY;   /* an array of [element, index] pairs */
+      if (two_param && !strcmp(name, "count")) return TY_INT;
+      if (two_param && (!strcmp(name, "any?") || !strcmp(name, "all?") || !strcmp(name, "none?")))
+        return TY_BOOL;
     }
   }
 

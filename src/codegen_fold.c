@@ -1482,6 +1482,170 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* The non-fold terminals over arr.each.with_index / arr.each_with_index:
+   map/collect (collect block value), select/filter & reject & to_a/entries
+   (collect the [v,i] pair), count, any?/all?/none? (scalar), each (side effect,
+   returns the receiver). Emits the loop into g_pre; the result tmp lands in `b`.
+   Returns 1 if handled. (matz/spinel#1483) */
+int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name) return 0;
+  int is_map = !strcmp(name, "map") || !strcmp(name, "collect");
+  int is_sel = !strcmp(name, "select") || !strcmp(name, "filter");
+  int is_rej = !strcmp(name, "reject");
+  int is_toa = !strcmp(name, "to_a") || !strcmp(name, "entries");
+  int is_cnt = !strcmp(name, "count");
+  int is_any = !strcmp(name, "any?"), is_all = !strcmp(name, "all?"), is_none = !strcmp(name, "none?");
+  int is_each = !strcmp(name, "each");
+  if (!(is_map || is_sel || is_rej || is_toa || is_cnt || is_any || is_all || is_none || is_each)) return 0;
+
+  int arr = -1, off = -1;
+  if (!ewi_chain(c, id, &arr, &off)) return 0;
+  TyKind rt = comp_ntype(c, arr);
+  if (!ty_is_array(rt)) return 0;
+  const char *k = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
+  if (!k) return 0;
+  TyKind elem_t = ty_array_elem(rt);
+
+  int block = nt_ref(nt, id, "block");
+  if (!is_toa && block < 0) return 0;   /* only to_a/entries work without a block */
+
+  /* each.with_index yields (element, index) as multiple values, so block-arg
+     semantics are ordinary: |v, i| binds both; a single |x| binds the element
+     (index discarded); a single destructure |(v,i)| would destructure the
+     element (an MRI corner, v=elem/i=nil) -- not worth it, so bail on it. */
+  /* Only the unambiguous |v, i| two-param form is handled; a single |x| param
+     has method-dependent yield semantics in MRI (map binds the element,
+     select binds the pair), so leave those to other rules. */
+  const char *vo = NULL, *io = NULL;
+  if (block >= 0) {
+    if (block_param_is_multi(c, block, 0)) return 0;
+    vo = block_param_name(c, block, 0);
+    io = block_param_name(c, block, 1);
+    if (!vo || !io) return 0;
+  }
+
+  int collect_pair = is_sel || is_rej || is_toa;   /* select/reject/to_a collect the [elem,index] pair */
+  int need_pair = collect_pair;
+  const char *pk = (elem_t == TY_INT) ? "Int" : "Poly";
+  TyKind pair_ty = (elem_t == TY_INT) ? TY_INT_ARRAY : TY_POLY_ARRAY;
+
+  int ta = ++g_tmp, ti = ++g_tmp, tidx = ++g_tmp;
+  int tres = 0, tcnt = 0, tflag = 0;
+  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, arr, &rb);
+  emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = ", tidx);
+  if (off >= 0) emit_expr(c, off, g_pre); else buf_puts(g_pre, "0");
+  buf_puts(g_pre, ";\n");
+
+  const char *rk = NULL;
+  if (is_map) {
+    TyKind restype = comp_ntype(c, id);
+    rk = (restype == TY_POLY_ARRAY) ? "Poly" : array_kind(restype);
+    if (!rk) rk = "Poly";
+    tres = ++g_tmp;
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", rk, tres, rk, tres);
+  }
+  else if (collect_pair) {
+    tres = ++g_tmp;
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tres, tres);
+  }
+  else if (is_cnt) {
+    tcnt = ++g_tmp; emit_indent(g_pre, g_indent); buf_printf(g_pre, "mrb_int _t%d = 0;\n", tcnt);
+  }
+  else if (is_any || is_all || is_none) {
+    tflag = ++g_tmp; emit_indent(g_pre, g_indent); buf_printf(g_pre, "int _t%d = %d;\n", tflag, (is_all || is_none) ? 1 : 0);
+  }
+
+  /* override block-param types so the body expression types correctly */
+  Scope *bsc = block >= 0 ? comp_scope_of(c, block) : NULL;
+  LocalVar *lv = NULL, *li = NULL; TyKind sv = TY_UNKNOWN, si = TY_UNKNOWN;
+  if (block >= 0) {
+    lv = scope_local(bsc, vo); sv = lv ? lv->type : TY_UNKNOWN; if (lv) lv->type = elem_t;
+    li = scope_local(bsc, io); si = li ? li->type : TY_UNKNOWN; if (li) li->type = TY_INT;
+    int body = nt_ref(nt, block, "body");
+    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    for (int j = 0; j < bn; j++) infer_type(c, bb[j]);
+  }
+
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "for (mrb_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++, _t%d++) {\n", ti, ti, k, ta, ti, tidx);
+  int din = g_indent + 1;
+
+  int tpair = 0;
+  if (need_pair) {
+    tpair = ++g_tmp;
+    emit_indent(g_pre, din); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", pk, tpair, pk, tpair);
+    if (elem_t == TY_INT) {
+      emit_indent(g_pre, din);
+      buf_printf(g_pre, "sp_IntArray_push(_t%d, sp_%sArray_get(_t%d, _t%d)); sp_IntArray_push(_t%d, _t%d);\n", tpair, k, ta, ti, tpair, tidx);
+    } else {
+      emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tpair);
+      char src[96]; snprintf(src, sizeof src, "sp_%sArray_get(_t%d, _t%d)", k, ta, ti);
+      Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, elem_t, src, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
+      buf_printf(g_pre, "); sp_PolyArray_push(_t%d, sp_box_int(_t%d));\n", tpair, tidx);
+    }
+  }
+  if (block >= 0) {
+    emit_indent(g_pre, din); emit_ctype(c, elem_t, g_pre); buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", rename_local(vo), k, ta, ti);
+    emit_indent(g_pre, din); buf_printf(g_pre, "mrb_int lv_%s = _t%d;\n", rename_local(io), tidx);
+  }
+
+  int body = block >= 0 ? nt_ref(nt, block, "body") : -1;
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (is_each) {
+    for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, din);
+  }
+  else if (collect_pair && block < 0) {   /* to_a / entries */
+    emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tres);
+    Buf bx; memset(&bx, 0, sizeof bx); char pe[32]; snprintf(pe, sizeof pe, "_t%d", tpair); emit_boxed_text(c, pair_ty, pe, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
+    buf_puts(g_pre, ");\n");
+  }
+  else {   /* map / select / reject / count / any? / all? / none? -- need the block value */
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, din);
+    int saveInd = g_indent; g_indent = din;
+    Buf vb; memset(&vb, 0, sizeof vb); if (bn > 0) emit_expr(c, bb[bn - 1], &vb); g_indent = saveInd;
+    const char *v = vb.p ? vb.p : "0";
+    if (is_map) {
+      TyKind bt = comp_ntype(c, bb[bn - 1]);
+      emit_indent(g_pre, din); buf_printf(g_pre, "sp_%sArray_push(_t%d, ", rk, tres);
+      if (!strcmp(rk, "Poly") && bt != TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, bt, v, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
+      else buf_puts(g_pre, v);
+      buf_puts(g_pre, ");\n");
+    }
+    else if (is_sel || is_rej) {
+      emit_indent(g_pre, din); buf_printf(g_pre, "if (%s(%s)) sp_PolyArray_push(_t%d, ", is_rej ? "!" : "", v, tres);
+      Buf bx; memset(&bx, 0, sizeof bx); char pe[32]; snprintf(pe, sizeof pe, "_t%d", tpair); emit_boxed_text(c, pair_ty, pe, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
+      buf_puts(g_pre, ");\n");
+    }
+    else if (is_cnt) {
+      emit_indent(g_pre, din); buf_printf(g_pre, "if (%s) _t%d++;\n", v, tcnt);
+    }
+    else if (is_any) {
+      emit_indent(g_pre, din); buf_printf(g_pre, "if (%s) { _t%d = 1; break; }\n", v, tflag);
+    }
+    else if (is_none) {
+      emit_indent(g_pre, din); buf_printf(g_pre, "if (%s) { _t%d = 0; break; }\n", v, tflag);
+    }
+    else if (is_all) {
+      emit_indent(g_pre, din); buf_printf(g_pre, "if (!(%s)) { _t%d = 0; break; }\n", v, tflag);
+    }
+    free(vb.p);
+  }
+
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+
+  if (lv) lv->type = sv; if (li) li->type = si;
+
+  if (is_map || collect_pair) buf_printf(b, "_t%d", tres);
+  else if (is_cnt) buf_printf(b, "_t%d", tcnt);
+  else if (is_any || is_all || is_none) buf_printf(b, "_t%d", tflag);
+  else buf_printf(b, "_t%d", ta);   /* each -> receiver */
+  return 1;
+}
+
 /* sort_by { |x| key } as an expression: a stable bubble sort of a copy of
    the receiver, ordering by the block's computed (scalar) key. Returns 1 if
    handled. */

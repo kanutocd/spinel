@@ -367,6 +367,7 @@ int emit_partition_expr(Compiler *c, int id, Buf *b);
 int emit_collect_expr(Compiler *c, int id, Buf *b);
 int emit_with_index_expr(Compiler *c, int id, Buf *b);
 int emit_each_with_index_chain(Compiler *c, int id, Buf *b);
+int emit_each_with_index_terminal(Compiler *c, int id, Buf *b);
 int emit_chunk_while_expr(Compiler *c, int id, Buf *b);
 int emit_predicate_expr(Compiler *c, int id, Buf *b);
 int emit_grep_pred(Compiler *c, int pat, const char *ev, Buf *b);

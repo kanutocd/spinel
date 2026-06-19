@@ -3216,6 +3216,43 @@ int infer_block_params(Compiler *c) {
       }
     }
 
+    /* arr.each.with_index(off).<terminal> { |v, i| } / { |(v,i)| } / { |pair| }
+       (map/collect/select/filter/reject/count/any?/all?/none?/each over the
+       [elem, index] pair enumerator). (matz/spinel#1483) */
+    if (block >= 0 &&
+        (ty_iter_shape(name) == TY_ITER_MAP || ty_iter_shape(name) == TY_ITER_SELECT ||
+         ty_iter_shape(name) == TY_ITER_REJECT || !strcmp(name, "each") ||
+         !strcmp(name, "count") || !strcmp(name, "any?") || !strcmp(name, "all?") ||
+         !strcmp(name, "none?")) &&
+        nt_type(nt, recv) && !strcmp(nt_type(nt, recv), "CallNode") &&
+        nt_ref(nt, recv, "block") < 0) {
+      const char *rn = nt_str(nt, recv, "name");
+      int chain_arr = -1;
+      if (rn && !strcmp(rn, "each_with_index")) chain_arr = nt_ref(nt, recv, "receiver");
+      else if (rn && !strcmp(rn, "with_index")) {
+        int wir = nt_ref(nt, recv, "receiver");
+        if (wir >= 0 && nt_type(nt, wir) && !strcmp(nt_type(nt, wir), "CallNode") &&
+            nt_str(nt, wir, "name") && !strcmp(nt_str(nt, wir, "name"), "each") &&
+            nt_ref(nt, wir, "block") < 0)
+          chain_arr = nt_ref(nt, wir, "receiver");
+      }
+      TyKind chain_at = chain_arr >= 0 ? infer_type(c, chain_arr) : TY_UNKNOWN;
+      /* Only the |v, i| two-param form (v = element, i = index); single-param
+         and destructure forms have method-dependent semantics and are left to
+         other rules (the codegen path bails on them too). */
+      const char *vp = block_param_name(c, block, 0);
+      const char *ip = block_param_name(c, block, 1);
+      if (ty_is_array(chain_at) && !block_param_is_multi(c, block, 0) && vp && ip) {
+        TyKind elem = ty_array_elem(chain_at);
+        Scope *bs = comp_scope_of(c, block);
+        LocalVar *lp = scope_local_intern(bs, vp); lp->is_block_param = 1;
+        TyKind m = ty_unify(lp->type, elem); if (m != lp->type) { lp->type = m; changed = 1; }
+        LocalVar *lp2 = scope_local_intern(bs, ip); lp2->is_block_param = 1;
+        TyKind m2 = ty_unify(lp2->type, TY_INT); if (m2 != lp2->type) { lp2->type = m2; changed = 1; }
+        continue;
+      }
+    }
+
     /* array.{map,collect,each,select,filter,reject}.with_index(off) { |x, i| }:
        a blockless enumerator over an array, indexed -- element + int index. */
     if (!strcmp(name, "with_index") &&
