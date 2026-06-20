@@ -67,6 +67,22 @@ legacy の「全 int → bigint widen」ではなく、**poly 値(`sp_RbVal`)に
 - **= caller call-site の tolerance 解析 か whole-program coercion sweep が必須**。gate だけでは「結果が puts 等 poly-tolerant 文脈でしか消費されないメソッド」まで絞らないと非退行にできず、それは c2 級しか残らない。
 - 次セッション指針: (A) full propagation を入れ、sur面化する codegen site を 1 つずつ coerce(cvar poly init / pin poly 比較 / 各 int-consume を poly widen)。(B) または call-site tolerance gate(戻り値が int 文脈で消費されるメソッドは widen しない)を実装。試行コードは git 履歴(本 commit 直前)に無し=revert 済、本節が完全な再現手順。
 
+**2026-06-20 第3試行 = 方針 (A) full uniform widen を実行(branch `promote-full-widen-experiment` に保全):**
+matz 洞察「poly は int(inline)と bigint(heap)両方を 1 値で保持するので、legacy の全 bigint(全 heap)より効率犠牲を抑えて全 widen できる」を受け、**全 int slot → poly** を実装(analyze.c の fixpoint 後・node-type cache 前、`g_promote_mode` gate、24 行)。param/return/local/ivar/cvar の `TY_INT`→`TY_POLY`。
+- **本丸 #1 が動いた**: `def mul(x,y)=x*y; mul(10**15,10**15)` = 10**30、`mul(3,4)=12`(小 int は inline poly)。MRI 一致。**approach 実証完了**。
+- **default gate 無傷**(992/0/0、g_promote_mode gate)。
+- **promote suite 993→831(32 fail / 130 error)**= 境界バケツが表面化。**全エラーは poly↔int 境界の coercion 欠如**(codegen が型一致前提)。
+- 単純代入境界は **emit_assign に既に poly-box arm あり**(codegen_stmt.c:512 `lv->type==TY_POLY → emit_boxed`)。残るは以下の **境界バケツ(C error 頻度順、`/tmp/promerr.txt` 集計)**:
+  1. **代入 `sp_RbVal = mrb_int/long`(265)**= op_assign(`x+=1`)・ivar/cvar write・宣言初期化など emit_assign 以外の代入経路。各 write emit に poly-box。
+  2. **比較 `sp_RbVal <= / >= / < / > / == mrb_int`(~60)**= poly recv の比較を `sp_poly_lt/cmp/eq` に回す(scalar 比較 codegen が int 前提)。
+  3. **increment `wrong type argument to increment`(28)**= `lv_x++`(loop counter 等)が poly slot。`lv_x = sp_poly_add(lv_x, sp_box_int(1))` 化。
+  4. **builtin arg coerce(~40)**: `sp_IntArray_push`(14)/`sp_poly_to_s`(11)/`sp_poly_lt`(9)/`sp_bigint_new_int`(5)/`sp_poly_to_i`(4)/`sp_range_include`(4)/`sp_str_sub_range_r`(4)= poly arg を builtin の int param へ。call-arg coerce。
+  5. **const/cvar static init 非定数(21)**= `static ... = sp_box_int(...)`(非定数式)。cvar/const の poly 初期化を runtime init へ移すか、int 保持して read 時 box。
+  6. **mrb_int = sp_RbVal(22)/ return mismatch(~10)**= builtin 戻り(int)を poly slot へ、または poly 値を int return 型へ。widen し残した境界。
+  7. **float `aggregate where floating-point expected`(10)**= poly を float 文脈へ。`sp_poly_to_f` coerce。
+- **次の一手**: バケツ 1(op_assign/ivar/cvar write の poly-box)→ 2(比較)→ 3(increment)の順で、各バケツ後に promote suite を再計測(`rm -rf build/test-results && make test SPINEL_INT_OVERFLOW=promote OPT=-O1`)。emit_assign の poly arm パターンを各 write/compare/return site に横展開する作業。branch から cherry-pick して再開。
+- **判断**: これは計画通り複数セッションの big-bang。master は clean(2a の 993)維持、完遂後にまとめて昇格。approach は確定(本丸動作・効率優位)。
+
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
 
