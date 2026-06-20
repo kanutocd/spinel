@@ -3898,7 +3898,16 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
       emit_begin(c, id, b, indent, rv);
       g_result_poly = sp;
-      emit_indent(b, indent); emit_tail_lead(b); buf_printf(b, "_t%d;\n", t);
+      emit_indent(b, indent); emit_tail_lead(b);
+      /* the begin's scalar result temp feeds a poly tail slot (return type or an
+         outer poly result var widened under promote): box it to match. */
+      int target_poly = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
+      if (target_poly && rt != TY_POLY) {
+        char ex[24]; snprintf(ex, sizeof ex, "_t%d", t);
+        Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, rt, ex, &bx);
+        buf_printf(b, "%s;\n", bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+      }
+      else buf_printf(b, "_t%d;\n", t);
       return;
     }
     /* Non-scalar (e.g. TY_VOID when body diverges with raise or return):
