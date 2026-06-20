@@ -3609,7 +3609,9 @@ else {
           if (!hn) { unsupported(c, id, "multiple assignment hash index target unknown kind"); continue; }
           buf_printf(b, "sp_%sHash_set(", hn);
           emit_expr(c, recv_id, b); buf_puts(b, ", ");
-          emit_expr(c, idx_argv[0], b); buf_puts(b, ", ");
+          if (ty_hash_key(recv_t) == TY_INT) emit_int_expr(c, idx_argv[0], b);
+          else emit_expr(c, idx_argv[0], b);
+          buf_puts(b, ", ");
           if (recv_t == TY_SYM_POLY_HASH || recv_t == TY_STR_POLY_HASH || recv_t == TY_POLY_POLY_HASH) {
             TyKind valt = comp_ntype(c, els[i]);
             char tmp_expr2[32]; snprintf(tmp_expr2, sizeof tmp_expr2, "_t%d", tmps[i]);
