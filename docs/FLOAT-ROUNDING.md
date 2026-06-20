@@ -38,10 +38,12 @@ A **non-literal** `ndigits` keeps the static `Float` type:
 
 So `x.round(n)` where `n` is a variable holding a non-positive value
 returns a Float (`10.0`) where CRuby returns an Integer (`10`). The
-values are numerically equal; only `#class` and the default string form
-(`"10.0"` vs `"10"`) differ. Code that needs an Integer can convert
+**value is still computed exactly** (`1.234.round(n)` with `n == 2` is
+`1.23`, `1234.5.round(n)` with `n == -1` is `1230.0`); the values are
+numerically equal to CRuby's and only `#class` and the default string
+form (`"10.0"` vs `"10"`) differ. Code that needs an Integer can convert
 explicitly: `x.round(n).to_i`.
 
-The implementation lives in `infer_method_name_type` (spinel_analyze.rb)
-and `compile_float_round_expr` (spinel_codegen.rb); both classify a
-literal-integer `ndigits` by sign and fall back to Float otherwise.
+The implementation lives in `infer_call` (`src/analyze_infer.c`) and
+`emit_scalar_call` (`src/codegen_call.c`); both classify a literal-integer
+`ndigits` by sign and fall back to an exact Float computation otherwise.

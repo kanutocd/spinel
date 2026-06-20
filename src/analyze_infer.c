@@ -2167,13 +2167,18 @@ else {
       return TY_FLOAT;
     if (!strcmp(name, "floor") || !strcmp(name, "ceil") ||
         !strcmp(name, "round") || !strcmp(name, "truncate")) {
-      /* value-based return type: ndigits > 0 (literal) -> Float, else Integer */
+      /* CRuby chooses the return class from the runtime ndigits value: Integer
+         when ndigits <= 0, Float when ndigits > 0. With a literal ndigits we
+         match it exactly. A NON-literal ndigits can't be classified statically,
+         so the result stays Float and the value is still computed exactly (x
+         rounded to n places); only #class differs from CRuby when n turns out
+         <= 0 -- the documented residual divergence (docs/FLOAT-ROUNDING.md). */
       if (argc == 1) {
         const char *aty = nt_type(nt, argv[0]);
-        if (aty && !strcmp(aty, "IntegerNode") && nt_int(nt, argv[0], "value", 0) > 0)
-          return TY_FLOAT;
+        if (!aty || strcmp(aty, "IntegerNode")) return TY_FLOAT;  /* non-literal */
+        return nt_int(nt, argv[0], "value", 0) > 0 ? TY_FLOAT : TY_INT;
       }
-      return TY_INT;
+      return TY_INT;  /* no arg -> self truncated to Integer */
     }
   }
 

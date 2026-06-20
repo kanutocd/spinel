@@ -2414,18 +2414,30 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else handled = 0;
     }
     else { /* TY_FLOAT */
-      /* round/ceil/floor/truncate(n>0) -> Float to n decimals; else Integer */
+      /* round/ceil/floor/truncate(n>0) -> Float to n decimals; else Integer.
+         A non-literal ndigits can't be classified statically; compute the exact
+         value at runtime, typed Float (see infer_method_name_type / FLOAT-ROUNDING). */
       int ndig = 0;
+      int nonlit = 0;
       if ((!strcmp(name, "floor") || !strcmp(name, "ceil") ||
            !strcmp(name, "round") || !strcmp(name, "truncate")) && argc == 1) {
         const char *aty = nt_type(c->nt, argv[0]);
         if (aty && !strcmp(aty, "IntegerNode")) ndig = (int)nt_int(c->nt, argv[0], "value", 0);
+        else nonlit = 1;
       }
       const char *cfn = !strcmp(name, "floor") ? "floor" : !strcmp(name, "ceil") ? "ceil"
                       : !strcmp(name, "truncate") ? "trunc" : "round";
       if ((!strcmp(name, "floor") || !strcmp(name, "ceil") ||
            !strcmp(name, "round") || !strcmp(name, "truncate"))) {
-        if (ndig > 0)
+        if (nonlit) {
+          /* _f = 10**n at runtime; round(x * _f) / _f gives the right value for
+             any n (n<=0 yields a whole number, still Float -- class-only divergence). */
+          int tf = ++g_tmp;
+          buf_printf(b, "({ double _t%d = pow(10, (double)(", tf);
+          emit_expr(c, argv[0], b);
+          buf_printf(b, ")); %s((%s) * _t%d) / _t%d; })", cfn, r, tf, tf);
+        }
+        else if (ndig > 0)
           buf_printf(b, "({ double _f = pow(10, %d); %s((%s) * _f) / _f; })", ndig, cfn, r);
         else if (ndig < 0)  /* round to a power of ten left of the decimal -> Integer */
           buf_printf(b, "({ double _f = pow(10, %d); (mrb_int)(%s((%s) / _f) * _f); })", -ndig, cfn, r);
