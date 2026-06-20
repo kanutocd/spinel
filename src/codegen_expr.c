@@ -723,6 +723,14 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       buf_printf(b, "(%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, v, b); buf_puts(b, "))");
     }
+    else if (ct == TY_POLY) {
+      const char *pfn = !strcmp(op ? op : "+", "+") ? "sp_poly_add"
+                      : !strcmp(op, "-") ? "sp_poly_sub"
+                      : !strcmp(op, "*") ? "sp_poly_mul"
+                      : !strcmp(op, "/") ? "sp_poly_div" : NULL;
+      if (pfn) { buf_printf(b, "(%s = %s(%s, ", ref, pfn, ref); emit_boxed(c, v, b); buf_puts(b, "))"); }
+      else { buf_printf(b, "(%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ")"); }
+    }
     else {
       buf_printf(b, "(%s %s= ", ref, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ")");

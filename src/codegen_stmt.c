@@ -2803,6 +2803,16 @@ else {
       buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
       emit_expr(c, v, b); buf_puts(b, ");\n");
     }
+    else if (ct == TY_POLY) {
+      /* a widened cvar op-assign routes through the tag-dispatching sp_poly_<op>
+         (mirrors the local op-assign poly arm). */
+      const char *pfn = !strcmp(op ? op : "+", "+") ? "sp_poly_add"
+                      : !strcmp(op, "-") ? "sp_poly_sub"
+                      : !strcmp(op, "*") ? "sp_poly_mul"
+                      : !strcmp(op, "/") ? "sp_poly_div" : NULL;
+      if (pfn) { buf_printf(b, "%s = %s(%s, ", ref, pfn, ref); emit_boxed(c, v, b); buf_puts(b, ");\n"); }
+      else { buf_printf(b, "%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ";\n"); }
+    }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_expr(c, v, b); buf_puts(b, ";\n");
