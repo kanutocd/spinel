@@ -2741,10 +2741,17 @@ char *codegen_program(const NodeTable *nt) {
     ClassInfo *ci = &c->classes[i];
     for (int j = 0; j < ci->ncvars; j++) {
       TyKind t = ci->cvar_types[j] == TY_UNKNOWN ? TY_INT : ci->cvar_types[j];
+      /* static initializers must be constant.  default_value() returns the
+         sp_box_nil() *call* for poly, which is not a constant initializer at
+         file scope; emit the equivalent constant aggregate instead (mirrors the
+         civ class-ivar decls below).  This matters under --int-overflow=promote
+         where every int cvar is widened to poly. */
+      const char *init = t == TY_RANGE ? "{0}"
+                       : t == TY_POLY  ? "{SP_TAG_NIL, 0, {0}}"
+                       : default_value(t);
       buf_puts(&b, "static ");
       emit_ctype(c, t, &b);
-      buf_printf(&b, " cvar_%s_%s = %s;\n", ci->name, ci->cvars[j] + 2,
-                 t == TY_RANGE ? "{0}" : default_value(t));
+      buf_printf(&b, " cvar_%s_%s = %s;\n", ci->name, ci->cvars[j] + 2, init);
     }
   }
 
