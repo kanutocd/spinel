@@ -2666,7 +2666,9 @@ int emit_grep_pred(Compiler *c, int pat, const char *ev, TyKind et, Buf *b) {
   if (pty && !strcmp(pty, "RangeNode")) {
     int tr = ++g_tmp;
     buf_printf(b, "({ sp_Range _t%d = ", tr); emit_expr(c, pat, b);
-    buf_printf(b, "; sp_range_include(&_t%d, %s); })", tr, ev);
+    /* sp_range_include takes mrb_int; coerce a poly scrutinee with sp_poly_to_i. */
+    if (et == TY_POLY) buf_printf(b, "; sp_range_include(&_t%d, sp_poly_to_i(%s)); })", tr, ev);
+    else buf_printf(b, "; sp_range_include(&_t%d, %s); })", tr, ev);
     return 1;
   }
   if (pty && !strcmp(pty, "ConstantReadNode")) {

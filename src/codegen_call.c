@@ -2201,18 +2201,18 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
         int excl = (int)(nt_int(c->nt, rn, "flags", 0) & 4) ? 1 : 0;
         int lo = nt_ref(c->nt, rn, "left"), hi = nt_ref(c->nt, rn, "right");
         buf_printf(b, "sp_str_sub_range_r(%s, ", r);
-        if (lo >= 0) emit_expr(c, lo, b); else buf_puts(b, "0");
+        if (lo >= 0) emit_int_expr(c, lo, b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (hi >= 0) { emit_expr(c, hi, b); buf_printf(b, ", %d)", excl); }
+        if (hi >= 0) { emit_int_expr(c, hi, b); buf_printf(b, ", %d)", excl); }
         else buf_printf(b, "(mrb_int)sp_str_length(%s), 0)", r);  /* endless: to the end */
       }
       else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 2) {
         /* s[start, len] */
         buf_printf(b, "sp_str_sub_range(%s, ", r);
-        emit_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
+        emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       }
       else if ((!strcmp(name, "[]") || !strcmp(name, "slice")) && argc == 1) {
-        buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "split") && argc == 0) buf_printf(b, "sp_str_split_ws(%s)", r);
       else if (!strcmp(name, "split") && argc == 1) {
@@ -3067,11 +3067,16 @@ static int emit_range_call(Compiler *c, int id, Buf *b) {
         else {
           /* sp_range_include takes mrb_int; a float arg (`(1..).include?(2.4)`)
              needs an explicit cast, else clang -Werror flags the implicit
-             float-literal->int conversion (gcc truncates silently). */
-          int arg_is_float = comp_ntype(c, argv[0]) == TY_FLOAT;
+             float-literal->int conversion (gcc truncates silently). A poly arg
+             (e.g. under --int-overflow=promote) is coerced with sp_poly_to_i. */
+          TyKind at0 = comp_ntype(c, argv[0]);
+          int arg_is_float = at0 == TY_FLOAT;
+          int arg_is_poly = at0 == TY_POLY;
           buf_printf(b, "sp_range_include(&_t%d, ", t);
           if (arg_is_float) buf_puts(b, "(mrb_int)(");
+          if (arg_is_poly) buf_puts(b, "sp_poly_to_i(");
           emit_expr(c, argv[0], b);
+          if (arg_is_poly) buf_puts(b, ")");
           if (arg_is_float) buf_puts(b, ")");
           buf_puts(b, ")");
         }

@@ -1392,7 +1392,9 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             /* `when lo..hi` is range membership, not equality */
             int tr = ++g_tmp;
             buf_printf(b, "({ sp_Range _t%d = ", tr); emit_expr(c, conds[j], b);
-            buf_printf(b, "; sp_range_include(&_t%d, _t%d); })", tr, t);
+            /* sp_range_include takes mrb_int; coerce a poly scrutinee. */
+            if (pt == TY_POLY) buf_printf(b, "; sp_range_include(&_t%d, sp_poly_to_i(_t%d)); })", tr, t);
+            else buf_printf(b, "; sp_range_include(&_t%d, _t%d); })", tr, t);
           }
           else if (eq_family(pt) && eq_family(comp_ntype(c, conds[j])) && eq_family(pt) != eq_family(comp_ntype(c, conds[j]))) {
             /* a when value of a different comparable family never matches */
@@ -1531,7 +1533,8 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
         else if (comp_ntype(c, conds[j]) == TY_RANGE && pt != TY_STRING) {
           int tr = ++g_tmp;
           buf_printf(b, "({ sp_Range _t%d = ", tr); emit_expr(c, conds[j], b);
-          buf_printf(b, "; sp_range_include(&_t%d, _t%d); })", tr, t);
+          if (pt == TY_POLY) buf_printf(b, "; sp_range_include(&_t%d, sp_poly_to_i(_t%d)); })", tr, t);
+          else buf_printf(b, "; sp_range_include(&_t%d, _t%d); })", tr, t);
         }
         else if (eq_family(pt) && eq_family(comp_ntype(c, conds[j])) && eq_family(pt) != eq_family(comp_ntype(c, conds[j]))) {
           buf_puts(b, "0");
