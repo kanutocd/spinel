@@ -2276,8 +2276,16 @@ void analyze_program(Compiler *c) {
     for (int s = 0; s < c->nscopes; s++) {
       Scope *sc = &c->scopes[s];
       if (sc->ret == TY_INT) sc->ret = TY_POLY;
-      for (int i = 0; i < sc->nlocals; i++)
+      for (int i = 0; i < sc->nlocals; i++) {
+        /* Skip block params: they are typed by the iterated collection's
+           element type (an IntArray yields int elements), and the block
+           emitters already retype the param to that element type for the body
+           (use_shadow). Widening them to poly only creates an int/poly shadow
+           and inconsistent reads (e.g. `x.even?` keeps the stale poly type
+           while `x*2` sees the retyped int). Method params still widen. */
+        if (sc->locals[i].is_block_param) continue;
         if (sc->locals[i].type == TY_INT) sc->locals[i].type = TY_POLY;
+      }
     }
     for (int ci = 0; ci < c->nclasses; ci++) {
       ClassInfo *cl = &c->classes[ci];
