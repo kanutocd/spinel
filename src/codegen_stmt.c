@@ -1119,7 +1119,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
 
     if (!strcmp(pty, "LocalVariableTargetNode")) {
       const char *lnm = nt_str(nt, pat, "name");
-      if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = _t%d;\n", lnm, t); }
+      if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); } else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
     }
     else if (!strcmp(pty, "IfNode")) {
       guard = nt_ref(nt, pat, "predicate");
@@ -1131,7 +1131,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
           const char *bty = nt_type(nt, body[k]);
           if (bty && !strcmp(bty, "LocalVariableTargetNode")) {
             const char *lnm = nt_str(nt, body[k], "name");
-            if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = _t%d;\n", lnm, t); }
+            if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); } else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
           }
         }
       }
@@ -1141,7 +1141,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
       if (tgt >= 0 && nt_type(nt, tgt) &&
           !strcmp(nt_type(nt, tgt), "LocalVariableTargetNode")) {
         const char *lnm = nt_str(nt, tgt, "name");
-        if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = _t%d;\n", lnm, t); }
+        if (lnm) { emit_indent(b, body_indent); buf_printf(b, "lv_%s = ", lnm); LocalVar *plv = scope_local(comp_scope_of(c, id), lnm); if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) { char ex[24]; snprintf(ex, sizeof ex, "_t%d", t); Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, pt, ex, &bx); buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p); } else buf_printf(b, "_t%d", t); buf_puts(b, ";\n"); }
       }
       int val = nt_ref(nt, pat, "value");
       if (val >= 0 && nt_type(nt, val) && !strcmp(nt_type(nt, val), "ArrayPatternNode"))
@@ -1166,7 +1166,16 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
         const char *lnm = nt_str(nt, reqs[i], "name");
         if (!lnm) continue;
         emit_indent(b, body_indent);
-        buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %dLL);\n", lnm, k, t, (long long)i);
+        buf_printf(b, "lv_%s = ", lnm);
+        LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
+        char gx[64]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, %dLL)", k, t, i);
+        if (plv && plv->type == TY_POLY && strcmp(k, "Poly")) {
+          Buf bx; memset(&bx, 0, sizeof bx);
+          emit_boxed_text(c, ty_array_elem(arr_t), gx, &bx);
+          buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+        }
+        else buf_puts(b, gx);
+        buf_puts(b, ";\n");
       }
       if (rest_nid >= 0 && nt_type(nt, rest_nid) &&
           !strcmp(nt_type(nt, rest_nid), "SplatNode")) {
@@ -3108,7 +3117,16 @@ else {
         const char *lnm = nt_str(nt, reqs[i], "name");
         if (!lnm) continue;
         emit_indent(b, indent);
-        buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %dLL);\n", lnm, k, tarr, (long long)i);
+        buf_printf(b, "lv_%s = ", lnm);
+        LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
+        char gx[64]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, %dLL)", k, tarr, i);
+        if (plv && plv->type == TY_POLY && strcmp(k, "Poly")) {
+          Buf bx; memset(&bx, 0, sizeof bx);
+          emit_boxed_text(c, ty_array_elem(vt != TY_UNKNOWN ? vt : TY_INT_ARRAY), gx, &bx);
+          buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
+        }
+        else buf_puts(b, gx);
+        buf_puts(b, ";\n");
       }
     }
     else if (!strcmp(pty, "HashPatternNode")) {
