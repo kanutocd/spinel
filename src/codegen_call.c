@@ -5314,6 +5314,9 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           if (!pn) continue;
           LocalVar *plv = scope_local(comp_scope_of(c, id), pn);
           int ppoly = plv && plv->type == TY_POLY;  /* widened slot needs a boxed rvalue */
+          /* a scalar slot (e.g. an int block param, which is NOT widened) fed a
+             poly arg needs the reverse: unbox the poly down to the slot type. */
+          int pscalar = plv && plv->type != TY_POLY && plv->type != TY_UNKNOWN;
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "lv_%s = ", rename_local(pn));
           if (as_kind) {
@@ -5332,10 +5335,20 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             Buf eb; memset(&eb, 0, sizeof eb);
             if (an >= 0) { if (ppoly) emit_boxed(c, an, &eb); else emit_expr(c, an, &eb); }
             else buf_puts(&eb, "0");
-            buf_puts(g_pre, eb.p ? eb.p : "0"); free(eb.p);
+            if (an >= 0 && pscalar && comp_ntype(c, an) == TY_POLY)
+              emit_unbox_text(c, plv->type, eb.p ? eb.p : "", g_pre);
+            else buf_puts(g_pre, eb.p ? eb.p : "0");
+            free(eb.p);
           }
           else if (is_exec) {
-            if (p < iac) { if (ppoly) emit_boxed(c, iav[p], g_pre); else emit_expr(c, iav[p], g_pre); }
+            if (p < iac) {
+              if (ppoly) emit_boxed(c, iav[p], g_pre);
+              else if (pscalar && comp_ntype(c, iav[p]) == TY_POLY) {
+                Buf eb; memset(&eb, 0, sizeof eb); emit_expr(c, iav[p], &eb);
+                emit_unbox_text(c, plv->type, eb.p ? eb.p : "", g_pre); free(eb.p);
+              }
+              else emit_expr(c, iav[p], g_pre);
+            }
             else emit_ie_param_default(c, plv ? plv->type : TY_POLY, g_pre);
           }
           else buf_printf(g_pre, "_t%d", tr);  /* instance_eval yields self */
@@ -9961,6 +9974,12 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       TyKind at = comp_ntype(c, yargs[k]);
       if (bt == TY_POLY && at != TY_POLY && at != TY_UNKNOWN)
         emit_boxed(c, yargs[k], b);
+      else if (at == TY_POLY && bt != TY_POLY && bt != TY_UNKNOWN) {
+        /* a poly yield value into a scalar (e.g. int, non-widened) block param:
+           unbox down to the slot type (the reverse of the box arm above). */
+        Buf yb; memset(&yb, 0, sizeof yb); emit_expr(c, yargs[k], &yb);
+        emit_unbox_text(c, bt, yb.p ? yb.p : "", b); free(yb.p);
+      }
       else
         emit_expr(c, yargs[k], b);
     }
