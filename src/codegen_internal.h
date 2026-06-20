@@ -437,7 +437,7 @@ void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail);
 int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b);
 void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b);
 int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b);
-void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail);
+void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr);
 void emit_case(Compiler *c, int id, Buf *b, int indent);
 void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b);
 void emit_case_expr(Compiler *c, int id, Buf *b);

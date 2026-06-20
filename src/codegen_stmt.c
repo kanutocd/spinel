@@ -1067,15 +1067,56 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
 
 /* case/in (pattern match) -> bind pattern vars, optional guard check,
    then body; goto end_label to skip subsequent arms. */
+/* Emit a pattern-arm body in value mode: side-effect stmts, then assign the
+   last expression (boxed to rt) to the result temp _t<cr>. The last expression
+   is captured into a local buffer first so any prelude it emits (e.g. an array
+   literal's construction) lands in g_pre ahead of the assignment, not spliced
+   into it. */
+static void emit_pm_body_value(Compiler *c, int stmts, TyKind rt, int cr,
+                               Buf *b, int indent) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  const int *bb = stmts >= 0 ? nt_arr(nt, stmts, "body", &n) : NULL;
+  for (int k = 0; k < n - 1; k++) emit_stmt(c, bb[k], b, indent);
+  if (n <= 0) {
+    emit_indent(b, indent);
+    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY ? "sp_box_nil()" : default_value(rt));
+    return;
+  }
+  int last = bb[n - 1];
+  TyKind lt = comp_ntype(c, last);
+  if (lt == TY_NIL || lt == TY_UNKNOWN) {
+    /* a valueless last expr (e.g. a bare assignment / void call): run it for
+       its side effect, then default the result. */
+    emit_stmt(c, last, b, indent);
+    emit_indent(b, indent);
+    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY ? "sp_box_nil()" : default_value(rt));
+    return;
+  }
+  Buf le; memset(&le, 0, sizeof le);
+  int saved_gi = g_indent; g_indent = indent;
+  if (rt == TY_POLY && lt != TY_POLY) emit_boxed(c, last, &le);
+  else emit_expr(c, last, &le);
+  g_indent = saved_gi;
+  emit_indent(b, indent);
+  buf_printf(b, "_t%d = ", cr);
+  buf_puts(b, le.p ? le.p : default_value(rt));
+  buf_puts(b, ";\n");
+  free(le.p);
+}
+
 /* case/in pattern match. tail=1: each arm's body is in method-return position
    (emitted via emit_stmts_tail), so arms diverge and no fallthrough label is
-   needed. tail=0: statement form, arms fall through to a shared end label. */
-void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
+   needed. tail=0: statement form, arms fall through to a shared end label.
+   value_cr >= 0: value form -- each arm assigns its body value to _t<value_cr>
+   (boxed to the case's result type) then jumps to the end label. */
+void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
   int cn = 0;
   const int *conds = nt_arr(nt, id, "conditions", &cn);
   int else_clause = nt_ref(nt, id, "else_clause");
+  TyKind rt = value_cr >= 0 ? comp_ntype(c, id) : TY_UNKNOWN;
 
   int t = ++g_tmp;
   int lbl = ++g_tmp;
@@ -1272,12 +1313,14 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
       emit_indent(b, body_indent); buf_puts(b, "if (");
       emit_expr(c, guard, b);
       buf_puts(b, ") {\n");
-      if (tail) emit_stmts_tail(c, stmts, b, body_indent + 1);
+      if (value_cr >= 0) { emit_pm_body_value(c, stmts, rt, value_cr, b, body_indent + 1); emit_indent(b, body_indent + 1); buf_printf(b, "goto _pm_%d;\n", lbl); }
+      else if (tail) emit_stmts_tail(c, stmts, b, body_indent + 1);
       else { emit_stmts(c, stmts, b, body_indent + 1); emit_indent(b, body_indent + 1); buf_printf(b, "goto _pm_%d;\n", lbl); }
       emit_indent(b, body_indent); buf_puts(b, "}\n");
     }
     else {
-      if (tail) emit_stmts_tail(c, stmts, b, body_indent);
+      if (value_cr >= 0) { emit_pm_body_value(c, stmts, rt, value_cr, b, body_indent); emit_indent(b, body_indent); buf_printf(b, "goto _pm_%d;\n", lbl); }
+      else if (tail) emit_stmts_tail(c, stmts, b, body_indent);
       else { emit_stmts(c, stmts, b, body_indent); emit_indent(b, body_indent); buf_printf(b, "goto _pm_%d;\n", lbl); }
     }
 
@@ -1287,7 +1330,8 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
 
   if (else_clause >= 0) {
     emit_indent(b, indent); buf_puts(b, "{\n");
-    if (tail) emit_stmts_tail(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
+    if (value_cr >= 0) emit_pm_body_value(c, nt_ref(nt, else_clause, "statements"), rt, value_cr, b, indent + 1);
+    else if (tail) emit_stmts_tail(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
     else emit_stmts(c, nt_ref(nt, else_clause, "statements"), b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
   }
@@ -1297,7 +1341,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail) {
     buf_printf(b, "sp_raise_cls(\"NoMatchingPatternError\", \"no pattern matched\");\n");
   }
 
-  if (!tail) { emit_indent(b, indent); buf_printf(b, "_pm_%d:;\n", lbl); }
+  if (!tail || value_cr >= 0) { emit_indent(b, indent); buf_printf(b, "_pm_%d:;\n", lbl); }
 }
 
 /* case/when -> an if / else-if chain. Statement form. */
@@ -3786,7 +3830,7 @@ else {
     return;
   }
   if (!strcmp(ty, "CaseNode"))      { emit_case(c, id, b, indent); return; }
-  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 0); return; }
+  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 0, -1); return; }
   if (!strcmp(ty, "BeginNode"))  { emit_begin(c, id, b, indent, NULL); return; }
   if (!strcmp(ty, "RescueModifierNode")) {
     /* `expr rescue fallback` as a statement: run expr under a setjmp guard,
@@ -3825,7 +3869,7 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
 
   if (!strcmp(ty, "IfNode"))     { emit_if(c, id, b, indent, 0, 1); return; }
   if (!strcmp(ty, "UnlessNode")) { emit_if(c, id, b, indent, 1, 1); return; }
-  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 1); return; }
+  if (!strcmp(ty, "CaseMatchNode")) { emit_case_match(c, id, b, indent, 1, -1); return; }
   if (!strcmp(ty, "ReturnNode")) { emit_return(c, id, b, indent); return; }
   /* `raise` diverges -- no value to return; emit as a plain statement. */
   if (!strcmp(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&

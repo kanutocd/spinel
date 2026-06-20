@@ -357,6 +357,20 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   }
   if (!strcmp(ty, "LambdaNode")) { emit_proc_literal(c, id, b); return; }
   if (!strcmp(ty, "CaseNode")) { emit_case_expr(c, id, b); return; }
+  if (!strcmp(ty, "CaseMatchNode")) {
+    /* case/in as a value: declare a result temp, emit the match into g_pre
+       with each arm assigning its body value to it, then yield the temp. */
+    TyKind rt = comp_ntype(c, id);
+    if (rt == TY_UNKNOWN || rt == TY_VOID) rt = TY_POLY;
+    int cr = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    emit_ctype(c, rt, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", cr, rt == TY_RANGE ? "(sp_Range){0}" : default_value(rt));
+    if (needs_root(rt)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", cr); }
+    emit_case_match(c, id, g_pre, g_indent, 0, cr);
+    buf_printf(b, "_t%d", cr);
+    return;
+  }
 
   if (!strcmp(ty, "RangeNode")) {
     int left = nt_ref(nt, id, "left");
