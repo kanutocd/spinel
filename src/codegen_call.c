@@ -5267,11 +5267,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           int maxn = (int)nt_int(nt, bp_node, "maximum", 0);
           for (int p = 0; p < maxn; p++) {
             char pn[16]; snprintf(pn, sizeof pn, "_%d", p + 1);
+            LocalVar *plv = scope_local(comp_scope_of(c, id), pn);
+            int ppoly = plv && plv->type == TY_POLY;
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "lv_%s = ", rename_local(pn));
             if (is_exec) {
-              if (p < iac) emit_expr(c, iav[p], g_pre);
-              else { LocalVar *plv = scope_local(comp_scope_of(c, id), pn); emit_ie_param_default(c, plv ? plv->type : TY_POLY, g_pre); }
+              if (p < iac) { if (ppoly) emit_boxed(c, iav[p], g_pre); else emit_expr(c, iav[p], g_pre); }
+              else emit_ie_param_default(c, plv ? plv->type : TY_POLY, g_pre);
             }
             else buf_printf(g_pre, "_t%d", tr);
             buf_puts(g_pre, ";\n");
@@ -5310,18 +5312,31 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         for (int p = 0; p < npar; p++) {
           const char *pn = nt_str(nt, reqs[p], "name");
           if (!pn) continue;
+          LocalVar *plv = scope_local(comp_scope_of(c, id), pn);
+          int ppoly = plv && plv->type == TY_POLY;  /* widened slot needs a boxed rvalue */
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "lv_%s = ", rename_local(pn));
-          if (as_kind) buf_printf(g_pre, "sp_%sArray_get(_t%d, %d)", as_kind, as_arr, p);
+          if (as_kind) {
+            /* element of the auto-splat array; box the scalar kinds into the
+               poly slot (PolyArray_get already yields an sp_RbVal). */
+            const char *bx = !ppoly || !strcmp(as_kind, "Poly") ? NULL
+                           : !strcmp(as_kind, "Int") ? "sp_box_int"
+                           : !strcmp(as_kind, "Float") ? "sp_box_float"
+                           : !strcmp(as_kind, "Str") ? "sp_box_str" : NULL;
+            if (bx) buf_printf(g_pre, "%s(", bx);
+            buf_printf(g_pre, "sp_%sArray_get(_t%d, %d)", as_kind, as_arr, p);
+            if (bx) buf_puts(g_pre, ")");
+          }
           else if (tramp_argc >= 0) {
             int an = ie_tramp_effective_arg(c, id, p);
             Buf eb; memset(&eb, 0, sizeof eb);
-            if (an >= 0) emit_expr(c, an, &eb); else buf_puts(&eb, "0");
+            if (an >= 0) { if (ppoly) emit_boxed(c, an, &eb); else emit_expr(c, an, &eb); }
+            else buf_puts(&eb, "0");
             buf_puts(g_pre, eb.p ? eb.p : "0"); free(eb.p);
           }
           else if (is_exec) {
-            if (p < iac) emit_expr(c, iav[p], g_pre);
-            else { LocalVar *plv = scope_local(comp_scope_of(c, id), pn); emit_ie_param_default(c, plv ? plv->type : TY_POLY, g_pre); }
+            if (p < iac) { if (ppoly) emit_boxed(c, iav[p], g_pre); else emit_expr(c, iav[p], g_pre); }
+            else emit_ie_param_default(c, plv ? plv->type : TY_POLY, g_pre);
           }
           else buf_printf(g_pre, "_t%d", tr);  /* instance_eval yields self */
           buf_puts(g_pre, ";\n");
@@ -5334,8 +5349,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           if (!kpn) continue;
           int vn = ie_kwhash_value(c, ie_kwhash, kpn);
           if (vn < 0) vn = nt_ref(nt, kws[k], "value");  /* omitted optional -> default */
+          LocalVar *kplv = scope_local(comp_scope_of(c, id), kpn);
+          int kppoly = kplv && kplv->type == TY_POLY;
           Buf vb; memset(&vb, 0, sizeof vb);
-          if (vn >= 0) emit_expr(c, vn, &vb); else buf_puts(&vb, "0");
+          if (vn >= 0) { if (kppoly) emit_boxed(c, vn, &vb); else emit_expr(c, vn, &vb); }
+          else buf_puts(&vb, "0");
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "lv_%s = %s;\n", rename_local(kpn), vb.p ? vb.p : "0");
           free(vb.p);
