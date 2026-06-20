@@ -38,14 +38,10 @@ void compute_reachable(Compiler *c) {
     }
   }
 
-  /* Names that may be invoked implicitly (no explicit CallNode): keep live.
-     method_missing is reached only through the fallback dispatch the codegen
-     synthesizes, never a direct call, so it must be seeded here or the
-     reachability BFS would prune it. */
+  /* Names that may be invoked implicitly (no explicit CallNode): keep live. */
   static const char *const implicit[] = {
     "to_s", "inspect", "==", "<=>", "eql?", "hash", "each", "coerce",
-    "to_str", "to_ary", "to_a", "to_i", "to_int", "to_h", "to_proc", "call",
-    "method_missing", NULL };
+    "to_str", "to_ary", "to_a", "to_i", "to_int", "to_h", "to_proc", "call", NULL };
 
   /* BFS queue (scope indices). */
   int *queue = malloc((size_t)c->nscopes * sizeof(int));
@@ -2017,23 +2013,29 @@ void analyze_program(Compiler *c) {
                        !strcmp(snm, "ir_emit_sa")  ? TY_STR_ARRAY : TY_INT_ARRAY;
     sc->ret = TY_STRING;  /* each returns the accumulated buf (a string) */
   }
-  /* Seed method_missing's signature. It is reached only through the synthesized
-     fallback dispatch (no AST call site), so the param backstop below can't bind
-     it: name is the called method's Symbol and args is the rest poly-array.
-     Unseeded it keeps TY_UNKNOWN params and gets pruned. */
+  for (int it = 0; it < 8; it++) { if (!infer_param_types(c)) break; }
+
+  /* method_missing is not honored: spinel resolves every call statically and
+     does not route an undefined-method call to method_missing (that would need
+     runtime dispatch foreign to the whole-program model). Warn once per
+     definition so the author isn't misled into relying on it -- the method is
+     still callable explicitly, it just never fires as a missing-method hook. */
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
-    if (sc->class_id < 0 || !sc->name) continue;
-    if (!strcmp(sc->name, "method_missing") && sc->nparams >= 1 && sc->pnames) {
-      LocalVar *pn = scope_local(sc, sc->pnames[0]);
-      if (pn && pn->type == TY_UNKNOWN) pn->type = TY_SYMBOL;
-      if (sc->rest_idx >= 0 && sc->rest_idx < sc->nparams) {
-        LocalVar *pr = scope_local(sc, sc->pnames[sc->rest_idx]);
-        if (pr && pr->type == TY_UNKNOWN) pr->type = TY_POLY_ARRAY;
-      }
+    if (sc->class_id < 0 || !sc->name || strcmp(sc->name, "method_missing")) continue;
+    int dn = sc->def_node;
+    int ln = dn >= 0 ? (int)nt_int(c->nt, dn, "node_line", 0) : 0;
+    const char *file = c->nt->source_file;
+    if (ln > 0) {
+      const char *f = nt_file_path(c->nt, (int)nt_int(c->nt, dn, "node_file", 0));
+      if (f && *f) file = f;
     }
+    if (!file || !*file) file = "source.rb";
+    fprintf(stderr, "spinel: %s:%d: warning: method_missing is defined but "
+            "spinel does not dispatch undefined-method calls to it; such calls "
+            "raise NoMethodError (method_missing can still be called "
+            "explicitly)\n", file, ln);
   }
-  for (int it = 0; it < 8; it++) { if (!infer_param_types(c)) break; }
 
   /* Backstop step 2: a reachable method that STILL has TY_UNKNOWN params was
      never bound by any typed call site -- mark it unreachable so codegen skips

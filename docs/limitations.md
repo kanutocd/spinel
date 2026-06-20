@@ -27,7 +27,7 @@ registry, or stack reification — none of which exist in a flat compiled binary
 | Feature | Behaviour | Why it's fundamental |
 |---|---|---|
 | `eval` / `instance_eval("str")` / `class_eval("str")` | unsupported | needs a runtime parser + type system. (Block forms — `instance_eval { }` — DO work; the block is compiled.) |
-| `method_missing` on an arbitrary receiver | unresolved call → stub | every call site is a direct C call; there is no per-receiver dispatch fallback |
+| `method_missing` | not dispatched (defining it warns at compile time) | every call site is a direct C call; an undefined-method call can't fall back to a per-receiver hook. The method is still callable explicitly. |
 | `define_method` with a runtime-computed name/body | only literal names work | a runtime-built method has no compiled body |
 | `ObjectSpace` (`each_object`, `count_objects`) | unsupported | no class-keyed allocation registry; the GC tracks bytes, not a live-object index |
 | `TracePoint` / `set_trace_func` / `binding` | unsupported | require an interpreter loop and reified local scopes |
