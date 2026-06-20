@@ -10752,6 +10752,21 @@ int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent);
     buf_printf(b, "sp_Range _t%d = ", t); buf_puts(b, rb.p ? rb.p : ""); buf_puts(b, ";\n");
     free(rb.p);
+    /* Under --int-overflow=promote the loop var is widened to poly; drive the
+       loop with a fresh mrb_int temp and re-box the counter each iteration
+       (mirrors emit_for's poly-counter arm). */
+    LocalVar *clv = p0_orig ? scope_local(comp_scope_of(c, block), p0_orig) : NULL;
+    if (clv && clv->type == TY_POLY) {
+      int tc = ++g_tmp;
+      emit_indent(b, indent);
+      buf_printf(b, "for (mrb_int _t%d = _t%d.first; _t%d <= _t%d.last - _t%d.excl; _t%d++) {\n",
+                 tc, t, tc, t, t, tc);
+      emit_indent(b, indent + 1);
+      buf_printf(b, "lv_%s = sp_box_int(_t%d);\n", p0, tc);
+      emit_loop_body(c, body, b, indent + 1);
+      emit_indent(b, indent); buf_puts(b, "}\n");
+      return 1;
+    }
     emit_indent(b, indent);
     buf_printf(b, "for (lv_%s = _t%d.first; lv_%s <= _t%d.last - _t%d.excl; lv_%s++) {\n",
                p0, t, p0, t, t, p0);
