@@ -67,27 +67,15 @@ legacy の「全 int → bigint widen」ではなく、**poly 値(`sp_RbVal`)に
 - **= caller call-site の tolerance 解析 か whole-program coercion sweep が必須**。gate だけでは「結果が puts 等 poly-tolerant 文脈でしか消費されないメソッド」まで絞らないと非退行にできず、それは c2 級しか残らない。
 - 次セッション指針: (A) full propagation を入れ、sur面化する codegen site を 1 つずつ coerce(cvar poly init / pin poly 比較 / 各 int-consume を poly widen)。(B) または call-site tolerance gate(戻り値が int 文脈で消費されるメソッドは widen しない)を実装。試行コードは git 履歴(本 commit 直前)に無し=revert 済、本節が完全な再現手順。
 
-**2026-06-20 第3試行 = 方針 (A) full uniform widen を実行(branch `promote-full-widen-experiment` に保全):**
-matz 洞察「poly は int(inline)と bigint(heap)両方を 1 値で保持するので、legacy の全 bigint(全 heap)より効率犠牲を抑えて全 widen できる」を受け、**全 int slot → poly** を実装(analyze.c の fixpoint 後・node-type cache 前、`g_promote_mode` gate、24 行)。param/return/local/ivar/cvar の `TY_INT`→`TY_POLY`。
-- **本丸 #1 が動いた**: `def mul(x,y)=x*y; mul(10**15,10**15)` = 10**30、`mul(3,4)=12`(小 int は inline poly)。MRI 一致。**approach 実証完了**。
-- **default gate 無傷**(992/0/0、g_promote_mode gate)。
-- **promote suite 993→831(32 fail / 130 error)**= 境界バケツが表面化。**全エラーは poly↔int 境界の coercion 欠如**(codegen が型一致前提)。
-- 単純代入境界は **emit_assign に既に poly-box arm あり**(codegen_stmt.c:512 `lv->type==TY_POLY → emit_boxed`)。残るは以下の **境界バケツ(C error 頻度順、`/tmp/promerr.txt` 集計)**:
-  1. **代入 `sp_RbVal = mrb_int/long`(265)**= op_assign(`x+=1`)・ivar/cvar write・宣言初期化など emit_assign 以外の代入経路。各 write emit に poly-box。
-  2. **比較 `sp_RbVal <= / >= / < / > / == mrb_int`(~60)**= poly recv の比較を `sp_poly_lt/cmp/eq` に回す(scalar 比較 codegen が int 前提)。
-  3. **increment `wrong type argument to increment`(28)**= `lv_x++`(loop counter 等)が poly slot。`lv_x = sp_poly_add(lv_x, sp_box_int(1))` 化。
-  4. **builtin arg coerce(~40)**: `sp_IntArray_push`(14)/`sp_poly_to_s`(11)/`sp_poly_lt`(9)/`sp_bigint_new_int`(5)/`sp_poly_to_i`(4)/`sp_range_include`(4)/`sp_str_sub_range_r`(4)= poly arg を builtin の int param へ。call-arg coerce。
-  5. **const/cvar static init 非定数(21)**= `static ... = sp_box_int(...)`(非定数式)。cvar/const の poly 初期化を runtime init へ移すか、int 保持して read 時 box。
-  6. **mrb_int = sp_RbVal(22)/ return mismatch(~10)**= builtin 戻り(int)を poly slot へ、または poly 値を int return 型へ。widen し残した境界。
-  7. **float `aggregate where floating-point expected`(10)**= poly を float 文脈へ。`sp_poly_to_f` coerce。
-- **次の一手**: バケツ 1(op_assign/ivar/cvar write の poly-box)→ 2(比較)→ 3(increment)の順で、各バケツ後に promote suite を再計測(`rm -rf build/test-results && make test SPINEL_INT_OVERFLOW=promote OPT=-O1`)。emit_assign の poly arm パターンを各 write/compare/return site に横展開する作業。branch から cherry-pick して再開。
-- **判断**: これは計画通り複数セッションの big-bang。master は clean(2a の 993)維持、完遂後にまとめて昇格。approach は確定(本丸動作・効率優位)。
-
-**2026-06-21 バケツ1(for-range loop counter)実装の決定的知見:**
-`emit_for` の TY_RANGE arm に修正(端点を独立に `sp_poly_to_i` coerce + poly counter は fresh `mrb_int` temp 駆動&毎 iter `lv_<vn>=sp_box_int(_tc)` で box、early return で `else` 回避)。branch `promote-full-widen-experiment` の commit **bda23978** に保全。
-- **修正は correct**: `for i in 1..10`(=55)+ poly 端点版 `for i in 1..f`(=55)とも MRI 一致、BUILD_OK。端点 coerce は counter の poly 性と独立に必要(concrete int counter + poly 端点 `n` でも `mrb_int _t=lv_n` が壊れる)。
-- **だが promote pass は 831 横ばい**(error→fail 1件のみ移動)。**∵各 failing テストに複数の poly↔int 境界が重なる→1バケツ単独では緑にならない**(for-range を直しても同テスト内の次の境界=代入/比較/builtin-arg 等でコンパイル続行不能)。
-- **戦略的結論**: **バケツ逐次 commit は中間で pass を増やさない**。緑にするには (1) 1テストを縦に全境界完遂(pass+1、境界カタログ確証)か (2) 全境界(代入両方向/比較/increment/builtin-arg/const-init/return/float)を**一括**で潰す真の big-bang。次セッションは for-range fix(bda23978)を土台に、まず 1 テスト縦完遂で全境界の実装パターンを確立してから横展開が安全。
+**2026-06-20 第3試行 続行 = 境界 site の横展開で 831→859(+28)、4 commit、default 992/0/0 維持:**
+full int→poly widen pass(79709207)を土台に、ERR(=C compile fail の境界 coercion gap)を emission-site 単位で潰した。各 fix は poly slot を検出したら rvalue を `emit_boxed`(node 版)/`emit_boxed_text`(型+テキスト版)で box する単一パターン。**「逐次 commit は緑を増やさない」という前回の悲観は誤り**で、単一 site のバケツ(cvar static / instance_exec / range.each)は直接複数テストを回復した(マルチ境界テストだけが横並び依存)。
+- **cvar static init(298a0e56, +2)**: `static sp_RbVal cvar = default_value(TY_POLY)` が `sp_box_nil()`(関数呼び=非定数初期化子)。`{SP_TAG_NIL,0,{0}}` 定数 aggregate を emit(civ と同パターン)。default の genuine-poly cvar の latent bug も解消。codegen.c:2742。
+- **instance_exec/instance_eval block-param(dbc46864, +16)**: lifted block の `lv_<param> = <arg>` 束縛が int arg を poly slot へ。numbered/requireds(直接 arg・auto-splat 要素・trampoline arg)/keyword の 4 経路で slot poly なら `emit_boxed`。codegen_call.c:5268+。
+- **(a..b).each fusion(07e55f26, +3)**: loop var を int 直駆動。poly counter は fresh `mrb_int` で駆動し毎 iter `lv_i=sp_box_int(_tc)`(emit_for と同パターン)。codegen_call.c:10749。
+- **masgn target boxing(694f3f89, +7)**: scalar-RHS local(+typed-zero rest default)/tuple-element local・cvar/typed-array destructure get/trailing rights get を box。codegen_stmt.c。
+- **★決定的洞察**: widen pass は `scope->locals[].type`/`ivar_types`/`cvar_types` だけ書き換え、**node-type cache は更新しない**。ゆえに `comp_ntype(c, target_node)` は **widen 前のスカラ型(int 等)を返す**。slot が poly かは必ず `scope_local(scope, name)->type`(or ivar/cvar の type 配列)で判定すること。rvalue を box する型は `comp_ntype(value)`(真の値型)で取る。この non-update のおかげで rest default の typed-zero(`default_value(int)="0"`)も復元でき、`emit_boxed_text(int,"0")`=`sp_box_int(0)` で quirk 一致。
+- **残 ERR=101 の内訳(first-error 集計 `/tmp/perr_lines.txt` の手法で再取得可)**: B1 assign-poly の未カバー site = **leading-splat masgn**(`*xs, last=`、trailing を temp 経由で bind)+ **rightward pattern**(`expr => a,b` は MultiWriteNode でなく MatchRequiredNode の別経路)。**B4 builtin-arg coerce(~29)**= poly arg を builtin の int/typed param へ(`sp_IntArray_push`/`sp_poly_to_i`/`sp_poly_to_s`/`sp_bigint_new_int`/`sp_range_include`/user `<=>` 等、call-arg site で coerce、最も散在)。他に return mismatch・invalid binary operands・closure capture(front-end)・float coerce が少数。FAIL=33 は別途(コンパイルは通るが出力差)。
+- **次の一手**: B4(builtin call-arg coerce)が次の塊。`compile_typed_call_args` 相当の call-arg emission で poly arg→int param に `sp_poly_to_i`、float param に `sp_poly_to_f`、bigint へは `.v.p` を挿す中央 coerce を入れると散在分が一気に閉じる見込み。並行で leading-splat/rightward の 2 site。手法=`/tmp/ptest.sh <name>`(単体 promote compile+diff)、`/tmp/perragg.sh`(全 ERR 並列 first-error 集計)。
 
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
