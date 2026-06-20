@@ -124,7 +124,8 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); putchar('\\n');\n");
   }
   else {
-    unsupported(c, arg, "puts argument");
+    if (!diagnose_eval_call(c, arg))
+      unsupported(c, arg, "puts argument");
   }
 }
 void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
@@ -182,7 +183,8 @@ void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "; const char *_ps%d = sp_poly_to_s(_t%d); if (_ps%d) fputs(_ps%d, stdout); }\n", tv, tv, tv, tv);
   }
   else {
-    unsupported(c, arg, "print argument");
+    if (!diagnose_eval_call(c, arg))
+      unsupported(c, arg, "print argument");
   }
 }
 void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
@@ -264,7 +266,8 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "fputs(\"[]\\n\", stdout);\n");  /* p [] */
   }
   else {
-    unsupported(c, arg, "p argument");
+    if (!diagnose_eval_call(c, arg))
+      unsupported(c, arg, "p argument");
   }
 }
 

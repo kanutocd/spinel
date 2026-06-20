@@ -3319,6 +3319,34 @@ static int emit_poly_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+/* eval(string) / Kernel.eval(string) compiling an arbitrary runtime string is a
+   hard AOT boundary, not a missing feature. If node `id` is such a call, emit
+   the intentional diagnostic and return 1; otherwise return 0. Shared by
+   emit_call and the output builtins (puts/print/p) so `puts eval(s)` gets the
+   same specific message as `x = eval(s)` rather than a generic argument dump.
+   The instance_eval/class_eval/module_eval block forms carry a literal block,
+   not a string, and are handled separately -- they never reach here. */
+int diagnose_eval_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nty = nt_type(nt, id);
+  if (!nty || strcmp(nty, "CallNode")) return 0;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || strcmp(name, "eval")) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0;
+  if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+  if (argc < 1) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv >= 0) {
+    const char *rty = nt_type(nt, recv);
+    if (!rty || (strcmp(rty, "ConstantReadNode") && strcmp(rty, "ConstantPathNode"))) return 0;
+    const char *rnm = nt_str(nt, recv, "name");
+    if (!rnm || strcmp(rnm, "Kernel")) return 0;
+  }
+  unsupported(c, id, "eval of a runtime string is not supported by AOT compilation (define the code statically)");
+  return 1;
+}
+
 void emit_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   /* `require` / `require_relative` is a compile-time directive: top-level ones
@@ -3456,17 +3484,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, ")");
     return;
   }
-  /* eval(string) / Kernel.eval(string): compiling an arbitrary runtime string is
-     a hard AOT boundary, not a missing feature. Emit an intentional diagnostic.
-     (The instance_eval/class_eval/module_eval block forms are handled separately
-     and are unaffected -- those carry a literal block, not a string.) */
-  if (!strcmp(name, "eval") && argc >= 1 &&
-      (recv < 0 || (nt_type(nt, recv) &&
-                    (!strcmp(nt_type(nt, recv), "ConstantReadNode") || !strcmp(nt_type(nt, recv), "ConstantPathNode")) &&
-                    nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "Kernel")))) {
-    unsupported(c, id, "eval of a runtime string is not supported by AOT compilation (define the code statically)");
-    return;
-  }
+  /* eval(string) / Kernel.eval(string): a hard AOT boundary (see helper). */
+  if (diagnose_eval_call(c, id)) return;
   if (recv < 0 && !strcmp(name, "loop") && argc == 0) {
     int blk = nt_ref(nt, id, "block");
     if (blk >= 0) {
