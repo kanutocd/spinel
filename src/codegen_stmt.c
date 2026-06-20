@@ -1148,7 +1148,14 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
        position temp (-1 if none). The arm matches when that position >= 0. */
     int find_pat = -1, find_pos = -1;
     const char *find_k = NULL;
-    if (!strcmp(pty, "FindPatternNode") && ty_is_array(pt)) {
+    if (!strcmp(pty, "FindPatternNode") && !ty_is_array(pt)) {
+      /* A find pattern only matches arrays. With a non-array (or statically
+         unknown) scrutinee, fail closed -- never match -- rather than fall
+         through to emit_pm_cond (which has no find-pattern case and would
+         leave has_cond=0, i.e. match unconditionally). */
+      buf_puts(&cond_buf, "0");
+      has_cond = 1;
+    } else if (!strcmp(pty, "FindPatternNode")) {
       find_pat = pat;
       find_k = (pt == TY_POLY_ARRAY) ? "Poly" : array_kind(pt);
       if (!find_k) find_k = "Int";
