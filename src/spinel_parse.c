@@ -279,6 +279,27 @@ else {
   return (long long)val;
 }
 
+/* Whether an integer literal does not fit in a signed 64-bit `value` (so
+   pm_int_value saturated it). Mirrors the limb scan above. */
+static int pm_int_overflows(pm_integer_t *integer) {
+  if (integer->values == NULL) return 0;
+  const size_t limb_bits = 32;
+  const size_t value_bits = sizeof(uint64_t) * CHAR_BIT;
+  uint64_t val = 0;
+  int overflow = 0;
+  for (size_t i = 0; i < integer->length; i++) {
+    if (i >= value_bits / limb_bits) {
+      if (integer->values[i] != 0) overflow = 1;
+      continue;
+    }
+    val |= ((uint64_t)integer->values[i]) << (i * limb_bits);
+  }
+  uint64_t max_positive = (uint64_t)LLONG_MAX;
+  uint64_t max_negative = max_positive + 1ULL;
+  if (integer->negative) return overflow || val >= max_negative;
+  return overflow || val > max_positive;
+}
+
 /* ---- Main flattening ---- */
 static int flatten(pm_node_t *node) {
   if (!node) return -1;
@@ -721,6 +742,22 @@ else {
     pm_integer_node_t *n = (pm_integer_node_t *)node;
     N("IntegerNode");
     I("value", pm_int_value(&n->value));
+    /* A literal wider than int64 (`100000000000000000000`) saturates `value`;
+       keep the exact decimal text so codegen can build an arbitrary-precision
+       bigint (`sp_bigint_new_str`). CRuby treats it as a Bignum in every mode. */
+    if (pm_int_overflows(&n->value)) {
+      pm_buffer_t _bb;
+      pm_buffer_init(&_bb);
+      pm_integer_string(&_bb, &n->value);
+      /* pm_buffer_value is not guaranteed NUL-terminated; bound by length. */
+      size_t _bl = pm_buffer_length(&_bb);
+      char *_bs = malloc(_bl + 1);
+      memcpy(_bs, pm_buffer_value(&_bb), _bl);
+      _bs[_bl] = '\0';
+      emit_str(id, "bigval", _bs);
+      free(_bs);
+      pm_buffer_free(&_bb);
+    }
     break;
   }
   case PM_FLOAT_NODE: {

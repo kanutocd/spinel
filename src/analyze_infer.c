@@ -2414,7 +2414,7 @@ TyKind infer_uncached(Compiler *c, int id) {
   if (!ty) return TY_UNKNOWN;
   NodeKind nk = nt_kind(nt, id);
 
-  if (nk == NK_IntegerNode)             return TY_INT;
+  if (nk == NK_IntegerNode)             return nt_str(nt, id, "bigval") ? TY_BIGINT : TY_INT;
   if (nk == NK_FloatNode)               return TY_FLOAT;
   if (nk == NK_ImaginaryNode)           return TY_COMPLEX;
   if (nk == NK_RationalNode)            return TY_RATIONAL;

@@ -212,7 +212,10 @@ static int fold_int_node(Compiler *c, int id, long long *out, int depth) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
-  if (!strcmp(ty, "IntegerNode")) { *out = nt_int(nt, id, "value", 0); return 1; }
+  if (!strcmp(ty, "IntegerNode")) {
+    if (nt_str(nt, id, "bigval")) return 0;  /* out-of-int64 literal: not a foldable int */
+    *out = nt_int(nt, id, "value", 0); return 1;
+  }
   if (!strcmp(ty, "ConstantReadNode")) return fold_int_const_name(c, nt_str(nt, id, "name"), out, depth + 1);
   if (!strcmp(ty, "ParenthesesNode")) {
     int bd = nt_ref(nt, id, "body"); int n = 0; const int *bb = bd >= 0 ? nt_arr(nt, bd, "body", &n) : NULL;
@@ -283,7 +286,11 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   for (int i = g_n_argov - 1; i >= 0; i--)
     if (g_argov_node[i] == id) { buf_puts(b, g_argov_text[i]); return; }
 
-  if (!strcmp(ty, "IntegerNode")) { buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return; }
+  if (!strcmp(ty, "IntegerNode")) {
+    const char *bigval = nt_str(nt, id, "bigval");
+    if (bigval) { buf_printf(b, "sp_bigint_new_str(\"%s\", 10)", bigval); return; }
+    buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return;
+  }
   if (!strcmp(ty, "FloatNode")) { const char *v = nt_content(nt, id); buf_puts(b, v ? v : "0.0"); return; }
   if (!strcmp(ty, "ImaginaryNode")) {
     int num = nt_ref(nt, id, "numeric");
