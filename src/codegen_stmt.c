@@ -4050,13 +4050,20 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   /* a value expression: return it (or assign to the begin/rescue result) */
   emit_indent(b, indent);
   emit_tail_lead(b);
+  /* A define_method subst read emits the captured literal, not the (poly)
+     loop-var slot it nominally reads; size the box decision by the literal's
+     type and box the literal node so a poly return slot typechecks. */
+  int is_subst = g_dm_subst_name && g_dm_subst_node >= 0 &&
+                 !strcmp(ty, "LocalVariableReadNode") &&
+                 nt_str(nt, id, "name") && !strcmp(nt_str(nt, id, "name"), g_dm_subst_name);
+  TyKind vty = is_subst ? comp_ntype(c, g_dm_subst_node) : comp_ntype(c, id);
   int want_poly = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
-  if (want_poly && comp_ntype(c, id) != TY_POLY) emit_boxed(c, id, b);
+  if (want_poly && vty != TY_POLY) emit_boxed(c, is_subst ? g_dm_subst_node : id, b);
   /* a poly tail value feeding a narrower (non-poly) return slot -- a scalar
      method(:sym) target, or an RBS-typed String/object method whose body yields
      poly -- needs coercing. (Only for a real return slot, not a begin/rescue
      result var, which stays poly.) */
-  else if (!g_result_var && tail_needs_unbox(comp_ntype(c, id), g_ret_type)) emit_unbox_node(c, g_ret_type, id, b);
+  else if (!g_result_var && tail_needs_unbox(vty, g_ret_type)) emit_unbox_node(c, g_ret_type, id, b);
   else emit_tail_value(c, id, b);
   buf_puts(b, ";\n");
 }
