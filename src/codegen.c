@@ -301,6 +301,13 @@ void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
         else buf_printf(b, "    *_cell_%s = 0.0;\n", lv->name);
         continue;
       }
+      if (lv->type == TY_POLY) {
+        buf_printf(b, "    sp_RbVal *_cell_%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval);\n", lv->name);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = sp_box_nil();\n", lv->name);
+        continue;
+      }
       /* A pointer (string / array / hash / heap object) capture is laundered
          through the int cell as (uintptr_t)<ptr>, with a cell scan that marks
          the referent. Int / bool stay direct. Float / poly / by-value structs
@@ -1012,8 +1019,9 @@ void emit_proc_literal(Compiler *c, int create, Buf *b) {
     if (lv && lv->is_cell) {
       int ptr_cell = proc_slot_is_ptr(lv->type) && !comp_ty_value_obj(c, lv->type);
       int float_cell = lv->type == TY_FLOAT && !has_float_param;
+      int poly_cell = lv->type == TY_POLY;
       if (lv->type != TY_INT && lv->type != TY_BOOL && lv->type != TY_UNKNOWN &&
-          lv->type != TY_PROC && !float_cell && !ptr_cell) {
+          lv->type != TY_PROC && !float_cell && !ptr_cell && !poly_cell) {
         free(params.v); free(used.v); free(locals.v); free(caps.v);
         unsupported(c, create, "proc capturing a non-integer variable (later slice)");
         return;
@@ -1132,8 +1140,10 @@ else if (orecv >= 0 && onm) {
     buf_printf(&g_procs, "typedef struct {");
     for (int i = 0; i < ncap; i++) {
       LocalVar *clv = scope_local(bs, caps.v[i]);
-      /* a float capture rides a native mrb_float cell (see emit_scope_decls). */
-      const char *cty = (clv && clv->type == TY_FLOAT) ? "mrb_float" : "mrb_int";
+      /* a float capture rides a native mrb_float cell, a poly capture an
+         sp_RbVal cell (see emit_scope_decls). */
+      const char *cty = (clv && clv->type == TY_FLOAT) ? "mrb_float"
+                      : (clv && clv->type == TY_POLY) ? "sp_RbVal" : "mrb_int";
       buf_printf(&g_procs, " %s *%s;", cty, caps.v[i]);
     }
     if (cap_self) buf_puts(&g_procs, " void *__self;");

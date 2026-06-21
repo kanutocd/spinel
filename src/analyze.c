@@ -2304,6 +2304,60 @@ void analyze_program(Compiler *c) {
   for (int id = 0; id < c->nt->count; id++)
     infer_type(c, id);
 
+  /* --int-overflow=promote: the widen above can change a proc body's return
+     type (a captured int local widened to poly), so a proc's caller-side
+     proc_ret / a factory method's ret_proc_ret must be re-derived from the
+     now-widened body -- else a `.call` reads the wrong return channel (raw
+     mrb_int slot vs the poly side-channel) and yields 0. Re-run JUST the
+     proc_ret / ret_proc_ret derivations (mirroring infer_return_types and
+     infer_write_types) as a focused fixpoint; this touches only proc-return
+     metadata, never the widened slot types, so it cannot undo the widen.
+     A factory's ret_proc_ret feeds a caller's proc_ret, hence the loop. */
+  if (g_promote_mode) {
+    const NodeTable *nt = c->nt;
+    int changed = 1, iters = 0;
+    while (changed && iters++ < 32) {
+      changed = 0;
+      /* (1) method scopes that return a proc: ret_proc_ret from the body. */
+      for (int s = 0; s < c->nscopes; s++) {
+        Scope *sc = &c->scopes[s];
+        if (sc->ret != TY_PROC) continue;
+        TyKind pr = TY_UNKNOWN;
+        if (sc->body >= 0) {
+          int bn = 0; const int *bb = nt_arr(nt, sc->body, "body", &bn);
+          if (bn > 0) pr = proc_ret_of(c, bb[bn - 1]);
+        }
+        for (int id = 0; id < nt->count; id++) {
+          const char *ty = nt_type(nt, id);
+          if (ty && !strcmp(ty, "ReturnNode") && comp_scope_of(c, id) == sc) {
+            int a = nt_ref(nt, id, "arguments"); int an = 0;
+            const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+            if (an > 0) pr = proc_ret_of(c, av[0]);
+          }
+        }
+        if (pr != TY_UNKNOWN && sc->ret_proc_ret != (int)pr) { sc->ret_proc_ret = (int)pr; changed = 1; }
+      }
+      /* (2) proc-typed locals: proc_ret from the assigned proc / factory call. */
+      for (int id = 0; id < nt->count; id++) {
+        const char *ty = nt_type(nt, id);
+        if (!ty || strcmp(ty, "LocalVariableWriteNode")) continue;
+        const char *nm = nt_str(nt, id, "name");
+        if (!nm) continue;
+        LocalVar *lv = scope_local(comp_scope_of(c, id), nm);
+        if (!lv || lv->type != TY_PROC) continue;
+        int vnode = nt_ref(nt, id, "value");
+        TyKind pr = vnode >= 0 ? proc_ret_of(c, vnode) : TY_UNKNOWN;
+        if (pr != TY_UNKNOWN && (TyKind)lv->proc_ret != pr) { lv->proc_ret = (int)pr; changed = 1; }
+      }
+    }
+    /* refresh the node-type cache so a `proc.call` node picks up the updated
+       proc_ret (codegen reads comp_ntype, not lv->proc_ret directly). Re-infer
+       reads scope-local types only -- it does not mutate them, so the widen
+       stands. */
+    for (int id = 0; id < nt->count; id++)
+      infer_type(c, id);
+  }
+
 
   /* Re-infer nodes inside instance_eval block bodies with the receiver's class
      context, so ivar reads get correct types in the final c->ntype cache.

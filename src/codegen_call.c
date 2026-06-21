@@ -3400,7 +3400,7 @@ void emit_proc_call_args(Compiler *c, int argc, const int *argv, Buf *b) {
     buf_puts(b, "(mrb_int[16]){");
     for (int k = 0; k < nargs; k++) {
       if (k) buf_puts(b, ", ");
-      if (comp_ntype(c, argv[k]) == TY_POLY) buf_puts(b, "0");
+      if (comp_ntype(c, argv[k]) == TY_POLY) buf_printf(b, "sp_poly_to_i(_t%d)", atmp[k]);
       else buf_printf(b, "_t%d", atmp[k]);
     }
     buf_puts(b, "})");
