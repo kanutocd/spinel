@@ -5371,7 +5371,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         for (int p = 0; p < npar; p++) {
           const char *pn = nt_str(nt, reqs[p], "name");
           if (!pn) continue;
-          LocalVar *plv = scope_local(comp_scope_of(c, id), pn);
+          /* Resolve the param against its own block's scope (where block params
+             are interned), not the call site's: for a forwarded block (`&b`
+             resolved to the literal at a different site) the call scope holds a
+             different `a`, mis-reading its slot type. */
+          LocalVar *plv = scope_local(comp_scope_of(c, reqs[p]), pn);
           int ppoly = plv && plv->type == TY_POLY;  /* widened slot needs a boxed rvalue */
           /* a scalar slot (e.g. an int block param, which is NOT widened) fed a
              poly arg needs the reverse: unbox the poly down to the slot type. */
