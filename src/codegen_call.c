@@ -4051,15 +4051,31 @@ void emit_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ")");
       return;
     }
-    /* object-bound: ((mrb_int(*)(void*, mrb_int...))rc->fn)((void*)rc->self, args) */
+    /* object-bound: cast fn through its real signature and call it once.
+       When the target method is statically known (`recv.method(:m)`), use its
+       actual return and parameter C types so a promote-widened poly method --
+       \`sp_RbVal (*)(void*, sp_RbVal)\` -- is not invoked through the legacy
+       mrb_int ABI (which truncates the boxed args and return to garbage).
+       Falls back to the raw mrb_int ABI when the target is unresolved. */
     int tr = ++g_tmp;
+    Scope *tm = target >= 0 ? &c->scopes[target] : NULL;
+    TyKind tret = tm ? (TyKind)tm->ret : TY_INT;
+    if (!is_scalar_ret(tret)) tret = TY_INT;  /* aggregate ret: raw carrier */
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
-    buf_printf(b, "((mrb_int (*)(void *");
-    for (int k = 0; k < argc; k++) buf_puts(b, ", mrb_int");
+    buf_puts(b, "(("); emit_ctype(c, tret, b); buf_puts(b, " (*)(void *");
+    for (int k = 0; k < argc; k++) {
+      buf_puts(b, ", ");
+      if (tm && k < tm->nparams) {
+        LocalVar *pp = scope_local(tm, tm->pnames[k]);
+        emit_ctype(c, pp ? pp->type : TY_INT, b);
+      }
+      else buf_puts(b, "mrb_int");
+    }
     buf_printf(b, "))(uintptr_t)_t%d->fn)((void *)_t%d->self", tr, tr);
     for (int k = 0; k < argc; k++) {
       buf_puts(b, ", ");
-      if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
+      if (tm && k < tm->nparams) emit_arg_or_default(c, tm, k, argv[k], b);
+      else if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) { buf_puts(b, "(mrb_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
       else emit_expr(c, argv[k], b);
     }
     buf_printf(b, "); })");
