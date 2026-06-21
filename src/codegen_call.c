@@ -8248,12 +8248,21 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           /* Build the call; append default values for any optional params
              not provided by the (zero-arg) call site. */
           Buf cb; memset(&cb, 0, sizeof cb);
-          buf_printf(&cb, "sp_%s_%s((sp_%s *)_t%d.v.p",
-                     c->classes[defcls].name, mc(c->scopes[mi].name), c->classes[defcls].name, tv);
+          /* A reopened primitive (Integer/Float/String/Symbol) method takes the
+             unboxed value, not a struct pointer -- read the matching union field
+             instead of casting .v.p to a non-existent sp_<Prim> struct. */
+          const char *_dcn = c->classes[defcls].name;
+          char _dself[64];
+          if (!strcmp(_dcn, "Integer") || !strcmp(_dcn, "Numeric")) snprintf(_dself, sizeof _dself, "_t%d.v.i", tv);
+          else if (!strcmp(_dcn, "Float")) snprintf(_dself, sizeof _dself, "_t%d.v.f", tv);
+          else if (!strcmp(_dcn, "String")) snprintf(_dself, sizeof _dself, "_t%d.v.s", tv);
+          else if (!strcmp(_dcn, "Symbol")) snprintf(_dself, sizeof _dself, "(sp_sym)_t%d.v.i", tv);
+          else snprintf(_dself, sizeof _dself, "(sp_%s *)_t%d.v.p", _dcn, tv);
+          buf_printf(&cb, "sp_%s_%s(%s", _dcn, mc(c->scopes[mi].name), _dself);
           if (c->scopes[mi].nparams > 0) {
             const char *saved_self = g_self;
             static char selfpbuf[64];
-            snprintf(selfpbuf, sizeof selfpbuf, "(sp_%s *)_t%d.v.p", c->classes[defcls].name, tv);
+            snprintf(selfpbuf, sizeof selfpbuf, "%s", _dself);
             g_self = selfpbuf;
             for (int a = 0; a < c->scopes[mi].nparams; a++) {
               buf_puts(&cb, ", "); emit_arg_or_default(c, &c->scopes[mi], a, -1, &cb);
