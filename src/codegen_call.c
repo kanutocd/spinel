@@ -8311,6 +8311,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             TyKind at = atmp_ty[a];   /* the temp's actual type (poly for a nil/void arg) */
             char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a]);
             if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &cb);
+            else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, tn, &cb);
             else buf_puts(&cb, tn);
           }
 else {
