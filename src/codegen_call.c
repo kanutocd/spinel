@@ -3347,6 +3347,22 @@ static int emit_poly_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, ", "); if (argc >= 1) emit_expr(c, argv[0], b); else buf_puts(b, "\"\"");
     buf_puts(b, ")"); return 1;
   }
+  /* poly receiver: clamp(lo, hi) tag-dispatches int/float at runtime; the range
+     form clamp(a..b) routes through the same helper with boxed bounds. */
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "clamp") && argc == 2) {
+    buf_puts(b, "sp_poly_clamp("); emit_boxed(c, recv, b);
+    buf_puts(b, ", "); emit_boxed(c, argv[0], b);
+    buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+    return 1;
+  }
+  if (recv >= 0 && rt == TY_POLY && !strcmp(name, "clamp") && argc == 1 &&
+      nt_type(nt, argv[0]) && !strcmp(nt_type(nt, argv[0]), "RangeNode")) {
+    int tcr = ++g_tmp;
+    buf_printf(b, "({ sp_Range _t%d = ", tcr); emit_expr(c, argv[0], b);
+    buf_puts(b, "; sp_poly_clamp("); emit_boxed(c, recv, b);
+    buf_printf(b, ", sp_box_int(_t%d.first), sp_box_int(_t%d.last - _t%d.excl)); })", tcr, tcr, tcr);
+    return 1;
+  }
   /* poly receiver: replace(other) -> runtime dispatch (nullable array). */
   if (recv >= 0 && rt == TY_POLY && !strcmp(name, "replace") && argc == 1) {
     buf_puts(b, "sp_poly_replace("); emit_expr(c, recv, b);

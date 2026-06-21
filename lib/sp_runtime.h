@@ -3350,6 +3350,13 @@ static mrb_bool sp_poly_gt(sp_RbVal a, sp_RbVal b) { mrb_bool comparable; mrb_in
 static mrb_bool sp_poly_ge(sp_RbVal a, sp_RbVal b) { mrb_bool comparable; mrb_int cmp = sp_poly_cmp(a, b, &comparable); return comparable ? (cmp >= 0) : FALSE; }
 static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(fmod(sp_poly_to_f(a), sp_poly_to_f(b))); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }
+/* clamp on a boxed numeric: float path when any operand is a float (NaN/order
+   checks via sp_float_clamp_ck), else int path; result keeps the float/int kind. */
+static sp_RbVal sp_poly_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
+  if (v.tag == SP_TAG_FLT || lo.tag == SP_TAG_FLT || hi.tag == SP_TAG_FLT)
+    return sp_box_float(sp_float_clamp_ck(sp_poly_to_f(v), sp_poly_to_f(lo), sp_poly_to_f(hi)));
+  return sp_box_int(sp_int_clamp_ck(sp_poly_to_i(v), sp_poly_to_i(lo), sp_poly_to_i(hi)));
+}
 /* Integer #** : Spinel has no Rational, so a negative integer exponent --
    which CRuby evaluates to a Rational like (1/2) -- raises RangeError rather
    than silently truncating toward 0. Float ** negative stays a float
