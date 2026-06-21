@@ -7481,6 +7481,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       buf_printf(b, "; (mrb_int)sp_time_cmp(_t%d, _t%d); })", ta, tb);
       return;
     }
+    /* Poly operands (e.g. `@n <=> other.n` with int ivars widened to poly in
+       promote mode): tag-dispatch via sp_poly_cmp rather than falling through
+       to the object-receiver path, which would misread a boxed int's payload
+       as a user-class pointer and recurse into this same `<=>`. */
+    if (lrt == TY_POLY || lat == TY_POLY) {
+      int ta = ++g_tmp, tb = ++g_tmp, tk = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
+      buf_printf(b, "; sp_RbVal _t%d = ", tb); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; mrb_bool _t%d; sp_poly_cmp(_t%d, _t%d, &_t%d); })", tk, ta, tb, tk);
+      return;
+    }
   }
 
   if (recv >= 0 && argc == 1 &&
