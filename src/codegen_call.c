@@ -7587,6 +7587,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (at0 == TY_POLY) {
       buf_puts(b, "sp_poly_to_i("); emit_expr(c, argv[0], b); buf_puts(b, ")");
     }
+    /* A literal wider than int64 (a 64-bit mask like 0xFFFFFFFFFFFFFFFF) is
+       typed as a bigint; the result slot is int, so take its low-64 bit pattern
+       (sp_bigint_to_int truncates) -- this is the xorshift/64-bit-mask idiom. */
+    else if (at0 == TY_BIGINT) {
+      buf_puts(b, "sp_bigint_to_int("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
     else emit_expr(c, argv[0], b);
     buf_puts(b, ")");
     return;
