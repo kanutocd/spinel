@@ -153,6 +153,28 @@ full int→poly widen pass(79709207)を土台に、ERR(=C compile fail の境界
     - **★ブロッカー = pass 順序**: `blk_ret` を計算する `infer_return_types`(analyze_pass.c:3699)時点で **lowered-yield 化(`blk_param="__yblk__"` 設定、analyze.c:1992+)がまだ走っておらず**、countdown の `blk_param` が NULL → blk_ret 計算自体が lowered-yield scope を一切見ない(debug 確認: 該当 pass で blk_param 付き scope が 0 件)。よって ②の前提(blk_ret==POLY)が成立しない。**真の修正は blk_ret 計算を lowering 後に動かす(or lowering pass 内で計算)+ ②③ の協調**で、analyzer の pass 順序に踏み込む構造変更。siblings(proc/block2/forward_args_block 等)は本試行で回帰なしを確認済だが、本丸は未収束のため revert・clean 維持。
     - **FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
 
+**2026-06-20 第3試行 = 方針 (A) full uniform widen を実行(branch `promote-full-widen-experiment` に保全):**
+matz 洞察「poly は int(inline)と bigint(heap)両方を 1 値で保持するので、legacy の全 bigint(全 heap)より効率犠牲を抑えて全 widen できる」を受け、**全 int slot → poly** を実装(analyze.c の fixpoint 後・node-type cache 前、`g_promote_mode` gate、24 行)。param/return/local/ivar/cvar の `TY_INT`→`TY_POLY`。
+- **本丸 #1 が動いた**: `def mul(x,y)=x*y; mul(10**15,10**15)` = 10**30、`mul(3,4)=12`(小 int は inline poly)。MRI 一致。**approach 実証完了**。
+- **default gate 無傷**(992/0/0、g_promote_mode gate)。
+- **promote suite 993→831(32 fail / 130 error)**= 境界バケツが表面化。**全エラーは poly↔int 境界の coercion 欠如**(codegen が型一致前提)。
+- 単純代入境界は **emit_assign に既に poly-box arm あり**(codegen_stmt.c:512 `lv->type==TY_POLY → emit_boxed`)。残るは以下の **境界バケツ(C error 頻度順、`/tmp/promerr.txt` 集計)**:
+  1. **代入 `sp_RbVal = mrb_int/long`(265)**= op_assign(`x+=1`)・ivar/cvar write・宣言初期化など emit_assign 以外の代入経路。各 write emit に poly-box。
+  2. **比較 `sp_RbVal <= / >= / < / > / == mrb_int`(~60)**= poly recv の比較を `sp_poly_lt/cmp/eq` に回す(scalar 比較 codegen が int 前提)。
+  3. **increment `wrong type argument to increment`(28)**= `lv_x++`(loop counter 等)が poly slot。`lv_x = sp_poly_add(lv_x, sp_box_int(1))` 化。
+  4. **builtin arg coerce(~40)**: `sp_IntArray_push`(14)/`sp_poly_to_s`(11)/`sp_poly_lt`(9)/`sp_bigint_new_int`(5)/`sp_poly_to_i`(4)/`sp_range_include`(4)/`sp_str_sub_range_r`(4)= poly arg を builtin の int param へ。call-arg coerce。
+  5. **const/cvar static init 非定数(21)**= `static ... = sp_box_int(...)`(非定数式)。cvar/const の poly 初期化を runtime init へ移すか、int 保持して read 時 box。
+  6. **mrb_int = sp_RbVal(22)/ return mismatch(~10)**= builtin 戻り(int)を poly slot へ、または poly 値を int return 型へ。widen し残した境界。
+  7. **float `aggregate where floating-point expected`(10)**= poly を float 文脈へ。`sp_poly_to_f` coerce。
+- **次の一手**: バケツ 1(op_assign/ivar/cvar write の poly-box)→ 2(比較)→ 3(increment)の順で、各バケツ後に promote suite を再計測(`rm -rf build/test-results && make test SPINEL_INT_OVERFLOW=promote OPT=-O1`)。emit_assign の poly arm パターンを各 write/compare/return site に横展開する作業。branch から cherry-pick して再開。
+- **判断**: これは計画通り複数セッションの big-bang。master は clean(2a の 993)維持、完遂後にまとめて昇格。approach は確定(本丸動作・効率優位)。
+
+**2026-06-21 バケツ1(for-range loop counter)実装の決定的知見:**
+`emit_for` の TY_RANGE arm に修正(端点を独立に `sp_poly_to_i` coerce + poly counter は fresh `mrb_int` temp 駆動&毎 iter `lv_<vn>=sp_box_int(_tc)` で box、early return で `else` 回避)。branch `promote-full-widen-experiment` の commit **bda23978** に保全。
+- **修正は correct**: `for i in 1..10`(=55)+ poly 端点版 `for i in 1..f`(=55)とも MRI 一致、BUILD_OK。端点 coerce は counter の poly 性と独立に必要(concrete int counter + poly 端点 `n` でも `mrb_int _t=lv_n` が壊れる)。
+- **だが promote pass は 831 横ばい**(error→fail 1件のみ移動)。**∵各 failing テストに複数の poly↔int 境界が重なる→1バケツ単独では緑にならない**(for-range を直しても同テスト内の次の境界=代入/比較/builtin-arg 等でコンパイル続行不能)。
+- **戦略的結論**: **バケツ逐次 commit は中間で pass を増やさない**。緑にするには (1) 1テストを縦に全境界完遂(pass+1、境界カタログ確証)か (2) 全境界(代入両方向/比較/increment/builtin-arg/const-init/return/float)を**一括**で潰す真の big-bang。次セッションは for-range fix(bda23978)を土台に、まず 1 テスト縦完遂で全境界の実装パターンを確立してから横展開が安全。
+
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
 
