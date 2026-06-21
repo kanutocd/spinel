@@ -2390,6 +2390,20 @@ void analyze_program(Compiler *c) {
         if (vnode < 0) continue;
         if (infer_type(c, vnode) == TY_POLY_ARRAY) { lv->type = TY_POLY_ARRAY; changed = 1; }
       }
+      /* (5) a constant assigned from a value that widened to poly (a method
+         return widened in step 3, an int constant assigned an arithmetic
+         result, ...) must follow: a `COUNT = obj.m` whose method now returns
+         poly otherwise mismatches the int constant slot. */
+      for (int id = 0; id < nt->count; id++) {
+        const char *ty = nt_type(nt, id);
+        if (!ty || strcmp(ty, "ConstantWriteNode")) continue;
+        const char *nm = nt_str(nt, id, "name");
+        LocalVar *cv = nm ? comp_const(c, nm) : NULL;
+        if (!cv || cv->type != TY_INT) continue;
+        int vnode = nt_ref(nt, id, "value");
+        if (vnode < 0) continue;
+        if (infer_type(c, vnode) == TY_POLY) { cv->type = TY_POLY; changed = 1; }
+      }
     }
     /* refresh the node-type cache so a `proc.call` node picks up the updated
        proc_ret (codegen reads comp_ntype, not lv->proc_ret directly). Re-infer
