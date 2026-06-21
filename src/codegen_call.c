@@ -8519,6 +8519,13 @@ else {
           buf_printf(b, " case SP_BUILTIN_SYM_ARRAY: _t%d = sp_IntArray_include((sp_IntArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
           buf_printf(b, " case SP_BUILTIN_SYM_POLY_HASH: _t%d = sp_SymPolyHash_has_key((sp_SymPolyHash *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
         }
+        else if (at == TY_POLY) {
+          /* promote: the include? arg widened to poly. A Range receiver
+             (`case x when Range; x.include?(n)`) tests numeric membership, so
+             unbox the arg; the PolyArray/PolyPolyHash arms below cover the
+             container cases. */
+          buf_printf(b, " case SP_BUILTIN_RANGE: _t%d = sp_range_include((sp_Range *)_t%d.v.p, sp_poly_to_i(_t%d)); break;", tr, tv, atmp[0]);
+        }
         /* PolyArray: box the arg for runtime comparison */
         {
           int tbox = ++g_tmp;
