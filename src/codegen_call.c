@@ -2472,7 +2472,7 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
              any n (n<=0 yields a whole number, still Float -- class-only divergence). */
           int tf = ++g_tmp;
           buf_printf(b, "({ double _t%d = pow(10, (double)(", tf);
-          emit_expr(c, argv[0], b);
+          emit_int_expr(c, argv[0], b);   /* ndigits: unbox a poly arg to int */
           buf_printf(b, ")); %s((%s) * _t%d) / _t%d; })", cfn, r, tf, tf);
         }
         else if (ndig > 0)
