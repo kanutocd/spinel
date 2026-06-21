@@ -2565,8 +2565,11 @@ TyKind infer_uncached(Compiler *c, int id) {
        slot, and inference must match to keep `@x = @a = expr` boxing consistent. */
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
-    if (s->class_id < 0) return infer_type(c, nt_ref(nt, id, "value"));
-    ClassInfo *ci = &c->classes[s->class_id];
+    /* inside an instance_eval/exec splice the block scope has no class_id; the
+       ivar belongs to the rebound receiver class (an_ie_class_id). */
+    int wcls = s->class_id >= 0 ? s->class_id : an_ie_class_id;
+    if (wcls < 0) return infer_type(c, nt_ref(nt, id, "value"));
+    ClassInfo *ci = &c->classes[wcls];
     int iv = nm ? comp_ivar_index(ci, nm) : -1;
     return iv >= 0 ? ci->ivar_types[iv] : TY_UNKNOWN;
   }

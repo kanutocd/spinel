@@ -415,10 +415,13 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     int cid2 = cws ? cws->class_id : -1;
     if (cid2 < 0 && g_class_body_id >= 0) cid2 = g_class_body_id;
     if (!nm || v < 0) { buf_puts(b, "0"); return; }
+    /* inside an instance_eval/exec splice the block scope has no class_id, so
+       the ivar belongs to the rebound receiver class (g_ie_class_id). */
+    int ivcls2 = cid2 >= 0 ? cid2 : g_ie_class_id;
     TyKind ivt2 = TY_UNKNOWN;
-    if (cid2 >= 0) {
-      int iv2 = comp_ivar_index(&c->classes[cid2], nm);
-      if (iv2 >= 0) ivt2 = c->classes[cid2].ivar_types[iv2];
+    if (ivcls2 >= 0) {
+      int iv2 = comp_ivar_index(&c->classes[ivcls2], nm);
+      if (iv2 >= 0) ivt2 = c->classes[ivcls2].ivar_types[iv2];
     }
     const char *vty2 = nt_type(nt, v);
     int ven2 = 0;
