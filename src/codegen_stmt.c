@@ -707,6 +707,7 @@ else {
     else if (!strcmp(op, "-")) pfn = "sp_poly_sub";
     else if (!strcmp(op, "*")) pfn = "sp_poly_mul";
     else if (!strcmp(op, "/")) pfn = "sp_poly_div";
+    else if (!strcmp(op, "%")) pfn = "sp_poly_mod";
     if (pfn) {
       buf_printf(b, "lv_%s = %s(lv_%s, ", en, pfn, en);
       emit_boxed(c, v, b);
