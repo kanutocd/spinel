@@ -5215,6 +5215,10 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       buf_puts(b, "sp_str_is_frozen_val("); emit_expr(c, recv, b); buf_puts(b, ")");
       return;
     }
+    if (frt == TY_POLY) {
+      buf_puts(b, "sp_poly_frozen("); emit_expr(c, recv, b); buf_puts(b, ")");
+      return;
+    }
   }
 
   /* TY_STRING freeze: update the variable to the frozen copy and return it */

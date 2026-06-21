@@ -4478,6 +4478,14 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
    method (called with the int arg, int ABI) or an int array. Used when
    inference proves the double index `@table[i][j]` yields an int (a method
    dispatch table). Falls back to coercing the generic poly result. */
+/* frozen? on a poly value: scalars (int/float/sym/bool/nil/bigint) are always
+   frozen in Ruby; a string checks its frozen flag; a heap object checks its GC
+   header bit. Used when a receiver widened to poly under promote. */
+static inline mrb_bool sp_poly_frozen(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_is_frozen_val(v.v.s) : TRUE;
+  if (v.tag == SP_TAG_OBJ) return sp_gc_is_frozen(v.v.p);
+  return TRUE;
+}
 static inline mrb_int sp_poly_index_int(sp_RbVal a, mrb_int i) {
   if (a.tag == SP_TAG_INT) return (a.v.i >> i) & 1;
   if (a.tag == SP_TAG_OBJ) {
