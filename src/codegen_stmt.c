@@ -3602,12 +3602,21 @@ else {
         if (!k) { unsupported(c, id, "multiple assignment nested target"); continue; }
         int inn2 = 0;
         const int *inner_lefts = nt_arr(nt, lefts[i], "lefts", &inn2);
+        TyKind elemty = !strcmp(k, "Int") ? TY_INT : !strcmp(k, "Float") ? TY_FLOAT
+                      : !strcmp(k, "Str") ? TY_STRING : TY_POLY;
         for (int j = 0; j < inn2; j++) {
           const char *ilty2 = inner_lefts ? nt_type(nt, inner_lefts[j]) : NULL;
           if (!ilty2 || strcmp(ilty2, "LocalVariableTargetNode")) { unsupported(c, id, "multiple assignment nested target"); continue; }
+          const char *inm = nt_str(nt, inner_lefts[j], "name");
+          LocalVar *ilv = inm ? scope_local(comp_scope_of(c, inner_lefts[j]), inm) : NULL;
+          char getexpr[80]; snprintf(getexpr, sizeof getexpr, "sp_%sArray_get(_t%d, %d)", k, tmps[i], j);
           emit_indent(b, indent);
-          buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %d);\n",
-                     nt_str(nt, inner_lefts[j], "name"), k, tmps[i], j);
+          buf_printf(b, "lv_%s = ", inm);
+          /* box the scalar element into a widened (poly) target slot */
+          if (ilv && ilv->type == TY_POLY && elemty != TY_POLY)
+            emit_boxed_text(c, elemty, getexpr, b);
+          else buf_puts(b, getexpr);
+          buf_puts(b, ";\n");
         }
       }
       else if (lty && !strcmp(lty, "GlobalVariableTargetNode")) {
