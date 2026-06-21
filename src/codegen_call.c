@@ -231,6 +231,25 @@ static int warn_unresolved_pos(Compiler *c, int id) {
   return 1;
 }
 
+/* Emit the switch key for a poly method dispatch. An SP_TAG_OBJ value uses its
+   real cls_id; a boxed scalar maps to its reopened primitive class index (so a
+   reopened Integer/Float/String/Symbol/nil method still dispatches), else to a
+   sentinel matching no case -- this keeps a plain scalar (cls_id 0) from
+   aliasing a regular user class that happens to occupy index 0. */
+static void emit_poly_dispatch_key(Compiler *c, int tv, Buf *b) {
+  static const struct { const char *tag, *cls; } P[] = {
+    {"SP_TAG_INT", "Integer"}, {"SP_TAG_FLT", "Float"},
+    {"SP_TAG_STR", "String"},  {"SP_TAG_SYM", "Symbol"},
+    {"SP_TAG_NIL", "NilClass"},
+  };
+  buf_printf(b, "(_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id", tv, tv);
+  for (unsigned i = 0; i < sizeof P / sizeof P[0]; i++) {
+    int idx = comp_class_index(c, P[i].cls);
+    if (idx >= 0) buf_printf(b, " : _t%d.tag == %s ? %d", tv, P[i].tag, idx);
+  }
+  buf_puts(b, " : 0x7fffffff)");
+}
+
 static int emit_array_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -3951,7 +3970,6 @@ void emit_call(Compiler *c, int id, Buf *b) {
         int oi = bop[0] == 'g' ? 0 : bop[0] == 's' ? 1 : 2;
         if (!bam_done[ki][oi]) {
           bam_done[ki][oi] = 1;
-          const char *et = (ki == 0) ? "mrb_int" : "const char *";
           const char *cast = (ki == 0) ? "" : "(mrb_int)(uintptr_t)";
           const char *uncast = (ki == 0) ? "" : "(const char *)(uintptr_t)";
           if (oi == 0) {
@@ -3969,7 +3987,6 @@ void emit_call(Compiler *c, int id, Buf *b) {
             buf_printf(&g_procs, "static mrb_int _bam_%sArray_push(void *a, mrb_int v) {\n"
                                  "  sp_%sArray_push((sp_%sArray *)a, %sv);\n  return (mrb_int)(uintptr_t)a;\n}\n", bk, bk, bk, uncast);
           }
-          (void)et;
         }
         buf_printf(b, "(mrb_int)(uintptr_t)&_bam_%sArray_%s", bk, bop);
       }
@@ -8293,12 +8310,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR) _t%d = %ssp_str_length(_t%d.v.s) == 0%s; else ", tv, tr, ebopen, tv, ebclose);
         buf_printf(b, "if (_t%d.tag == SP_TAG_SYM) _t%d = %sstrlen(sp_sym_to_s((sp_sym)_t%d.v.i)) == 0%s; else ", tv, tr, ebopen, tv, ebclose);
       }
-      /* Only an SP_TAG_OBJ value carries a real cls_id; a boxed scalar's cls_id
-         is 0, which would otherwise alias the first user class (class id 0) and
-         mis-dispatch (e.g. a poly int's `to_s` calling that class's to_s --
-         infinite recursion). Map non-object tags to a value matching no case so
-         they fall to the default (sp_poly_to_s / 0). */
-      buf_printf(b, "switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
+      /* A boxed scalar's cls_id is 0, which would otherwise alias the first user
+         class (class id 0) and mis-dispatch (e.g. a poly int's `to_s` recursing
+         into that class's to_s). Key the switch on the tag-aware dispatch id. */
+      buf_puts(b, "switch (");
+      emit_poly_dispatch_key(c, tv, b);
+      buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
         int defcls = -1;
         int mi = comp_method_in_chain(c, k, name, &defcls);
@@ -8451,12 +8468,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         else
           buf_printf(b, "if (_t%d.tag == SP_TAG_INT) { _t%d = (_t%d.v.i >> %s) & 1; } else ", tv, tr, tv, idxref);
       }
-      /* Only an SP_TAG_OBJ value carries a real cls_id; a boxed scalar's cls_id
-         is 0, which would otherwise alias the first user class (class id 0) and
-         mis-dispatch (e.g. a poly int's `to_s` calling that class's to_s --
-         infinite recursion). Map non-object tags to a value matching no case so
-         they fall to the default (sp_poly_to_s / 0). */
-      buf_printf(b, "switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
+      /* A boxed scalar's cls_id is 0, which would otherwise alias the first user
+         class (class id 0) and mis-dispatch (e.g. a poly int's `to_s` recursing
+         into that class's to_s). Key the switch on the tag-aware dispatch id. */
+      buf_puts(b, "switch (");
+      emit_poly_dispatch_key(c, tv, b);
+      buf_puts(b, ") {");
       for (int k = 0; k < c->nclasses; k++) {
         int defcls = -1;
         int mi = comp_method_in_chain(c, k, name, &defcls);
