@@ -685,10 +685,13 @@ else {
       Scope *ms2 = &c->scopes[mi2];
       LocalVar *p2 = ms2->nparams >= 1 ? scope_local(ms2, ms2->pnames[0]) : NULL;
       int atmp2 = ++g_tmp;
+      TyKind p2t = p2 ? p2->type : comp_ntype(c, v);
       emit_indent(g_pre, g_indent);
-      emit_ctype(c, p2 ? p2->type : comp_ntype(c, v), g_pre);
+      emit_ctype(c, p2t, g_pre);
       buf_printf(g_pre, " _t%d = ", atmp2);
-      emit_expr(c, v, g_pre);
+      /* box the rhs when the operator's param widened to poly (promote mode) */
+      if (p2t == TY_POLY && comp_ntype(c, v) != TY_POLY) emit_boxed(c, v, g_pre);
+      else emit_expr(c, v, g_pre);
       buf_puts(g_pre, ";\n");
       buf_printf(b, "lv_%s = sp_%s_%s((sp_%s *)lv_%s, _t%d);\n",
                  en, c->classes[defcls2].name, mc(ms2->name),
@@ -2910,10 +2913,13 @@ else {
         LocalVar *ip = ims->nparams >= 1 ? scope_local(ims, ims->pnames[0]) : NULL;
         int iatmp = ++g_tmp;
         int ival = nt_ref(nt, id, "value");
+        TyKind ipt = ip ? ip->type : comp_ntype(c, ival);
         emit_indent(g_pre, g_indent);
-        emit_ctype(c, ip ? ip->type : comp_ntype(c, ival), g_pre);
+        emit_ctype(c, ipt, g_pre);
         buf_printf(g_pre, " _t%d = ", iatmp);
-        emit_expr(c, ival, g_pre);
+        /* box the rhs when the operator's param widened to poly (promote mode) */
+        if (ipt == TY_POLY && comp_ntype(c, ival) != TY_POLY) emit_boxed(c, ival, g_pre);
+        else emit_expr(c, ival, g_pre);
         buf_puts(g_pre, ";\n");
         buf_printf(b, "%s = sp_%s_%s((sp_%s *)%s, _t%d);\n",
                    ref, c->classes[idefcls].name, mc(ims->name),
