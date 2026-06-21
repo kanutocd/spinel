@@ -464,6 +464,7 @@ void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b);
 void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b);
 void emit_boxed(Compiler *c, int node, Buf *b);
 void emit_int_expr(Compiler *c, int node, Buf *b);
+void emit_str_expr(Compiler *c, int node, Buf *b);
 void emit_int_divisor(Compiler *c, int node, Buf *b);
 void emit_float_expr(Compiler *c, int node, Buf *b);
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol);

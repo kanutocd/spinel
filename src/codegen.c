@@ -65,6 +65,17 @@ void emit_float_expr(Compiler *c, int node, Buf *b) {
   else { buf_puts(b, "(mrb_float)("); emit_expr(c, node, b); buf_puts(b, ")"); }
 }
 
+/* Emit a node as a `const char *` string. A poly value (e.g. a `String | nil`
+   local narrowed to String by `is_a?(String)`, which keeps an sp_RbVal
+   representation) is unboxed via sp_poly_to_s; a string-typed value emits
+   directly. Used at string-primitive arg boundaries (sp_str_include, ...). */
+void emit_str_expr(Compiler *c, int node, Buf *b) {
+  if (comp_ntype(c, node) == TY_POLY) {
+    buf_puts(b, "sp_poly_to_s("); emit_expr(c, node, b); buf_puts(b, ")");
+  }
+  else emit_expr(c, node, b);
+}
+
 void emit_boxed(Compiler *c, int node, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (t == TY_POLY) { emit_expr(c, node, b); return; }

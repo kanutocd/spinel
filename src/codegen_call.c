@@ -2199,13 +2199,13 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "inspect"))    { int tv = ++g_tmp; buf_printf(b, "({ const char *_t%d = %s; _t%d ? sp_str_inspect(_t%d) : SPL(\"nil\"); })", tv, r, tv, tv); }
       else if (!strcmp(name, "empty?"))     buf_printf(b, "(sp_str_length(%s) == 0)", r);
       else if (!strcmp(name, "include?") && argc == 1) {
-        buf_printf(b, "sp_str_include(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_str_include(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "start_with?") && argc == 1) {
-        buf_printf(b, "sp_str_start_with(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_str_start_with(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "end_with?") && argc == 1) {
-        buf_printf(b, "sp_str_end_with(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_str_end_with(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
       }
       else if (!strcmp(name, "ascii_only?") && argc == 0) buf_printf(b, "sp_str_ascii_only(%s)", r);
       else if (!strcmp(name, "valid_encoding?") && argc == 0) buf_printf(b, "sp_str_valid_encoding(%s)", r);
