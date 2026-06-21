@@ -109,6 +109,21 @@ full int→poly widen pass(79709207)を土台に、ERR(=C compile fail の境界
 - **手法**: `/tmp/ptest.sh <name>`(単体)、`/tmp/perragg.sh`→`/tmp/perr4.txt`(全 ERR first-error)、`/tmp/ptest_lastc`(最後の cfile)。中央 coerce=`emit_int_expr`(poly→int)/`emit_float_expr`/`sp_poly_as_bigint`/`emit_boxed`+`emit_boxed_text`(→poly)/`emit_unbox_text`(poly→scalar)。
 - **次の一手**: (1) 残 B4 one-off を `emit_int_expr`/`sp_poly_as_bigint` で個別 coerce(中央化できる site は emit_int_expr に寄せる)。(2) closure-capture front-end(capture 変数 poly 対応 or widen 除外)。(3) FAIL=21 の出力差(proc 等)。手法=`/tmp/ptest.sh <name>`、`/tmp/perragg.sh`→`/tmp/perr2.txt`、`/tmp/ptest_lastc` に最後の cfile。**poly→int は `emit_int_expr`、poly→float は `emit_float_expr`、poly→bigint は `sp_poly_as_bigint` が既存の中央ヘルパー。**
 
+- **2026-06-21 続行(939→959、ERR 34→15、12 commit、全 g_promote_mode gate 内で default 992/0/0 + optcarrot 59662 維持)**:
+  - **pattern_pin(22d351d2)**: scalar scrutinee に対する pinned poly 値(`in ^x`、x widen)を `emit_unbox_text` で unbox。
+  - **poly cell op-assign(f5..)**: captured poly cell(`sp_RbVal *n`、proc 内 `n += 1`)の compound-assign を `sp_poly_<op>`/bitwise re-box へ。closure_capture_float/block_forward_value_callable/bundle_classd_13。
+  - **array-local cascade(78872692)= post-widen fixpoint step (4)**: map メソッド ret や array literal が PolyArray 化したとき `local = value` の IntArray/StrArray/FloatArray slot を TY_POLY_ARRAY に追従。ptr_array。
+  - **poly `<=>`(e34530e2)**: poly operand の `<=>` を `sp_poly_cmp` へ(user class の `<=>` に誤 dispatch して boxed-int payload を user-ptr cast → recursion segfault を回避)。bundle_classd_50。
+  - **between? arg-hoist(f447..)**: Comparable#between? の self/lo/hi temp を、各 operand を local buffer で先に emit してから decl prefix を書く(operand 自身の g_pre hoist が decl 行を割らないよう順序入替)。comparable_between_user_type。
+  - **unary `-@`/`+@`/`~` on poly(analyze_infer)**: poly receiver の unary を poly/int に解決(method-dispatch unify が user class の `-@` に bind して obj 型を cascade するのを防ぐ)。unary_operator_methods。
+  - **poly-dispatch scalar slot unbox(8217)**: length-like poly dispatch の int slot に、widen された user method ret(poly)を `emit_unbox_text` で下げる(box 方向の逆)。poly_dispatch_builtin_all/poly_dispatch_ptr_array/bundle_class_10/bundle_classd_28。
+  - **instance_exec result slot を break/next 値で sizing(codegen+analyze)**: `next val+1`(poly)が trailing `999`(int)より広いとき result temp を union 型に。`ie_splice_value_ty`(codegen)/`ie_block_break_next_ty`(analyze)で break/next 値型を unify、`g_ie_res_poly` flag で scalar break/next/last を box。instance_exec_next/instance_exec_break。
+  - **nested destructure box(codegen_stmt)**: `a, (b, c), d = 1, [2,3], 4` の inner array element を poly target slot に box。bundle_misc_b。
+  - **obj op-assign user-operator arg box(codegen_stmt)**: `slot OP= rhs`(obj slot + user OP)の rhs temp を OP param が poly のとき box。op_assign_user_operator + sibling。
+  - **loop{} poly result(codegen_call)**: expression-position `loop{ break v }` の result temp を `default_value()` で init(NULL→sp_box_nil())+ `g_ie_res_poly` で scalar break を box。i916。
+  - **constant cascade(analyze)= step (5)**: `COUNT = obj.m` でメソッド ret が widen したとき int 定数 slot を poly に追従。bare_module_body_cmethod_call。
+  - **残 ERR=15(959 時点)**: block2(no-block yield in poly value-if、深い inline 経路)/ bm_instance_eval/instance_exec_trampoline_result(B6 poly→int の forward-block param 束縛)/ instance_eval_block_params/bundle_classd_04(B1)/ bound_method_single_eval(sp_poly_puts arg)/ bundle_class_06(emit_hash_key stale)/ compile_time_define_method_int(define_method subst return)/ class_method_open_class_call(sp_Integer undeclared)/ recursive_implicit_yield_value(sp_box_str int-conv)/ float_round_nonliteral(float aggregate)/ clamp_bounds/integer_div_by_zero(front-end)/ fiber_capture_no_leak_to_sibling/i1007(ld error)。**FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
+
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
 
