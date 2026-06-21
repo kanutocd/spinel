@@ -3984,10 +3984,16 @@ void emit_call(Compiler *c, int id, Buf *b) {
     int target = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
     int target_recvless = (mn >= 0 && nt_ref(nt, mn, "receiver") < 0);
     if (target >= 0 && target_recvless) {
-      /* top-level / self method: direct call sp_<name>(args). */
+      /* top-level / self method: direct call sp_<name>(args). Coerce each arg to
+         the target's parameter type (emit_arg_or_default boxes an int arg into a
+         poly param widened under promote, etc.). */
       emit_method_cname(c, &c->scopes[target], b);
       buf_puts(b, "(");
-      for (int k = 0; k < argc; k++) { if (k) buf_puts(b, ", "); emit_expr(c, argv[k], b); }
+      for (int k = 0; k < argc; k++) {
+        if (k) buf_puts(b, ", ");
+        if (k < c->scopes[target].nparams) emit_arg_or_default(c, &c->scopes[target], k, argv[k], b);
+        else emit_expr(c, argv[k], b);
+      }
       buf_puts(b, ")");
       return;
     }
