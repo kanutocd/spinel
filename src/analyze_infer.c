@@ -1238,7 +1238,18 @@ else {
       char base[256];
       if (ln - 1 < sizeof base) {
         memcpy(base, name, ln - 1); base[ln - 1] = '\0';
-        if (comp_writer_in_chain(c, cid, base, NULL) && argc >= 1) return infer_type(c, argv[0]);
+        int wdefc = -1;
+        if (comp_writer_in_chain(c, cid, base, &wdefc) && argc >= 1) {
+          TyKind rhsk = infer_type(c, argv[0]);
+          /* codegen boxes a scalar rhs into a poly ivar slot, so the assignment
+             expression's C value is that boxed poly -- report poly to match. */
+          char wivn[258]; snprintf(wivn, sizeof wivn, "@%s", base);
+          int wcid = wdefc < 0 ? cid : wdefc;
+          int wivx = comp_ivar_index(&c->classes[wcid], wivn);
+          TyKind wivt = wivx >= 0 ? c->classes[wcid].ivar_types[wivx] : TY_UNKNOWN;
+          if (wivt == TY_POLY && rhsk != TY_POLY) return TY_POLY;
+          return rhsk;
+        }
       }
     }
     int mi = comp_method_in_chain(c, cid, name, NULL);
