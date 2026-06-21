@@ -2812,7 +2812,10 @@ else {
                       : !strcmp(op, "-") ? "sp_poly_sub"
                       : !strcmp(op, "*") ? "sp_poly_mul"
                       : !strcmp(op, "/") ? "sp_poly_div" : NULL;
+      int bitop = op && (!strcmp(op, "<<") || !strcmp(op, ">>") || !strcmp(op, "&") ||
+                         !strcmp(op, "|") || !strcmp(op, "^") || !strcmp(op, "%"));
       if (pfn) { buf_printf(b, "%s = %s(%s, ", ref, pfn, ref); emit_boxed(c, v, b); buf_puts(b, ");\n"); }
+      else if (bitop) { buf_printf(b, "%s = sp_box_int(sp_poly_to_i(%s) %s ", ref, ref, op); emit_int_expr(c, v, b); buf_puts(b, ");\n"); }
       else { buf_printf(b, "%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ";\n"); }
     }
     else {

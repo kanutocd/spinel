@@ -2647,11 +2647,13 @@ TyKind infer_uncached(Compiler *c, int id) {
     int idx = nm ? comp_cvar_index(&c->classes[cid], nm) : -1;
     return idx >= 0 ? c->classes[cid].cvar_types[idx] : TY_UNKNOWN;
   }
-  if (nk == NK_ClassVariableOperatorWriteNode || nk == NK_ClassVariableWriteNode) {
-    /* `@@x op= v` / `@@x = v` writes the cvar and yields the stored value, which
-       the codegen coerces to the cvar's slot type (poly when widened under
-       promote) -- so the expression's type is the cvar's, not v's. (For a
-       non-widened cvar this equals v's type, so default mode is unchanged.) */
+  if (nk == NK_ClassVariableOperatorWriteNode || nk == NK_ClassVariableWriteNode ||
+      nk == NK_ClassVariableOrWriteNode || nk == NK_ClassVariableAndWriteNode) {
+    /* `@@x op= v` / `@@x = v` / `@@x ||= v` / `@@x &&= v` write the cvar and yield
+       the stored value, which the codegen coerces to the cvar's slot type (poly
+       when widened under promote) -- so the expression's type is the cvar's, not
+       v's. (For a non-widened cvar this equals v's type, so default mode is
+       unchanged.) */
     const char *nm = nt_str(nt, id, "name");
     Scope *s = comp_scope_of(c, id);
     int cid = s ? s->class_id : -1;
@@ -2660,9 +2662,6 @@ TyKind infer_uncached(Compiler *c, int id) {
     if (idx >= 0) return c->classes[cid].cvar_types[idx];
     return infer_type(c, nt_ref(nt, id, "value"));
   }
-  if (nk == NK_ClassVariableOrWriteNode ||
-      nk == NK_ClassVariableAndWriteNode)
-    return infer_type(c, nt_ref(nt, id, "value"));
   if (nk == NK_IndexOrWriteNode || nk == NK_IndexAndWriteNode) {
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) return TY_UNKNOWN;

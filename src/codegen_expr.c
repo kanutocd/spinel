@@ -728,7 +728,10 @@ void emit_expr(Compiler *c, int id, Buf *b) {
                       : !strcmp(op, "-") ? "sp_poly_sub"
                       : !strcmp(op, "*") ? "sp_poly_mul"
                       : !strcmp(op, "/") ? "sp_poly_div" : NULL;
+      int bitop = op && (!strcmp(op, "<<") || !strcmp(op, ">>") || !strcmp(op, "&") ||
+                         !strcmp(op, "|") || !strcmp(op, "^") || !strcmp(op, "%"));
       if (pfn) { buf_printf(b, "(%s = %s(%s, ", ref, pfn, ref); emit_boxed(c, v, b); buf_puts(b, "))"); }
+      else if (bitop) { buf_printf(b, "(%s = sp_box_int(sp_poly_to_i(%s) %s ", ref, ref, op); emit_int_expr(c, v, b); buf_puts(b, "))"); }
       else { buf_printf(b, "(%s %s= ", ref, op ? op : "+"); emit_expr(c, v, b); buf_puts(b, ")"); }
     }
     else {
@@ -745,8 +748,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (cid < 0) cid = comp_class_index(c, "Toplevel");
     if (cid < 0) { unsupported(c, id, "class variable or-write (no class scope)"); return; }
     char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
-    buf_printf(b, "(%s ? %s : (%s = ", ref, ref, ref);
-    emit_expr(c, v, b); buf_puts(b, "))");
+    int oidx = comp_cvar_index(&c->classes[cid], nm);
+    if (oidx >= 0 && c->classes[cid].cvar_types[oidx] == TY_POLY) {
+      buf_printf(b, "(sp_poly_truthy(%s) ? %s : (%s = ", ref, ref, ref);
+      emit_boxed(c, v, b); buf_puts(b, "))");
+    }
+    else { buf_printf(b, "(%s ? %s : (%s = ", ref, ref, ref); emit_expr(c, v, b); buf_puts(b, "))"); }
     return;
   }
   if (!strcmp(ty, "ClassVariableAndWriteNode")) {
@@ -757,8 +764,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (cid < 0) cid = comp_class_index(c, "Toplevel");
     if (cid < 0) { unsupported(c, id, "class variable and-write (no class scope)"); return; }
     char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[cid].name, nm + 2);
-    buf_printf(b, "(%s ? (%s = ", ref, ref);
-    emit_expr(c, v, b); buf_puts(b, ") : 0)");
+    int aidx = comp_cvar_index(&c->classes[cid], nm);
+    if (aidx >= 0 && c->classes[cid].cvar_types[aidx] == TY_POLY) {
+      buf_printf(b, "(sp_poly_truthy(%s) ? (%s = ", ref, ref);
+      emit_boxed(c, v, b); buf_puts(b, ") : sp_box_nil())");
+    }
+    else { buf_printf(b, "(%s ? (%s = ", ref, ref); emit_expr(c, v, b); buf_puts(b, ") : 0)"); }
     return;
   }
   if (!strcmp(ty, "GlobalVariableReadNode")) {
