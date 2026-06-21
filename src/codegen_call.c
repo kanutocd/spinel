@@ -8213,8 +8213,12 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_printf(b, " case %d: ", k);
           if (method_is_void(&c->scopes[mi])) buf_puts(b, call);  /* void: no usable value */
           else {
+            TyKind slotty = is_scalar_ret(ret) ? ret : TY_INT;
             buf_printf(b, "_t%d = ", tr);
             if (ret == TY_POLY && c->scopes[mi].ret != TY_POLY) emit_boxed_text(c, c->scopes[mi].ret, call, b);
+            /* The slot is scalar (e.g. a length dispatch fixed to mrb_int) but
+               this class's method widened its return to poly: coerce down. */
+            else if (ret != TY_POLY && c->scopes[mi].ret == TY_POLY) emit_unbox_text(c, slotty, call, b);
             else buf_puts(b, call);
           }
           buf_puts(b, "; break;");
