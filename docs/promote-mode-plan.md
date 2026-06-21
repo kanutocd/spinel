@@ -122,7 +122,19 @@ full int→poly widen pass(79709207)を土台に、ERR(=C compile fail の境界
   - **obj op-assign user-operator arg box(codegen_stmt)**: `slot OP= rhs`(obj slot + user OP)の rhs temp を OP param が poly のとき box。op_assign_user_operator + sibling。
   - **loop{} poly result(codegen_call)**: expression-position `loop{ break v }` の result temp を `default_value()` で init(NULL→sp_box_nil())+ `g_ie_res_poly` で scalar break を box。i916。
   - **constant cascade(analyze)= step (5)**: `COUNT = obj.m` でメソッド ret が widen したとき int 定数 slot を poly に追従。bare_module_body_cmethod_call。
-  - **残 ERR=15(959 時点)**: block2(no-block yield in poly value-if、深い inline 経路)/ bm_instance_eval/instance_exec_trampoline_result(B6 poly→int の forward-block param 束縛)/ instance_eval_block_params/bundle_classd_04(B1)/ bound_method_single_eval(sp_poly_puts arg)/ bundle_class_06(emit_hash_key stale)/ compile_time_define_method_int(define_method subst return)/ class_method_open_class_call(sp_Integer undeclared)/ recursive_implicit_yield_value(sp_box_str int-conv)/ float_round_nonliteral(float aggregate)/ clamp_bounds/integer_div_by_zero(front-end)/ fiber_capture_no_leak_to_sibling/i1007(ld error)。**FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
+  - **959→965+ 続行(さらに 9 commit、default 992/0/0+optcarrot 59662 維持)**:
+    - **define_method subst literal を poly-return tail で box**: `define_method("m_#{n}"){ n }` 合成メソッドの ret が widen → subst literal(int)を box。tail box 判定を subst node の型で sizing。compile_time_define_method_int。
+    - **poly-ivar attr-writer infer=poly**: `obj.attr = v` の値は C 代入結果=boxed poly。infer が rhs(int)型を返していた → ivar poly なら poly 返し。instance_eval 末尾 setter の result temp sizing 一致。bm_instance_eval。
+    - **instance_eval ivar-write を rebound class で解決**: splice 内 block scope は class_id 無し → `@v=42` の ivar 型 UNKNOWN(box skip + infer rhs 型)。g_ie_class_id(codegen)/an_ie_class_id(analyze)で解決。instance_eval_block_params。
+    - **instance_eval/exec call node 自身を rebound scope で再 infer**: post-fixpoint 再 infer は body だけ更新、call node 型は stale → truthiness consumer が int-nil form を poly に。`infer_type(c,id)` 追加。bundle_classd_04。
+    - **value-form hash `[]=` の poly key を unbox**: `h[k]=v`(式)の key が emit_expr 生 → typed-key hash setter に poly。emit_hash_key 経由化。bundle_class_06(-Werror 検出、make test は lenient で見逃す)。
+    - **Float#round/ceil/floor/truncate の poly ndigits unbox**: `(double)(poly)` aggregate error → emit_int_expr。float_round_nonliteral。
+  - **★ make-test promote count は -Werror 無しで lenient + 並列 compile timeout で flaky**(同一 binary 再実行で ±1 揺れる)。各 fix の確証は `/tmp/ptest.sh`(-Werror, deterministic)。**default 992/0/0 + optcarrot 59662 が hard gate、両者は全 commit で緑維持**。
+  - **残 ERR ~9(965+ 時点、deterministic)= 深い構造/front-end/linker**:
+    - 深い構造(5): **block2**(no-block yield の raw mrb_int carrier を poly value-if で box、inline 経路)/ **bound_method_single_eval**(object-bound `.call` の ABI: args も poly param に box 要、return cast だけでは ERR→FAIL 悪化で revert 済)/ **class_method_open_class_call**(poly dispatch が reopened-primitive Integer を `(sp_Integer*)` cast、`__oc_Integer_*` value-ABI 要)/ **instance_exec_trampoline_result**(forward-block `&b` param 束縛が is_exec 経路を通らず別 path、unbox 未適用)/ **recursive_implicit_yield_value**(lowered-yield の raw mrb_int carrier を string/int 両用 block で sp_box_str 誤選択)。
+    - front-end(2): clamp_bounds(`unsupported p argument`)/ integer_div_by_zero(`unsupported operator assignment`)。promote 以前の未対応構文。
+    - linker(2): fiber_capture_no_leak_to_sibling / i1007(ld error)。
+    - **FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
 
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
