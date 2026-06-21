@@ -1910,7 +1910,10 @@ static void emit_ret_nil(Compiler *c, TyKind t, Buf *b) {
    any other emission (e.g. a poly-dispatch `({...})`) is passed through
    unchanged. */
 static void emit_tail_value(Compiler *c, int node, Buf *b) {
-  if (g_ret_type == TY_POLY) { emit_expr(c, node, b); return; }
+  /* A poly tail slot (a poly return, or a poly result var -- e.g. an inlined
+     method's result temp) takes the value as-is: do not rewrite a poly
+     `sp_box_nil()` into the scalar emit_ret_nil(g_ret_type) form below. */
+  if (g_ret_type == TY_POLY || (g_result_var && g_result_poly)) { emit_expr(c, node, b); return; }
   /* An empty `{}` literal defaults to StrPolyHash, but in a hash-returning tail
      it must take the return type (e.g. a SymPolyHash-returning method whose
      other branch is `{ a: 1 }`); otherwise the StrPolyHash* return is an

@@ -656,7 +656,12 @@ void emit_expr(Compiler *c, int id, Buf *b) {
       emit_proc_call_args(c, yargc, yargv, b);
       return;
     }
-    if (g_block_id < 0) { buf_puts(b, "SP_INT_NIL"); return; }  /* no block: yield is nil */
+    if (g_block_id < 0) {  /* no block: yield is nil */
+      /* box the sentinel when the yield value feeds a poly slot (its method
+         return widened to poly in promote mode) */
+      buf_puts(b, comp_ntype(c, id) == TY_POLY ? "sp_box_nil()" : "SP_INT_NIL");
+      return;
+    }
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1);
     return;
   }
