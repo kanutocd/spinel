@@ -142,7 +142,16 @@ full int→poly widen pass(79709207)を土台に、ERR(=C compile fail の境界
     - **recursive_implicit_yield_value**: lowered-yield の raw mrb_int carrier が string/int 両用 block で型判別不能 → `sp_box_str(mrb_int)` 誤選択。carrier に型 tag を持たせる ABI 変更要。
     - **FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
 
-  **★セッション総括(940→971、ERR 33→3)**: emission-site の box/unbox coercion + post-widen fixpoint の cascade(array-local step4 / 定数 step5)+ instance_exec/eval の rebound-scope 解決(ivar-write/call-node 再 infer/forward-block param scope)+ poly dispatch の双方向 coerce + runtime helper 追加(sp_poly_clamp)で系統的に潰した。残 3 は全て「lowered-yield / bound-method の raw mrb_int carrier」由来で、ABI に型情報を載せる構造変更が前提。**hard gate(default 992/0/0 + optcarrot 59662)は全 commit で緑**。make-test promote count は -Werror 無し + 並列 timeout で flaky、確証は `/tmp/ptest.sh`。
+  **★セッション総括(940→971、ERR 33→3)**: emission-site の box/unbox coercion + post-widen fixpoint の cascade(array-local step4 / 定数 step5)+ instance_exec/eval の rebound-scope 解決(ivar-write/call-node 再 infer/forward-block param scope)+ poly dispatch の双方向 coerce + runtime helper 追加(sp_poly_clamp)で系統的に潰した。**hard gate(default 992/0/0 + optcarrot 59662)は全 commit で緑**。make-test promote count は -Werror 無し + 並列 timeout で flaky、確証は `/tmp/ptest.sh`。
+
+- **971→973 続行(ERR 3→1、残 1 = recursive_implicit_yield_value のみ)**:
+  - **block2 CLOSED**: no-block の inline yield が poly value-if/inline tail で `0`(int)を poly slot へ。**真因 = `emit_tail_value` が文字列 `"sp_box_nil()"` を `emit_ret_nil(g_ret_type)`(=scalar)に書き換える特例**(g_result_var の poly を無視)。2 段修正: yield emit を `comp_ntype==POLY` で `sp_box_nil()` 化 + `emit_tail_value` を `g_result_poly` 時は as-is pass-through。
+  - **bound_method_single_eval CLOSED**: object-bound `.call` が `mrb_int(*)(void*, mrb_int...)` 固定 ABI で、widen 後の poly param/ret を truncate(0 返し)。**target が静的解決できる時はその実 return/param C 型で fn pointer を cast + `emit_arg_or_default` で arg coerce**。default mode は非 widen で同一コード(回帰なし)。
+  - **★残 ERR=1 = recursive_implicit_yield_value(深い multi-pass ABI、本セッションで root cause 確定・修正は scope 外と判断)**:
+    - 症状: `countdown` が string block(`{"done"}`)と int block(`{42}`)両方から呼ばれ、return 型は poly に unify。だが lowered-yield の `yield`=`sp_proc_call(__yblk__)` は raw mrb_int を返し、call-site block proc(`_proc_N`)も raw 値(int は素・string は ptr→mrb_int cast)を返すため、`return yield` の box で string/int を判別できず `sp_box_str(mrb_int)` 誤選択。
+    - **修正の必要 3 点(個別には実装、しかし pass 順序で不成立)**: ①`method_call_ret`/`yield_value_type` を lowered-yield で全 call-site unify(現状は「per-call-site 特殊化」前提で first block 型を break-採用 → 単一コンパイルの実態と不一致)②call-site block proc を poly-ret 化(`_sp_proc_poly_ret` に box、codegen.c:1084 の `blk_ret==POLY` 機構が既存)③lowered yield emit が `_sp_proc_poly_ret` を読む。
+    - **★ブロッカー = pass 順序**: `blk_ret` を計算する `infer_return_types`(analyze_pass.c:3699)時点で **lowered-yield 化(`blk_param="__yblk__"` 設定、analyze.c:1992+)がまだ走っておらず**、countdown の `blk_param` が NULL → blk_ret 計算自体が lowered-yield scope を一切見ない(debug 確認: 該当 pass で blk_param 付き scope が 0 件)。よって ②の前提(blk_ret==POLY)が成立しない。**真の修正は blk_ret 計算を lowering 後に動かす(or lowering pass 内で計算)+ ②③ の協調**で、analyzer の pass 順序に踏み込む構造変更。siblings(proc/block2/forward_args_block 等)は本試行で回帰なしを確認済だが、本丸は未収束のため revert・clean 維持。
+    - **FAIL=19** はコンパイル通るが出力差(attr=promote-mode crash 等、別途)。
 
 ### (参考)legacy 方式
 legacy backend(`legacy/spinel_codegen.rb` L55, L3037-3203)は promote で全 int slot を `sp_Bigint*` に widen(method ABI = `(void*, sp_Bigint*...) -> sp_Bigint*`)。採用せず(上記理由)。
