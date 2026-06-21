@@ -8352,6 +8352,18 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, " case SP_BUILTIN_SYM_POLY_HASH: _t%d = %s((sp_SymPolyHash *)_t%d.v.p)->len == 0%s; break;", tr, ebopen, tv, ebclose);
         buf_printf(b, " case SP_BUILTIN_STR_POLY_HASH: _t%d = %s((sp_StrPolyHash *)_t%d.v.p)->len == 0%s; break;", tr, ebopen, tv, ebclose);
       }
+      /* to_s / inspect are universal: a poly value that is a builtin scalar
+         (int, float, string, ...) rather than one of the enumerated user
+         classes still answers them. Without a default arm the result stayed
+         the empty-string default, so `@x.to_s` on a poly-widened int printed
+         blank. Route the fallthrough through the runtime poly converter. */
+      if (!strcmp(name, "to_s") || !strcmp(name, "inspect")) {
+        const char *pfn = !strcmp(name, "to_s") ? "sp_poly_to_s" : "sp_poly_inspect";
+        buf_printf(b, " default: _t%d = ", tr);
+        if (ret == TY_POLY) buf_printf(b, "sp_box_str(%s(_t%d))", pfn, tv);
+        else buf_printf(b, "%s(_t%d)", pfn, tv);
+        buf_puts(b, "; break;");
+      }
       buf_printf(b, " } _t%d; })", tr);
       return;
     }
@@ -8361,8 +8373,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
      and call the matching user method (or a builtin array `[]`), passing the
      arguments evaluated once into temps. */
   if (recv >= 0 && rt == TY_POLY && argc > 0) {
-    /* the builtin-array `[]` arm only applies to an integer index */
-    int is_index = !strcmp(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_INT;
+    /* the builtin-array `[]` / Integer#[] bit-ref arm applies to an integer
+       index; in promote mode that index variable may have widened to poly, so
+       accept poly too (the index is unboxed where it is used below). */
+    int is_index = !strcmp(name, "[]") && argc == 1 &&
+                   (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY);
     int is_include = (!strcmp(name, "include?") || !strcmp(name, "member?") ||
                       !strcmp(name, "has_key?") || !strcmp(name, "key?")) && argc == 1;
     int ncand = 0;
@@ -8398,12 +8413,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       /* include? on a TAG_STR receiver: check tag before entering cls_id switch */
       if (is_include && infer_type(c, argv[0]) == TY_STRING)
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR) { _t%d = sp_str_include(_t%d.v.s, _t%d); } else ", tv, tr, tv, atmp[0]);
+      /* The builtin index/bit-ref arms use the index as a raw mrb_int; unbox it
+         when the index temp widened to poly (promote mode). */
+      char idxref[64];
+      if (is_index && atmp_ty[0] == TY_POLY) snprintf(idxref, sizeof idxref, "sp_poly_to_i(_t%d)", atmp[0]);
+      else snprintf(idxref, sizeof idxref, "_t%d", atmp[0]);
       /* Integer#[N] bit-extraction: poly recv may hold a tagged int */
       if (is_index) {
         if (ret == TY_POLY)
-          buf_printf(b, "if (_t%d.tag == SP_TAG_INT) { _t%d = sp_box_int((_t%d.v.i >> _t%d) & 1); } else ", tv, tr, tv, atmp[0]);
+          buf_printf(b, "if (_t%d.tag == SP_TAG_INT) { _t%d = sp_box_int((_t%d.v.i >> %s) & 1); } else ", tv, tr, tv, idxref);
         else
-          buf_printf(b, "if (_t%d.tag == SP_TAG_INT) { _t%d = (_t%d.v.i >> _t%d) & 1; } else ", tv, tr, tv, atmp[0]);
+          buf_printf(b, "if (_t%d.tag == SP_TAG_INT) { _t%d = (_t%d.v.i >> %s) & 1; } else ", tv, tr, tv, idxref);
       }
       buf_printf(b, "switch (_t%d.cls_id) {", tv);
       for (int k = 0; k < c->nclasses; k++) {
@@ -8452,13 +8472,13 @@ else {
       }
       if (is_index) {
         if (ret == TY_POLY) {
-          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_box_int(sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
-          buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = sp_box_str(sp_StrArray_get((sp_StrArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
-          buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = sp_box_float(sp_FloatArray_get((sp_FloatArray *)_t%d.v.p, _t%d)); break;", tr, tv, atmp[0]);
-          buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = sp_PolyArray_get((sp_PolyArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_box_int(sp_IntArray_get((sp_IntArray *)_t%d.v.p, %s)); break;", tr, tv, idxref);
+          buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = sp_box_str(sp_StrArray_get((sp_StrArray *)_t%d.v.p, %s)); break;", tr, tv, idxref);
+          buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = sp_box_float(sp_FloatArray_get((sp_FloatArray *)_t%d.v.p, %s)); break;", tr, tv, idxref);
+          buf_printf(b, " case SP_BUILTIN_POLY_ARRAY: _t%d = sp_PolyArray_get((sp_PolyArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
         }
         else {
-          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, _t%d); break;", tr, tv, atmp[0]);
+          buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = sp_IntArray_get((sp_IntArray *)_t%d.v.p, %s); break;", tr, tv, idxref);
         }
       }
       if (is_include) {
