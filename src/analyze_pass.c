@@ -3143,15 +3143,14 @@ int infer_block_params(Compiler *c) {
         nt_ref(nt, recv, "block") < 0) {
       int es_recv2 = nt_ref(nt, recv, "receiver");
       TyKind arr_t2 = es_recv2 >= 0 ? infer_type(c, es_recv2) : TY_UNKNOWN;
-      int is_cons2 = !strcmp(nt_str(nt, recv, "name"), "each_cons");
       if (ty_is_array(arr_t2)) {
         Scope *es2 = comp_scope_of(c, block);
         int np2 = 0; while (block_param_name(c, block, np2)) np2++;
-        /* each_cons binds the n-window (array); each_slice binds the slice
-           (array) for a single param `|s|`, or destructures into elements when
-           there are several params `|a, b|`. A single destructured param
-           `|(a, b)|` over either splits the window/slice into its elements. */
-        TyKind bp_t2 = is_cons2 ? arr_t2 : (np2 == 1 ? arr_t2 : ty_array_elem(arr_t2));
+        /* each_cons and each_slice bind the n-window / slice (an array) for a
+           single param `|w|`, or destructure it into elements for several
+           params `|a, b|` (matching the codegen, which binds element pj when
+           np > 1). A single destructured param `|(a, b)|` splits it likewise. */
+        TyKind bp_t2 = (np2 == 1 ? arr_t2 : ty_array_elem(arr_t2));
         if (bp_t2 != TY_UNKNOWN) {
           if (np2 == 0 && block_param_is_multi(c, block, 0)) {
             /* |(a, b)| destructuring: each leaf gets element type */
