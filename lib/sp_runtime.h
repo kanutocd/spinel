@@ -66,10 +66,6 @@ static int sp_bt_n = 0;
 #include "sp_gc.h"
 /* sp_Fiber + the Fiber API; the bodies live in libspinel_rt.a (lib/sp_fiber.c). */
 #include "sp_fiber.h"
-/* sp_Proc / sp_BoundMethod / curry / compose structs + the hot inline
-   sp_proc_call; the cold lifecycle helpers live in libspinel_rt.a
-   (lib/sp_proc.c). sp_proc_parameters stays below (uses inline array helpers). */
-#include "sp_proc.h"
 static const char *sp_sym_to_s(sp_sym id);
 /* Capacity of the runtime symbol-intern pool the generated TU declares
    (sp_dyn_syms). 8 bytes/entry, so the default is a 64 KB static buffer holding
@@ -3681,8 +3677,8 @@ static sp_RbVal sp_poly_arr_get(sp_RbVal a, mrb_int i) {
 /* Issues #770, #789: NULL + bounds guard. Out-of-range set no-ops. */
 static void sp_PolyArray_set(sp_PolyArray *a, mrb_int i, sp_RbVal v) { if (!a) return; if (a->frozen) { sp_raise_frozen_array(); return; } mrb_int orig=i; if (i < 0) i += a->len; if (i < 0) sp_raise_cls("IndexError", sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len)); if (i >= a->len) return; a->data[i] = v; }
 static sp_PolyArray *sp_PolyArray_slice(sp_PolyArray *a, mrb_int start, mrb_int len) { if (start < 0) start += a->len; if (start < 0) start = 0; sp_PolyArray *b = sp_PolyArray_new(); if (start >= a->len || len <= 0) return b; if (start + len > a->len) len = a->len - start; for (mrb_int i = 0; i < len; i++) sp_PolyArray_push(b, a->data[start + i]); return b; }
-/* 2-arg slice on a poly receiver: dispatch to the typed slice functions.
-   (sp_BoundMethod is defined in sp_proc.h.) */
+/* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
+typedef struct sp_BoundMethod { void *self; mrb_int fn; const char *name; } sp_BoundMethod;
 static sp_RbVal sp_poly_slice(sp_RbVal a, mrb_int start, mrb_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
@@ -5698,12 +5694,77 @@ static sp_PtrArray *sp_PtrArray_slice_bang(sp_PtrArray *a, mrb_int from, mrb_int
   return r;
 }
 
-/* sp_Proc / sp_BoundMethod structs, the hot inline sp_proc_call, and the cold
-   lifecycle helpers (sp_proc_new*, arity, lambda_p, lambda_arity_check,
-   bound_method_new, compose, curry, hashproc) live in sp_proc.h /
-   libspinel_rt.a (lib/sp_proc.c). sp_proc_parameters stays here because it
-   builds an sp_PolyArray via the hot static-inline array/box helpers. */
+typedef struct sp_Proc { void *fn; void *cap; void (*cap_scan)(void *); mrb_int arity; mrb_bool lambda_p; mrb_int param_count; const sp_sym *param_kinds; const sp_sym *param_names; } sp_Proc;
+static void sp_Proc_scan(void *p) { sp_Proc *pr = (sp_Proc *)p; if (pr->cap && pr->cap_scan) pr->cap_scan(pr->cap); }
+static sp_Proc *sp_proc_new_meta(void *fn, void *cap, void (*cap_scan)(void *), mrb_int arity, mrb_bool lambda_p, mrb_int param_count, const sp_sym *param_kinds, const sp_sym *param_names) { sp_Proc *p = (sp_Proc *)sp_gc_alloc(sizeof(sp_Proc), NULL, sp_Proc_scan); p->fn = fn; p->cap = cap; p->cap_scan = cap_scan; p->arity = arity; p->lambda_p = lambda_p; p->param_count = param_count; p->param_kinds = param_kinds; p->param_names = param_names; return p; }
+static sp_Proc *sp_proc_new(void *fn, void *cap, void (*cap_scan)(void *)) { return sp_proc_new_meta(fn, cap, cap_scan, 0, FALSE, 0, NULL, NULL); }
+
+/* Bound Method object: `obj.method(:foo)` / `method(:foo)`. `self` is the
+   bound receiver (NULL for a top-level method), `fn` the function address
+   (cast to the right signature at the call site), `name` the method name
+   (a string literal). Only `self` is GC-managed. */
+static void sp_BoundMethod_scan(void *p) { sp_BoundMethod *m = (sp_BoundMethod *)p; if (m->self) sp_gc_mark(m->self); }
+static sp_BoundMethod *sp_bound_method_new(void *self, mrb_int fn, const char *name) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->fn = fn; m->name = name; return m; }
+static mrb_int sp_proc_arity(sp_Proc *p) { return p ? p->arity : 0; }
+static mrb_bool sp_proc_lambda_p(sp_Proc *p) { return p ? p->lambda_p : FALSE; }
+static mrb_int sp_proc_call(sp_Proc *p, mrb_int argc, mrb_int *args) { if (!p || !p->fn) return 0; if (!args) { mrb_int noargs[16] = {0}; return ((mrb_int (*)(void *, mrb_int, mrb_int *))p->fn)(p->cap, 0, noargs); } return ((mrb_int (*)(void *, mrb_int, mrb_int *))p->fn)(p->cap, argc, args); }
+/* Lambda strict-arity check: raise ArgumentError if argc is outside
+   [req, req+opt] (no upper bound with a rest param). Procs are lenient. */
+static void sp_proc_lambda_arity_check(mrb_int argc, mrb_int req, mrb_int opt, mrb_bool has_rest) {
+  if (argc < req || (!has_rest && argc > req + opt)) sp_raise_cls("ArgumentError", "wrong number of arguments");
+}
 static sp_PolyArray *sp_proc_parameters(sp_Proc *p) { sp_PolyArray *r = sp_PolyArray_new(); if (!p || p->param_count <= 0 || !p->param_kinds) return r; SP_GC_ROOT(r); for (mrb_int i = 0; i < p->param_count; i++) { sp_PolyArray *pair = sp_PolyArray_new(); sp_PolyArray_push(pair, sp_box_sym(p->param_kinds[i])); if (p->param_names && p->param_names[i] >= 0) sp_PolyArray_push(pair, sp_box_sym(p->param_names[i])); sp_PolyArray_push(r, sp_box_poly_array(pair)); } return r; }
+
+/* Proc#<< / Proc#>> composition. The composed proc captures the two
+   operands and, on call, threads its single argument through inner
+   then outer: `(f << g).call(x)` == f(g(x)). For `>>` the codegen
+   swaps the operands so `(f >> g).call(x)` == g(f(x)). */
+typedef struct { sp_Proc *outer; sp_Proc *inner; } sp_ProcCompose;
+static void sp_proc_compose_scan(void *p) { sp_ProcCompose *c = (sp_ProcCompose *)p; if (c->outer) sp_gc_mark(c->outer); if (c->inner) sp_gc_mark(c->inner); }
+static mrb_int sp_proc_compose_fn(void *cap, mrb_int argc, mrb_int *args) {
+  sp_ProcCompose *c = (sp_ProcCompose *)cap;
+  mrb_int inner_args[16] = {0};
+  if (args && argc > 0) inner_args[0] = args[0];
+  mrb_int mid = sp_proc_call(c->inner, 1, inner_args);
+  mrb_int outer_args[16] = {0};
+  outer_args[0] = mid;
+  return sp_proc_call(c->outer, 1, outer_args);
+}
+static sp_Proc *sp_proc_compose(sp_Proc *outer, sp_Proc *inner) {
+  sp_ProcCompose *c = (sp_ProcCompose *)sp_gc_alloc(sizeof(sp_ProcCompose), NULL, sp_proc_compose_scan);
+  c->outer = outer;
+  c->inner = inner;
+  return sp_proc_new_meta((void *)sp_proc_compose_fn, c, sp_proc_compose_scan, 1, TRUE, 1, NULL, NULL);
+}
+/* Proc#curry: an immutable argument accumulator over an sp_Proc target.
+   `proc.curry` makes an empty accumulator; each `[arg]` returns a fresh
+   accumulator with `arg` appended; the fully-applied value is realized
+   by calling the target with the collected (mrb_int) arguments. Spinel
+   defers the call to the point of use (sp_curry_to_int), so a partial
+   curry behaves as a deferred call rather than auto-invoking at arity. */
+typedef struct { sp_Proc *target; mrb_int nargs; mrb_int args[16]; } sp_Curry;
+static void sp_curry_scan(void *p) { sp_Curry *c = (sp_Curry *)p; if (c->target) sp_gc_mark(c->target); }
+static sp_Curry *sp_curry_new(sp_Proc *p) {
+  sp_Curry *c = (sp_Curry *)sp_gc_alloc(sizeof(sp_Curry), NULL, sp_curry_scan);
+  c->target = p; c->nargs = 0;
+  return c;
+}
+static sp_Curry *sp_curry_apply(sp_Curry *c, mrb_int arg) {
+  sp_Curry *n = (sp_Curry *)sp_gc_alloc(sizeof(sp_Curry), NULL, sp_curry_scan);
+  *n = *c;
+  if (n->nargs < 16) n->args[n->nargs++] = arg;
+  return n;
+}
+static mrb_int sp_curry_to_int(sp_Curry *c) {
+  if (!c || !c->target) return 0;
+  return sp_proc_call(c->target, c->nargs, c->args);
+}
+
+/* Hash#to_proc cap-scan: the proc's `cap` field IS the source hash
+   (a single GC pointer), so marking it keeps the hash alive for the
+   proc's lifetime. The per-variant lookup fn is emitted by codegen
+   alongside the hash type it closes over. */
+static void sp_hashproc_cap_scan(void *p) { sp_gc_mark(p); }
 
 /* Random — per-instance PRNG. CRuby uses MT19937; spinel uses a
    portable xorshift64 (rand_r is POSIX-only, absent on MinGW), so

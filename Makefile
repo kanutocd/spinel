@@ -238,13 +238,9 @@ build/sp_io.o: lib/sp_io.c lib/sp_io.h lib/sp_gc.h lib/sp_types.h
 	@mkdir -p build
 	$(CC) -c -O2 -Wno-all $(SEC_FLAGS) -Ilib lib/sp_io.c -o build/sp_io.o
 
-build/sp_proc.o: lib/sp_proc.c lib/sp_proc.h lib/sp_types.h
-	@mkdir -p build
-	$(CC) -c -O2 -Wno-all $(SEC_FLAGS) -Ilib lib/sp_proc.c -o build/sp_proc.o
-
 SP_RT_LIB = lib/libspinel_rt.a
 
-$(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o build/sp_crypto.o build/sp_pack.o build/sp_strscan.o build/sp_time.o build/sp_core.o build/sp_net.o build/sp_system.o build/sp_gc.o build/sp_fiber.o build/sp_io.o build/sp_proc.o
+$(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o build/sp_crypto.o build/sp_pack.o build/sp_strscan.o build/sp_time.o build/sp_core.o build/sp_net.o build/sp_system.o build/sp_gc.o build/sp_fiber.o build/sp_io.o
 	ar rcs $@ $^
 
 regexp: $(SP_RT_LIB)
@@ -583,7 +579,6 @@ install: all
 	install -m 644 lib/sp_gc.h           $(SPNLDIR)/lib/
 	install -m 644 lib/sp_fiber.h         $(SPNLDIR)/lib/
 	install -m 644 lib/sp_io.h           $(SPNLDIR)/lib/
-	install -m 644 lib/sp_proc.h         $(SPNLDIR)/lib/
 	install -m 644 lib/sp_time.h         $(SPNLDIR)/lib/
 	install -m 644 lib/sp_net.h          $(SPNLDIR)/lib/
 	install -m 644 lib/*.rb              $(SPNLDIR)/lib/
