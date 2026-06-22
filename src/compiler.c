@@ -74,6 +74,7 @@ void comp_free(Compiler *c) {
   free(c->toplevel_includes);
   free(c->nscope);
   free(c->ntype);
+  free(c->node_cbody);
   free(c);
 }
 
