@@ -121,7 +121,11 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
   }
   const char *fn = NULL;
   switch (t) {
-    case TY_INT:    fn = "sp_box_int_or_nil"; break;
+    /* A nullable-int sentinel (SP_INT_NIL) only flows into a poly box under
+       --int-overflow=promote (where int? widens to poly); in default/wrap mode
+       a real int is never the sentinel, so skip the per-box check there -- it is
+       on the hot path (every int boxed into poly, e.g. optcarrot's pixels). */
+    case TY_INT:    fn = g_promote_mode ? "sp_box_int_or_nil" : "sp_box_int"; break;
     case TY_FLOAT:  fn = "sp_box_float"; break;
     case TY_BIGINT: fn = "sp_box_bigint"; break;
     case TY_STRING: fn = "sp_box_str";   break;

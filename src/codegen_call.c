@@ -237,6 +237,12 @@ static int warn_unresolved_pos(Compiler *c, int id) {
    sentinel matching no case -- this keeps a plain scalar (cls_id 0) from
    aliasing a regular user class that happens to occupy index 0. */
 static void emit_poly_dispatch_key(Compiler *c, int tv, Buf *b) {
+  /* The scalar-cls_id-0 vs user-class-0 collision this guards only surfaces
+     under --int-overflow=promote (an int ivar widened to poly, then dispatched
+     -- the attr SIGSEGV). In default/wrap mode the guard is pure overhead on a
+     hot per-dispatch path (optcarrot's per-frame tick), so emit the plain
+     cls_id there, matching the pre-promote codegen. */
+  if (!g_promote_mode) { buf_printf(b, "_t%d.cls_id", tv); return; }
   static const struct { const char *tag, *cls; } P[] = {
     {"SP_TAG_INT", "Integer"}, {"SP_TAG_FLT", "Float"},
     {"SP_TAG_STR", "String"},  {"SP_TAG_SYM", "Symbol"},
