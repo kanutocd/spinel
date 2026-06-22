@@ -2469,6 +2469,8 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
       else if (!strcmp(name, "abs"))    buf_printf(b, "((%s) < 0 ? -(%s) : (%s))", r, r, r);
       else if (!strcmp(name, "chr"))    buf_printf(b, "sp_int_chr(%s)", r);
       else if (!strcmp(name, "[]") && argc == 1) { buf_printf(b, "(((%s) >> (", r); emit_expr(c, argv[0], b); buf_puts(b, ")) & 1)"); }
+      else if (!strcmp(name, "bit_length") && argc == 0) buf_printf(b, "sp_int_bit_length(%s)", r);
+      else if (!strcmp(name, "fdiv") && argc == 1) { buf_printf(b, "((mrb_float)(%s) / (", r); emit_float_expr(c, argv[0], b); buf_puts(b, "))"); }
       else if (!strcmp(name, "even?"))  buf_printf(b, "((%s) %% 2 == 0)", r);
       else if (!strcmp(name, "odd?"))   buf_printf(b, "((%s) %% 2 != 0)", r);
       else if (!strcmp(name, "zero?"))  buf_printf(b, "((%s) == 0)", r);
@@ -2610,6 +2612,19 @@ static int emit_scalar_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "; sp_FloatArray *_t%d = sp_FloatArray_new();"
                         " sp_FloatArray_push(_t%d, _t%d);"
                         " sp_FloatArray_push(_t%d, (%s)); _t%d; })", o, o, ta, o, r, o);
+        }
+      }
+      else if (!strcmp(name, "fdiv") && argc == 1) { buf_printf(b, "((%s) / (", r); emit_float_expr(c, argv[0], b); buf_puts(b, "))"); }
+      /* Float#eql?(x): true only when x is itself a Float of equal value (no
+         numeric coercion, unlike ==). A float-typed arg compares directly; any
+         other arg is boxed and rejected unless it is tagged float at runtime. */
+      else if (!strcmp(name, "eql?") && argc == 1) {
+        TyKind a0 = comp_ntype(c, argv[0]);
+        if (a0 == TY_FLOAT) { buf_printf(b, "((%s) == (", r); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+        else {
+          int te = ++g_tmp;
+          buf_printf(b, "({ sp_RbVal _t%d = ", te); emit_boxed(c, argv[0], b);
+          buf_printf(b, "; _t%d.tag == SP_TAG_FLT && _t%d.v.f == (%s); })", te, te, r);
         }
       }
       else handled = 0;
@@ -6444,6 +6459,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     else if (!strcmp(name, "cbrt"))  cfn = "cbrt";
     else if (!strcmp(name, "erf"))   cfn = "erf";
     else if (!strcmp(name, "erfc"))  cfn = "erfc";
+    else if (!strcmp(name, "gamma")) cfn = "sp_math_gamma";
     if (cfn && argc == 1) {
       TyKind a0t = comp_ntype(c, argv[0]);
       buf_printf(b, "%s(", cfn);

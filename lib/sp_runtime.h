@@ -251,6 +251,10 @@ static inline mrb_float sp_math_acos(mrb_float x){if(x<-1.0||x>1.0)sp_raise_cls(
 static inline mrb_float sp_math_asin(mrb_float x){if(x<-1.0||x>1.0)sp_raise_cls("Math_DomainError","Numerical argument is out of domain - asin");return asin(x);}
 static inline mrb_float sp_math_acosh(mrb_float x){if(x<1.0)sp_raise_cls("Math_DomainError","Numerical argument is out of domain - acosh");return acosh(x);}
 static inline mrb_float sp_math_atanh(mrb_float x){if(x<-1.0||x>1.0)sp_raise_cls("Math_DomainError","Numerical argument is out of domain - atanh");return atanh(x);}
+/* gamma has poles at the non-positive integers, but CRuby only raises at the
+   NEGATIVE integers (gamma(0.0) is +Infinity, gamma(-0.0) -Infinity, which
+   tgamma already yields); negative non-integers are in-domain. */
+static inline mrb_float sp_math_gamma(mrb_float x){if(x<0.0&&x==floor(x))sp_raise_cls("Math_DomainError","Numerical argument is out of domain - gamma");return tgamma(x);}
 
 static sp_Range sp_range_new(mrb_int f,mrb_int l,mrb_int e){sp_Range r;r.first=f;r.last=l;r.excl=e;return r;}
 static mrb_bool sp_range_eq(sp_Range a,sp_Range b){return a.first==b.first&&a.last==b.last&&a.excl==b.excl;}
@@ -1137,6 +1141,9 @@ static mrb_int sp_IntArray_delete(sp_IntArray*a,mrb_int v){if(a&&a->frozen){sp_r
    a->start and write into the array's GC header. */
 static void sp_IntArray_insert(sp_IntArray*a,mrb_int i,mrb_int v){if(!a)return;if(a->frozen){sp_raise_frozen_array();return;}if(i<0)i+=a->len+1;if(i<0)i=0;if(i>a->len)i=a->len;sp_IntArray_push(a,0);for(mrb_int j=a->len-1;j>i;j--)a->data[a->start+j]=a->data[a->start+j-1];a->data[a->start+i]=v;}
 static sp_IntArray*sp_int_digits(mrb_int n,mrb_int base){sp_IntArray*a=sp_IntArray_new();if(base<2)base=10;if(n==0){sp_IntArray_push(a,0);return a;}if(n<0)n=-n;while(n>0){sp_IntArray_push(a,n%base);n/=base;}return a;}
+/* Integer#bit_length: bits in the two's-complement representation excluding
+   the sign bit (a negative n counts the bits of ~n). */
+static mrb_int sp_int_bit_length(mrb_int n){unsigned long long x=(n<0)?(unsigned long long)(~n):(unsigned long long)n;mrb_int b=0;if(x>=1ULL<<32){b+=32;x>>=32;}if(x>=1ULL<<16){b+=16;x>>=16;}if(x>=1ULL<<8){b+=8;x>>=8;}if(x>=1ULL<<4){b+=4;x>>=4;}if(x>=1ULL<<2){b+=2;x>>=2;}if(x>=1ULL<<1){b+=1;x>>=1;}return b+(mrb_int)x;}
 static sp_IntArray*sp_IntArray_uniq(sp_IntArray*a){sp_IntArray*b=sp_IntArray_new();for(mrb_int i=0;i<a->len;i++){int found=0;for(mrb_int j=0;j<b->len;j++){if(b->data[b->start+j]==a->data[a->start+i]){found=1;break;}}if(!found)sp_IntArray_push(b,a->data[a->start+i]);}return b;}
 static sp_IntArray*sp_IntArray_intersect(sp_IntArray*a,sp_IntArray*b){sp_IntArray*r=sp_IntArray_new();if(!a||!b)return r;for(mrb_int i=0;i<a->len;i++){mrb_int v=a->data[a->start+i];if(sp_IntArray_include(b,v)&&!sp_IntArray_include(r,v))sp_IntArray_push(r,v);}return r;}
 static sp_IntArray*sp_IntArray_union(sp_IntArray*a,sp_IntArray*b){sp_IntArray*r=sp_IntArray_new();if(a)for(mrb_int i=0;i<a->len;i++){mrb_int v=a->data[a->start+i];if(!sp_IntArray_include(r,v))sp_IntArray_push(r,v);}if(b){for(mrb_int i=0;i<b->len;i++){mrb_int v=b->data[b->start+i];if(!sp_IntArray_include(r,v))sp_IntArray_push(r,v);}}return r;}
