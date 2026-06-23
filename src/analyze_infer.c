@@ -971,7 +971,8 @@ else {
          !strcmp(name, "atanh") || !strcmp(name, "exp") || !strcmp(name, "log") ||
          !strcmp(name, "log2") || !strcmp(name, "log10") || !strcmp(name, "sqrt") ||
          !strcmp(name, "cbrt") || !strcmp(name, "hypot") || !strcmp(name, "frexp") ||
-         !strcmp(name, "ldexp") || !strcmp(name, "erf") || !strcmp(name, "erfc")))
+         !strcmp(name, "ldexp") || !strcmp(name, "erf") || !strcmp(name, "erfc") ||
+         !strcmp(name, "gamma")))
       return TY_FLOAT;
     if (rty && !strcmp(rty, "ConstantReadNode") &&
         nt_str(nt, recv, "name") && !strcmp(nt_str(nt, recv, "name"), "JSON") &&
@@ -2299,6 +2300,8 @@ else {
         nt_ref(nt, id, "block") < 0) return TY_RANGE;
     if (!strcmp(name, "chr")) return TY_STRING;
     if (!strcmp(name, "[]") && argc == 1) return TY_INT;  /* bit access */
+    if (!strcmp(name, "bit_length") && argc == 0) return TY_INT;
+    if (!strcmp(name, "fdiv") && argc == 1) return TY_FLOAT;
     if (!strcmp(name, "div") && argc == 1) return TY_INT;  /* floor division */
     if (!strcmp(name, "gcd") || !strcmp(name, "lcm") || !strcmp(name, "clamp")) return TY_INT;
     if (!strcmp(name, "magnitude") && argc == 0) return TY_INT;  /* alias for abs */
@@ -2321,7 +2324,9 @@ else {
         !strcmp(name, "zero?")) return TY_BOOL;
     if (!strcmp(name, "next_float") || !strcmp(name, "prev_float") ||
         !strcmp(name, "abs") || !strcmp(name, "magnitude") ||
-        !strcmp(name, "modulo") || !strcmp(name, "to_f")) return TY_FLOAT;
+        !strcmp(name, "modulo") || !strcmp(name, "to_f") ||
+        (!strcmp(name, "fdiv") && argc == 1)) return TY_FLOAT;
+    if (!strcmp(name, "eql?") && argc == 1) return TY_BOOL;
     /* clamp with float bounds returns a float (matches codegen in codegen_call.c);
        a mixed/int bound can return the Integer bound, so leave that poly. */
     if (!strcmp(name, "clamp") && argc == 2 &&
